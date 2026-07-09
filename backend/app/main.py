@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from .llm import direct_prompt, query_ollama, rag_prompt
+from .llm import OLLAMA_MODEL, OLLAMA_NUM_PREDICT, direct_prompt, query_ollama, rag_prompt
 from .pdf_utils import chunk_text, extract_pdf_text
 from .rag import get_store
 from .schemas import ChatRequest, ChatResponse, SearchRequest, SearchResponse, StatsResponse, UploadResponse
@@ -44,6 +44,8 @@ async def health() -> dict:
         "status": "ok",
         "vector_rag_enabled": ENABLE_VECTOR_RAG,
         "ollama_api_url": os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/generate"),
+        "ollama_model": OLLAMA_MODEL,
+        "ollama_num_predict": OLLAMA_NUM_PREDICT,
     }
 
 

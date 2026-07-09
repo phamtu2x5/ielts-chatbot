@@ -9,6 +9,7 @@ from .schemas import ChatMessage
 
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/generate")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "hf.co/Zkare/Chatbot_Ielts_Assistant_v2:Q4_K_M")
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "700"))
 
 
 def format_history(history: Optional[List[ChatMessage]]) -> str:
@@ -38,7 +39,7 @@ async def query_ollama(prompt: str, temperature: float = 0.7) -> str:
             "top_p": 0.9,
             "top_k": 40,
             "num_ctx": 4096,
-            "num_predict": 1200,
+            "num_predict": OLLAMA_NUM_PREDICT,
             "repeat_penalty": 1.1,
         },
     }
@@ -66,14 +67,14 @@ Previous conversation:
 Current question:
 {message}
 
-Answer clearly and helpfully. Keep the conversation context in mind."""
+Answer clearly and concisely. Keep the conversation context in mind."""
 
     return f"""You are an IELTS preparation assistant. Help students with IELTS Reading, Listening, Writing, and Speaking.
 
 Question:
 {message}
 
-Answer clearly and helpfully."""
+Answer clearly and concisely."""
 
 
 def rag_prompt(message: str, context: str, history: Optional[List[ChatMessage]] = None) -> str:
@@ -88,5 +89,5 @@ def rag_prompt(message: str, context: str, history: Optional[List[ChatMessage]] 
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Question:\n{message}")
-    parts.append("Answer clearly and cite source file names when useful.")
+    parts.append("Answer clearly and concisely. Cite source file names when useful.")
     return "\n\n".join(parts)
