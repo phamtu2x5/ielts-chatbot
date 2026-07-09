@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Bot, FileUp, Send, Sparkles, UserRound } from "lucide-react";
+import { Bot, CheckCircle2, FileText, FileUp, Send, Sparkles, UserRound, XCircle } from "lucide-react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -25,6 +25,7 @@ const routeLabels = {
   base_model_no_rag_match: "Model chính",
   rag: "PDF RAG",
   vector_rag: "PDF RAG",
+  upload: "Tệp PDF",
   error: "Lỗi",
 };
 
@@ -39,7 +40,12 @@ function normalizeMarkdown(content) {
 
 function MessageContent({ message }) {
   if (message.role === "user") {
-    return <div className="messageText plainText">{message.content}</div>;
+    return (
+      <>
+        {message.content && <div className="messageText plainText">{message.content}</div>}
+        {message.attachment && <AttachmentCard attachment={message.attachment} />}
+      </>
+    );
   }
 
   return (
@@ -60,6 +66,28 @@ function MessageContent({ message }) {
   );
 }
 
+function AttachmentCard({ attachment }) {
+  const statusText = {
+    uploading: "Đang tải lên...",
+    ready: `${attachment.chunks || 0} đoạn đã được lập chỉ mục`,
+    error: attachment.error || "Không thể tải tệp",
+  }[attachment.status];
+
+  return (
+    <div className={`attachmentCard ${attachment.status}`}>
+      <span className="attachmentIcon">
+        <FileText size={20} />
+      </span>
+      <div className="attachmentMeta">
+        <strong>{attachment.name}</strong>
+        <span>{statusText}</span>
+      </div>
+      {attachment.status === "ready" && <CheckCircle2 className="attachmentState" size={18} />}
+      {attachment.status === "error" && <XCircle className="attachmentState" size={18} />}
+    </div>
+  );
+}
+
 function App() {
   const [messages, setMessages] = useState([
     {
@@ -70,10 +98,8 @@ function App() {
     },
   ]);
   const [input, setInput] = useState("");
-  const [useRag, setUseRag] = useState(import.meta.env.VITE_CHATBOT_DEFAULT_RAG !== "false");
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState("");
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
 
@@ -81,6 +107,7 @@ function App() {
     () =>
       messages
         .filter((message) => message.role === "user" || message.role === "assistant")
+        .filter((message) => message.content?.trim())
         .slice(-6)
         .map(({ role, content }) => ({ role, content })),
     [messages]
@@ -102,7 +129,6 @@ function App() {
     try {
       const data = await apiPost("/chat", {
         message: text,
-        use_rag: useRag,
         conversation_history: history,
       });
       setMessages((current) => [
@@ -132,8 +158,21 @@ function App() {
     const file = event.target.files?.[0];
     if (!file) return;
 
+    const uploadId = `upload-${Date.now()}-${file.name}`;
     setIsUploading(true);
-    setUploadStatus("");
+    setMessages((current) => [
+      ...current,
+      {
+        id: uploadId,
+        role: "user",
+        content: "",
+        attachment: {
+          name: file.name,
+          status: "uploading",
+        },
+      },
+    ]);
+
     const formData = new FormData();
     formData.append("file", file);
 
@@ -147,10 +186,51 @@ function App() {
         throw new Error(error.detail || "Tải PDF không thành công");
       }
       const data = await response.json();
-      setUploadStatus(`Đã xử lý ${data.chunks_processed} đoạn từ ${data.file_name}`);
-      setUseRag(true);
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === uploadId
+            ? {
+                ...message,
+                attachment: {
+                  name: data.file_name,
+                  status: "ready",
+                  chunks: data.chunks_processed,
+                },
+              }
+            : message
+        )
+      );
+      setMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content: `Mình đã đọc xong **${data.file_name}**. Bạn có thể hỏi nội dung trong tài liệu này, mình sẽ ưu tiên dùng PDF để trả lời.`,
+          route_used: "upload",
+        },
+      ]);
     } catch (error) {
-      setUploadStatus(error.message);
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === uploadId
+            ? {
+                ...message,
+                attachment: {
+                  name: file.name,
+                  status: "error",
+                  error: "Chưa xử lý được PDF",
+                },
+              }
+            : message
+        )
+      );
+      setMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content: error.message,
+          route_used: "error",
+        },
+      ]);
     } finally {
       setIsUploading(false);
       event.target.value = "";
@@ -170,25 +250,11 @@ function App() {
               <p>Trợ lý luyện IELTS chạy bằng Ollama, có hỗ trợ hỏi đáp theo PDF</p>
             </div>
           </div>
-
-          <div className="actions">
-            <label className="toggle">
-              <input type="checkbox" checked={useRag} onChange={(event) => setUseRag(event.target.checked)} />
-              <span>RAG</span>
-            </label>
-            <button className="iconButton" type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
-              <FileUp size={18} />
-              {isUploading ? "Đang tải" : "PDF"}
-            </button>
-            <input ref={fileInputRef} className="hiddenInput" type="file" accept="application/pdf" onChange={uploadPdf} />
-          </div>
         </header>
-
-        {uploadStatus && <div className="statusLine">{uploadStatus}</div>}
 
         <div className="messages">
           {messages.map((message, index) => (
-            <article key={`${message.role}-${index}`} className={`message ${message.role}`}>
+            <article key={message.id || `${message.role}-${index}`} className={`message ${message.role}`}>
               <div className="avatar">{message.role === "user" ? <UserRound size={17} /> : <Sparkles size={17} />}</div>
               <div className="bubble">
                 <MessageContent message={message} />
@@ -227,6 +293,17 @@ function App() {
         </div>
 
         <form className="composer" onSubmit={sendMessage}>
+          <button
+            className="composerIconButton"
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isUploading}
+            title="Tải PDF"
+          >
+            <FileUp size={19} />
+            <span>{isUploading ? "Đang tải" : "PDF"}</span>
+          </button>
+          <input ref={fileInputRef} className="hiddenInput" type="file" accept="application/pdf" onChange={uploadPdf} />
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from .llm import OLLAMA_MODEL, OLLAMA_NUM_PREDICT, direct_prompt, query_ollama, rag_prompt
+from .llm import OLLAMA_MODEL, OLLAMA_NUM_PREDICT, classify_route, direct_prompt, query_ollama, rag_prompt
 from .pdf_utils import chunk_text, extract_pdf_text
 from .rag import get_store
 from .schemas import ChatRequest, ChatResponse, SearchRequest, SearchResponse, StatsResponse, UploadResponse
@@ -14,7 +14,6 @@ from .schemas import ChatRequest, ChatResponse, SearchRequest, SearchResponse, S
 
 load_dotenv()
 
-ENABLE_VECTOR_RAG = os.getenv("ENABLE_VECTOR_RAG", "true").lower() not in {"0", "false", "no"}
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -40,9 +39,11 @@ def format_context(sources: list[dict]) -> str:
 
 @app.get("/health")
 async def health() -> dict:
+    stats = get_store().stats()
     return {
         "status": "ok",
-        "vector_rag_enabled": ENABLE_VECTOR_RAG,
+        "pdf_rag_documents": stats["documents"],
+        "pdf_rag_chunks": stats["chunks"],
         "ollama_api_url": os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/generate"),
         "ollama_model": OLLAMA_MODEL,
         "ollama_num_predict": OLLAMA_NUM_PREDICT,
@@ -55,10 +56,15 @@ async def chat(req: ChatRequest) -> ChatResponse:
     if not message:
         raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung câu hỏi")
 
+    store = get_store()
+    route = "direct"
     sources = []
-    if ENABLE_VECTOR_RAG and req.use_rag:
+    if store.stats()["chunks"] > 0:
+        route = await classify_route(message, req.conversation_history)
+
+    if route == "rag":
         top_k = int(os.getenv("RAG_TOP_K", "5"))
-        sources = get_store().search(message, top_k=top_k)
+        sources = store.search(message, top_k=top_k)
 
     if sources:
         prompt = rag_prompt(message, format_context(sources), req.conversation_history)
@@ -67,14 +73,12 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     prompt = direct_prompt(message, req.conversation_history)
     answer = await query_ollama(prompt)
-    route = "base_model_no_rag_match" if req.use_rag and ENABLE_VECTOR_RAG else "base_model"
-    return ChatResponse(response=answer, route_used=route, sources=None)
+    route_used = "base_model_no_rag_match" if route == "rag" else "base_model"
+    return ChatResponse(response=answer, route_used=route_used, sources=None)
 
 
 @app.post("/rag/upload-pdf", response_model=UploadResponse)
 async def upload_pdf(file: UploadFile = File(...)) -> UploadResponse:
-    if not ENABLE_VECTOR_RAG:
-        raise HTTPException(status_code=400, detail="Chức năng PDF RAG đang tắt")
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Hiện chỉ hỗ trợ tệp PDF")
 
@@ -106,8 +110,6 @@ async def upload_pdf(file: UploadFile = File(...)) -> UploadResponse:
 
 @app.post("/rag/search", response_model=SearchResponse)
 async def search(req: SearchRequest) -> SearchResponse:
-    if not ENABLE_VECTOR_RAG:
-        raise HTTPException(status_code=400, detail="Chức năng PDF RAG đang tắt")
     return SearchResponse(query=req.query, results=get_store().search(req.query, top_k=req.top_k))
 
 

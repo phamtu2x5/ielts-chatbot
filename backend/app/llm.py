@@ -40,7 +40,7 @@ def clean_response(text: str) -> str:
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 
-async def query_ollama(prompt: str, temperature: float = 0.7) -> str:
+async def query_ollama(prompt: str, temperature: float = 0.7, num_predict: Optional[int] = None) -> str:
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
@@ -50,7 +50,7 @@ async def query_ollama(prompt: str, temperature: float = 0.7) -> str:
             "top_p": 0.9,
             "top_k": 40,
             "num_ctx": 4096,
-            "num_predict": OLLAMA_NUM_PREDICT,
+            "num_predict": num_predict or OLLAMA_NUM_PREDICT,
             "repeat_penalty": 1.1,
         },
     }
@@ -88,6 +88,34 @@ Question:
 {message}
 
 Answer naturally and clearly."""
+
+
+def route_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
+    history_text = format_history(history)
+    context = f"\nPrevious conversation:\n{history_text}\n" if history_text else ""
+    return f"""You are a strict router for an IELTS chatbot.
+
+Decide whether the assistant should answer directly or use the uploaded PDF/vector knowledge base.
+
+Choose "rag" when the user asks about:
+- the uploaded PDF, file, document, material, source, lesson, or text
+- a summary, explanation, extraction, comparison, or question based on uploaded material
+- "dựa vào tài liệu", "trong file", "PDF", "nội dung trên", or similar references
+
+Choose "direct" for general IELTS advice, greetings, study plans, grammar explanations, writing/speaking tips, or anything that does not need uploaded material.
+{context}
+Current user message:
+{message}
+
+Return exactly one word: direct or rag."""
+
+
+async def classify_route(message: str, history: Optional[List[ChatMessage]] = None) -> str:
+    decision = await query_ollama(route_prompt(message, history), temperature=0.0, num_predict=8)
+    decision = decision.strip().lower()
+    if "rag" in decision and "direct" not in decision:
+        return "rag"
+    return "direct"
 
 
 def rag_prompt(message: str, context: str, history: Optional[List[ChatMessage]] = None) -> str:

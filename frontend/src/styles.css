@@ -103,6 +103,7 @@ p {
 }
 
 .iconButton,
+.composerIconButton,
 .sendButton {
   border: 0;
   border-radius: 8px;
@@ -118,6 +119,7 @@ p {
 }
 
 .iconButton:disabled,
+.composerIconButton:disabled,
 .sendButton:disabled {
   cursor: not-allowed;
   opacity: 0.6;
@@ -183,6 +185,11 @@ p {
   max-width: min(760px, 78%);
   color: #ffffff;
   background: #155eef;
+}
+
+.message.user .bubble:has(.attachmentCard) {
+  color: #172033;
+  background: #f2f4f7;
 }
 
 .plainText {
@@ -304,6 +311,80 @@ p {
   font-size: 14px;
 }
 
+.attachmentCard {
+  width: min(360px, 100%);
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  color: #172033;
+  background: #ffffff;
+}
+
+.attachmentCard.uploading {
+  border-color: #99d6cd;
+  background: #f0fdfa;
+}
+
+.attachmentCard.ready {
+  border-color: #86d5a3;
+  background: #f0fdf4;
+}
+
+.attachmentCard.error {
+  border-color: #f6b0a1;
+  background: #fff5f3;
+}
+
+.attachmentIcon {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: #0f766e;
+  background: #dff7f3;
+}
+
+.attachmentMeta {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+
+.attachmentMeta strong,
+.attachmentMeta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachmentMeta strong {
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.attachmentMeta span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.attachmentState {
+  flex: 0 0 auto;
+}
+
+.attachmentCard.ready .attachmentState {
+  color: #12a150;
+}
+
+.attachmentCard.error .attachmentState {
+  color: #d92d20;
+}
+
 @keyframes typingPulse {
   0%,
   80%,
@@ -362,10 +443,19 @@ details p {
 
 .composer {
   display: flex;
+  align-items: flex-end;
   gap: 10px;
   padding: 16px;
   border-top: 1px solid #e4e8ef;
   background: #fbfcfe;
+}
+
+.composerIconButton {
+  flex: 0 0 auto;
+  min-width: 74px;
+  color: #0f766e;
+  background: #dff7f3;
+  border: 1px solid #b9ebe4;
 }
 
 textarea {
@@ -408,6 +498,7 @@ textarea:focus {
   }
 
   .iconButton,
+  .composerIconButton,
   .sendButton {
     width: 100%;
   }

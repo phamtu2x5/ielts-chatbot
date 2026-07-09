@@ -10,7 +10,6 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
-    use_rag: bool = True
     conversation_history: Optional[List[ChatMessage]] = None
 
 
