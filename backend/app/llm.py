@@ -12,6 +12,15 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "hf.co/Zkare/Chatbot_Ielts_Assistant_v2
 OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "700"))
 
 
+ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
+Default to Vietnamese unless the user clearly asks for another language or is practicing an English answer.
+Write in a warm, natural, and coherent tutoring style.
+Open with a brief, friendly sentence when appropriate, then answer directly and explain the reasoning or steps in a logical order.
+Avoid robotic, abrupt, or overly terse phrasing.
+Use simple Markdown only when it improves readability: short headings, numbered lists, or bullet points.
+Do not expose raw Markdown syntax awkwardly, do not overuse emojis, and avoid decorative symbols such as check marks."""
+
+
 def format_history(history: Optional[List[ChatMessage]]) -> str:
     if not history:
         return ""
@@ -52,14 +61,14 @@ async def query_ollama(prompt: str, temperature: float = 0.7) -> str:
     text = data.get("response") or data.get("thinking") or ""
     text = clean_response(text)
     if not text:
-        return "I am ready to help you with IELTS preparation. Please ask a specific question."
+        return "Mình sẵn sàng hỗ trợ bạn luyện IELTS. Bạn có thể hỏi cụ thể về Reading, Listening, Writing hoặc Speaking nhé."
     return text
 
 
 def direct_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
     history_text = format_history(history)
     if history_text:
-        return f"""You are an IELTS preparation assistant.
+        return f"""{ASSISTANT_STYLE}
 
 Previous conversation:
 {history_text}
@@ -67,27 +76,29 @@ Previous conversation:
 Current question:
 {message}
 
-Answer clearly and concisely. Keep the conversation context in mind."""
+Answer naturally and keep the conversation context in mind."""
 
-    return f"""You are an IELTS preparation assistant. Help students with IELTS Reading, Listening, Writing, and Speaking.
+    return f"""{ASSISTANT_STYLE}
+
+Help students with IELTS Reading, Listening, Writing, and Speaking.
 
 Question:
 {message}
 
-Answer clearly and concisely."""
+Answer naturally and clearly."""
 
 
 def rag_prompt(message: str, context: str, history: Optional[List[ChatMessage]] = None) -> str:
     history_text = format_history(history)
     parts = [
-        "You are an IELTS preparation assistant.",
+        ASSISTANT_STYLE,
         "Use the study material context below when it is relevant.",
-        "If the context does not contain enough information, say so briefly and then give general IELTS guidance.",
+        "If the context does not contain enough information, say so briefly in Vietnamese and then give general IELTS guidance.",
         "",
         f"Study material context:\n{context}",
     ]
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Question:\n{message}")
-    parts.append("Answer clearly and concisely. Cite source file names when useful.")
+    parts.append("Answer naturally and clearly. Cite source file names when useful.")
     return "\n\n".join(parts)

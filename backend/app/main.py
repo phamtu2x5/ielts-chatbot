@@ -53,7 +53,7 @@ async def health() -> dict:
 async def chat(req: ChatRequest) -> ChatResponse:
     message = req.message.strip()
     if not message:
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
+        raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung câu hỏi")
 
     sources = []
     if ENABLE_VECTOR_RAG and req.use_rag:
@@ -74,9 +74,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
 @app.post("/rag/upload-pdf", response_model=UploadResponse)
 async def upload_pdf(file: UploadFile = File(...)) -> UploadResponse:
     if not ENABLE_VECTOR_RAG:
-        raise HTTPException(status_code=400, detail="Vector RAG is disabled")
+        raise HTTPException(status_code=400, detail="Chức năng PDF RAG đang tắt")
     if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        raise HTTPException(status_code=400, detail="Hiện chỉ hỗ trợ tệp PDF")
 
     file_path = UPLOAD_DIR / Path(file.filename).name
     async with aiofiles.open(file_path, "wb") as out:
@@ -91,7 +91,7 @@ async def upload_pdf(file: UploadFile = File(...)) -> UploadResponse:
             overlap=int(os.getenv("CHUNK_OVERLAP", "180")),
         )
         if not chunks:
-            raise HTTPException(status_code=400, detail="No text could be extracted from PDF")
+            raise HTTPException(status_code=400, detail="Không trích xuất được văn bản từ PDF")
 
         inserted = get_store().upsert(chunks, source_file=file_path.name)
         return UploadResponse(
@@ -107,7 +107,7 @@ async def upload_pdf(file: UploadFile = File(...)) -> UploadResponse:
 @app.post("/rag/search", response_model=SearchResponse)
 async def search(req: SearchRequest) -> SearchResponse:
     if not ENABLE_VECTOR_RAG:
-        raise HTTPException(status_code=400, detail="Vector RAG is disabled")
+        raise HTTPException(status_code=400, detail="Chức năng PDF RAG đang tắt")
     return SearchResponse(query=req.query, results=get_store().search(req.query, top_k=req.top_k))
 
 

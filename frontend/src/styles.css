@@ -176,12 +176,62 @@ p {
   border-radius: 8px;
   background: #f2f4f7;
   line-height: 1.55;
-  white-space: pre-wrap;
 }
 
 .message.user .bubble {
   color: #ffffff;
   background: #155eef;
+}
+
+.plainText {
+  white-space: pre-wrap;
+}
+
+.markdownText {
+  color: #172033;
+}
+
+.markdownText > :first-child {
+  margin-top: 0;
+}
+
+.markdownText > :last-child {
+  margin-bottom: 0;
+}
+
+.markdownText p {
+  margin: 0 0 10px;
+}
+
+.markdownText h1,
+.markdownText h2,
+.markdownText h3,
+.markdownText h4 {
+  margin: 14px 0 8px;
+  font-size: 16px;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+.markdownText ul,
+.markdownText ol {
+  margin: 8px 0 12px;
+  padding-left: 22px;
+}
+
+.markdownText li {
+  margin: 5px 0;
+}
+
+.markdownText strong {
+  font-weight: 700;
+}
+
+.markdownText code {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: #e4e8ef;
+  font-size: 0.94em;
 }
 
 .route {
