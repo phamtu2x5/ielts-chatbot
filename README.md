@@ -76,7 +76,7 @@ Use the companion notebook kept outside this repo in the project folder:
 Set:
 
 ```python
-REPO_URL = "https://github.com/<your-account>/ielts-chatbot"
+REPO_URL = "https://github.com/phamtu2x5/ielts-chatbot"
 ```
 
 Then run all cells. The last cell prints a `trycloudflare.com` URL for the frontend.
