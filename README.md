@@ -86,7 +86,7 @@ Then run all cells. The last cell prints a `trycloudflare.com` URL for the front
 ```env
 OLLAMA_API_URL=http://127.0.0.1:11434/api/generate
 OLLAMA_MODEL=hf.co/Zkare/Chatbot_Ielts_Assistant_v2:Q4_K_M
-OLLAMA_NUM_PREDICT=700
+OLLAMA_NUM_PREDICT=1200
 ENABLE_VECTOR_RAG=true
 EMBEDDING_MODEL_NAME=BAAI/bge-m3
 ```

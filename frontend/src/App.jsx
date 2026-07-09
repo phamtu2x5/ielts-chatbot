@@ -1,6 +1,8 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Bot, FileUp, Send, Sparkles, UserRound } from "lucide-react";
 import { createRoot } from "react-dom/client";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_CHATBOT_API_URL || "/api";
@@ -31,104 +33,8 @@ function routeLabel(route) {
   return routeLabels[route] || route;
 }
 
-function renderInline(text) {
-  const parts = [];
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*]+\*)/g;
-  let lastIndex = 0;
-  let match;
-
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push(text.slice(lastIndex, match.index));
-    }
-
-    const token = match[0];
-    const key = `${match.index}-${token}`;
-    if (token.startsWith("**")) {
-      parts.push(<strong key={key}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith("`")) {
-      parts.push(<code key={key}>{token.slice(1, -1)}</code>);
-    } else {
-      parts.push(<em key={key}>{token.slice(1, -1)}</em>);
-    }
-    lastIndex = pattern.lastIndex;
-  }
-
-  if (lastIndex < text.length) {
-    parts.push(text.slice(lastIndex));
-  }
-
-  return parts;
-}
-
-function renderMarkdown(content) {
-  const lines = content.split(/\r?\n/);
-  const blocks = [];
-  let index = 0;
-
-  while (index < lines.length) {
-    const line = lines[index].trim();
-
-    if (!line) {
-      index += 1;
-      continue;
-    }
-
-    const heading = line.match(/^(#{1,4})\s+(.+)$/);
-    if (heading) {
-      const Tag = `h${Math.min(heading[1].length, 4)}`;
-      blocks.push(<Tag key={`heading-${index}`}>{renderInline(heading[2])}</Tag>);
-      index += 1;
-      continue;
-    }
-
-    if (/^[-*]\s+/.test(line)) {
-      const items = [];
-      while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
-        items.push(lines[index].trim().replace(/^[-*]\s+/, ""));
-        index += 1;
-      }
-      blocks.push(
-        <ul key={`list-${index}`}>
-          {items.map((item, itemIndex) => (
-            <li key={itemIndex}>{renderInline(item)}</li>
-          ))}
-        </ul>
-      );
-      continue;
-    }
-
-    if (/^\d+[.)]\s+/.test(line)) {
-      const items = [];
-      while (index < lines.length && /^\d+[.)]\s+/.test(lines[index].trim())) {
-        items.push(lines[index].trim().replace(/^\d+[.)]\s+/, ""));
-        index += 1;
-      }
-      blocks.push(
-        <ol key={`ordered-${index}`}>
-          {items.map((item, itemIndex) => (
-            <li key={itemIndex}>{renderInline(item)}</li>
-          ))}
-        </ol>
-      );
-      continue;
-    }
-
-    const paragraph = [];
-    while (
-      index < lines.length &&
-      lines[index].trim() &&
-      !/^(#{1,4})\s+/.test(lines[index].trim()) &&
-      !/^[-*]\s+/.test(lines[index].trim()) &&
-      !/^\d+[.)]\s+/.test(lines[index].trim())
-    ) {
-      paragraph.push(lines[index].trim());
-      index += 1;
-    }
-    blocks.push(<p key={`paragraph-${index}`}>{renderInline(paragraph.join(" "))}</p>);
-  }
-
-  return blocks;
+function normalizeMarkdown(content) {
+  return content.replace(/<br\s*\/?>/gi, "\n");
 }
 
 function MessageContent({ message }) {
@@ -136,7 +42,22 @@ function MessageContent({ message }) {
     return <div className="messageText plainText">{message.content}</div>;
   }
 
-  return <div className="messageText markdownText">{renderMarkdown(message.content)}</div>;
+  return (
+    <div className="messageText markdownText">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          table: ({ children }) => (
+            <div className="tableScroll">
+              <table>{children}</table>
+            </div>
+          ),
+        }}
+      >
+        {normalizeMarkdown(message.content)}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
 function App() {
@@ -154,6 +75,7 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState("");
   const fileInputRef = useRef(null);
+  const messagesEndRef = useRef(null);
 
   const history = useMemo(
     () =>
@@ -163,6 +85,10 @@ function App() {
         .map(({ role, content }) => ({ role, content })),
     [messages]
   );
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, isSending]);
 
   async function sendMessage(event) {
     event?.preventDefault();
@@ -282,6 +208,22 @@ function App() {
               </div>
             </article>
           ))}
+          {isSending && (
+            <article className="message assistant">
+              <div className="avatar">
+                <Sparkles size={17} />
+              </div>
+              <div className="bubble loadingBubble" aria-live="polite">
+                <span className="typingDots" aria-label="Đang trả lời">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+                <span className="loadingText">Đang suy nghĩ và soạn câu trả lời...</span>
+              </div>
+            </article>
+          )}
+          <div ref={messagesEndRef} />
         </div>
 
         <form className="composer" onSubmit={sendMessage}>

@@ -9,7 +9,7 @@ from .schemas import ChatMessage
 
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/generate")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "hf.co/Zkare/Chatbot_Ielts_Assistant_v2:Q4_K_M")
-OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "700"))
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "1200"))
 
 
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
@@ -18,7 +18,8 @@ Write in a warm, natural, and coherent tutoring style.
 Open with a brief, friendly sentence when appropriate, then answer directly and explain the reasoning or steps in a logical order.
 Avoid robotic, abrupt, or overly terse phrasing.
 Use simple Markdown only when it improves readability: short headings, numbered lists, or bullet points.
-Do not expose raw Markdown syntax awkwardly, do not overuse emojis, and avoid decorative symbols such as check marks."""
+Use Markdown tables when the user asks for a schedule, comparison, rubric, or other structured information.
+HTML line breaks and a small number of helpful emojis are acceptable when they make the answer easier to read."""
 
 
 def format_history(history: Optional[List[ChatMessage]]) -> str:
@@ -35,6 +36,7 @@ def format_history(history: Optional[List[ChatMessage]]) -> str:
 def clean_response(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 
