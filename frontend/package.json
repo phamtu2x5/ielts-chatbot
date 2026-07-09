@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/ensure-rollup-native.cjs",
     "dev": "vite --host 0.0.0.0 --port 8000",
+    "prebuild": "node scripts/ensure-rollup-native.cjs",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 8000"
   },
