@@ -450,6 +450,12 @@ details p {
   background: #fbfcfe;
 }
 
+.composer .composerIconButton,
+.composer .sendButton {
+  height: 46px;
+  min-height: 46px;
+}
+
 .composerIconButton {
   flex: 0 0 auto;
   min-width: 74px;

@@ -95,7 +95,10 @@ async def upload_pdf(file: UploadFile = File(...)) -> UploadResponse:
             overlap=int(os.getenv("CHUNK_OVERLAP", "180")),
         )
         if not chunks:
-            raise HTTPException(status_code=400, detail="Không trích xuất được văn bản từ PDF")
+            raise HTTPException(
+                status_code=400,
+                detail="Không trích xuất được văn bản từ PDF. File có thể là bản scan quá mờ hoặc chưa có OCR phù hợp.",
+            )
 
         inserted = get_store().upsert(chunks, source_file=file_path.name)
         return UploadResponse(

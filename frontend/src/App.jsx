@@ -217,7 +217,7 @@ function App() {
                 attachment: {
                   name: file.name,
                   status: "error",
-                  error: "Chưa xử lý được PDF",
+                  error: error.message,
                 },
               }
             : message
