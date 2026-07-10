@@ -99,6 +99,7 @@ function DebugPanel({ debug, sources }) {
     dense: source.probe_dense_score,
     keyword: source.probe_keyword_score,
     question: source.probe_question_score,
+    overview: source.probe_overview_score,
     chunk_id: source.chunk_id,
     preview: source.text?.slice(0, 220),
   }));
@@ -112,6 +113,19 @@ function DebugPanel({ debug, sources }) {
       <pre>{JSON.stringify({ ...debug, sources: sourceSummary }, null, 2)}</pre>
     </details>
   );
+}
+
+function sourceScoreLabel(source) {
+  const question = Number(source.probe_question_score || 0);
+  const keyword = Number(source.probe_keyword_score || 0);
+  const overview = Number(source.probe_overview_score || source.overview_score || 0);
+  const dense = Number(source.probe_dense_score || source.score || 0);
+
+  if (question > 0) return `question ${question.toFixed(1)}`;
+  if (keyword > 0) return `keyword ${keyword.toFixed(1)}`;
+  if (overview > 0) return `overview ${overview.toFixed(1)}`;
+  if (dense > 0) return `dense ${dense.toFixed(2)}`;
+  return `score ${Number(source.score || 0).toFixed(2)}`;
 }
 
 function App() {
@@ -293,8 +307,8 @@ function App() {
                       <details key={`${source.source_file}-${sourceIndex}`}>
                         <summary>
                           {source.source_file}
-                          {source.pages?.length ? ` · trang ${source.pages.join(", ")}` : ""} · score{" "}
-                          {Number(source.score).toFixed(2)}
+                          {source.pages?.length ? ` · trang ${source.pages.join(", ")}` : ""} ·{" "}
+                          {sourceScoreLabel(source)}
                         </summary>
                         <p>{source.text}</p>
                       </details>

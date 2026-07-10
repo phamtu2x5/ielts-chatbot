@@ -75,6 +75,27 @@ class LocalVectorStore:
         if not self._docs:
             return {"results": [], "has_hits": False, "has_strong_hits": False}
 
+        is_overview = self._is_document_overview_query(query)
+        has_document_intent = is_overview or self._has_document_intent(query)
+        if is_overview:
+            results = self.overview(top_k=int(os.getenv("RAG_OVERVIEW_TOP_K", "6")))
+            for result in results:
+                result["probe_dense_score"] = float(result.get("score", 0.0))
+                result["probe_keyword_score"] = 0.0
+                result["probe_question_score"] = 0.0
+                result["probe_overview_score"] = 1.0
+            return {
+                "results": results,
+                "has_hits": bool(results),
+                "has_strong_hits": bool(results),
+                "has_document_intent": True,
+                "is_overview": True,
+                "top_score": results[0].get("score", 0.0) if results else 0.0,
+                "top_keyword_score": 0.0,
+                "top_question_score": 0.0,
+                "top_overview_score": 1.0 if results else 0.0,
+            }
+
         probe_min_dense = float(os.getenv("RAG_PROBE_MIN_DENSE_SCORE", "0.35"))
         dense_results = self._dense_search(query, top_k=top_k, min_score=probe_min_dense) if self._embeddings.size else []
         keyword_results = self._keyword_search(query, top_k=top_k)
@@ -87,6 +108,7 @@ class LocalVectorStore:
             merged[key]["probe_dense_score"] = float(result.get("score", 0.0))
             merged[key]["probe_keyword_score"] = 0.0
             merged[key]["probe_question_score"] = 0.0
+            merged[key]["probe_overview_score"] = 0.0
 
         for result in keyword_results:
             key = result.get("chunk_id") or f"keyword-{result.get('chunk_index')}"
@@ -95,6 +117,7 @@ class LocalVectorStore:
                 merged[key]["score"] = 0.0
                 merged[key]["probe_dense_score"] = 0.0
                 merged[key]["probe_question_score"] = 0.0
+                merged[key]["probe_overview_score"] = 0.0
             merged[key]["probe_keyword_score"] = float(result.get("keyword_score", 0.0))
 
         for result in question_results:
@@ -104,11 +127,13 @@ class LocalVectorStore:
                 merged[key]["score"] = 0.0
                 merged[key]["probe_dense_score"] = 0.0
                 merged[key]["probe_keyword_score"] = 0.0
+                merged[key]["probe_overview_score"] = 0.0
             merged[key]["probe_question_score"] = float(result.get("question_score", 0.0))
 
         results = sorted(
             merged.values(),
             key=lambda item: (
+                item.get("probe_overview_score", 0.0),
                 item.get("probe_question_score", 0.0),
                 item.get("probe_keyword_score", 0.0),
                 item.get("probe_dense_score", 0.0),
@@ -124,13 +149,29 @@ class LocalVectorStore:
                 and (
                     results[0].get("probe_keyword_score", 0.0) >= 2
                     or results[0].get("probe_question_score", 0.0) >= 1
+                    or results[0].get("probe_overview_score", 0.0) >= 1
                     or results[0].get("probe_dense_score", 0.0) >= self.min_score
                 )
             ),
+            "has_document_intent": has_document_intent,
+            "is_overview": False,
             "top_score": results[0].get("score", 0.0) if results else 0.0,
             "top_keyword_score": results[0].get("probe_keyword_score", 0.0) if results else 0.0,
             "top_question_score": results[0].get("probe_question_score", 0.0) if results else 0.0,
+            "top_overview_score": 0.0,
         }
+
+    def overview(self, top_k: int = 6) -> List[Dict]:
+        docs = sorted(self._docs, key=lambda doc: (min(doc.get("pages") or [999]), doc.get("chunk_index", 0)))
+        content_docs = [doc for doc in docs if doc.get("token_count", 0) >= 80]
+        selected = content_docs[:top_k] if content_docs else docs[:top_k]
+        results = []
+        for doc in selected:
+            item = dict(doc)
+            item["score"] = 0.0
+            item["overview_score"] = 1.0
+            results.append(item)
+        return results
 
     def document_catalog(self) -> List[Dict]:
         catalog: dict[str, Dict] = {}
@@ -205,24 +246,31 @@ class LocalVectorStore:
         if not ranges:
             return []
 
-        results = []
+        header_results = []
+        numeric_results = []
         for doc in self._docs:
             text = doc.get("text", "")
-            score = 0.0
+            header_score = 0.0
+            numeric_score = 0.0
             for start, end in ranges:
-                score += self._question_match_score(text, start, end)
-            if score <= 0:
-                continue
-            item = dict(doc)
-            item["question_score"] = score
-            results.append(item)
+                header_score += self._question_header_match_score(text, start, end)
+                numeric_score += self._question_number_match_score(text, start, end)
+            if header_score > 0:
+                item = dict(doc)
+                item["question_score"] = header_score + numeric_score
+                header_results.append(item)
+            elif numeric_score > 0:
+                item = dict(doc)
+                item["question_score"] = numeric_score
+                numeric_results.append(item)
 
+        results = header_results if header_results else numeric_results
         return sorted(results, key=lambda item: item["question_score"], reverse=True)[:top_k]
 
     def _question_ranges(self, query: str) -> List[tuple[int, int]]:
         ranges: list[tuple[int, int]] = []
         normalized = query.lower().replace("đến", "to").replace("tới", "to")
-        for match in re.finditer(r"(?:question|questions|câu)\s*(\d{1,2})(?:\s*(?:-|–|to)\s*(\d{1,2}))?", normalized):
+        for match in re.finditer(r"(?:questions?|câu hỏi|câu)\s*(\d{1,2})(?:\s*(?:-|–|to)\s*(\d{1,2}))?", normalized):
             start = int(match.group(1))
             end = int(match.group(2) or start)
             if start > end:
@@ -230,13 +278,18 @@ class LocalVectorStore:
             ranges.append((start, end))
         return ranges
 
-    def _question_match_score(self, text: str, start: int, end: int) -> float:
+    def _question_header_match_score(self, text: str, start: int, end: int) -> float:
         score = 0.0
         lowered = text.lower()
         for header_start, header_end in self._question_headers(lowered):
             if self._ranges_overlap(start, end, header_start, header_end):
-                score += 8.0
+                exact_bonus = 4.0 if start == header_start and end == header_end else 0.0
+                score += 20.0 + exact_bonus
+        return score
 
+    def _question_number_match_score(self, text: str, start: int, end: int) -> float:
+        score = 0.0
+        lowered = text.lower()
         for number in range(start, end + 1):
             if re.search(rf"(?<!\d){number}\s*[\.)]", lowered) or re.search(rf"\({number}\)", lowered):
                 score += 1.0
@@ -250,6 +303,41 @@ class LocalVectorStore:
 
     def _ranges_overlap(self, a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
         return max(a_start, b_start) <= min(a_end, b_end)
+
+    def _has_document_intent(self, query: str) -> bool:
+        lowered = query.lower()
+        markers = [
+            "tài liệu",
+            "file",
+            "pdf",
+            "docx",
+            "trong bài",
+            "bài đọc",
+            "passage",
+            "question",
+            "questions",
+            "câu hỏi",
+            "trang",
+            "page",
+            "bảng",
+            "table",
+            "flow",
+            "nội dung",
+        ]
+        return any(marker in lowered for marker in markers)
+
+    def _is_document_overview_query(self, query: str) -> bool:
+        lowered = query.lower()
+        overview_markers = [
+            "nội dung tài liệu",
+            "tài liệu là gì",
+            "file này là gì",
+            "pdf này là gì",
+            "tóm tắt tài liệu",
+            "summary of the document",
+            "summarize the document",
+        ]
+        return any(marker in lowered for marker in overview_markers)
 
     def _terms(self, text: str) -> List[str]:
         stopwords = {

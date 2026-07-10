@@ -68,8 +68,10 @@ def format_router_document_context(catalog: list[dict], probe: dict) -> str:
             dense = result.get("probe_dense_score", result.get("score", 0.0))
             keyword = result.get("probe_keyword_score", 0.0)
             question = result.get("probe_question_score", 0.0)
+            overview = result.get("probe_overview_score", 0.0)
             lines.append(
-                f"{index}. {source_file} pages={pages} dense={dense:.3f} keyword={keyword:.1f} question={question:.1f}: {text}"
+                f"{index}. {source_file} pages={pages} dense={dense:.3f} keyword={keyword:.1f} "
+                f"question={question:.1f} overview={overview:.1f}: {text}"
             )
     else:
         lines.append("Retrieval probe top hits: none")
@@ -84,6 +86,9 @@ def compact_probe_debug(probe: dict) -> dict:
         "top_score": probe.get("top_score", 0.0),
         "top_keyword_score": probe.get("top_keyword_score", 0.0),
         "top_question_score": probe.get("top_question_score", 0.0),
+        "top_overview_score": probe.get("top_overview_score", 0.0),
+        "has_document_intent": probe.get("has_document_intent", False),
+        "is_overview": probe.get("is_overview", False),
         "results": [
             {
                 "source_file": item.get("source_file"),
@@ -92,6 +97,7 @@ def compact_probe_debug(probe: dict) -> dict:
                 "dense": item.get("probe_dense_score", 0.0),
                 "keyword": item.get("probe_keyword_score", 0.0),
                 "question": item.get("probe_question_score", 0.0),
+                "overview": item.get("probe_overview_score", 0.0),
                 "chunk_id": item.get("chunk_id"),
                 "text_preview": " ".join((item.get("text") or "").split())[:220],
             }
@@ -187,15 +193,24 @@ async def chat(req: ChatRequest) -> ChatResponse:
         catalog = store.document_catalog()
         document_context = format_router_document_context(catalog, probe)
         route = await classify_route(message, req.conversation_history, document_context)
-        if route == "direct" and probe.get("top_question_score", 0.0) >= 1:
+        if route == "direct" and (
+            probe.get("is_overview")
+            or probe.get("top_question_score", 0.0) >= 1
+            or (probe.get("has_document_intent") and probe.get("has_strong_hits"))
+        ):
             route = "rag"
     else:
         probe = {"results": []}
 
     if route == "rag":
         top_k = int(os.getenv("RAG_TOP_K", "5"))
-        probe_sources = probe.get("results") or []
-        sources = probe_sources[:top_k] if probe_sources else store.search(message, top_k=top_k)
+        if probe.get("is_overview"):
+            sources = store.overview(top_k=int(os.getenv("RAG_OVERVIEW_TOP_K", "6")))
+            for source in sources:
+                source["probe_overview_score"] = 1.0
+        else:
+            probe_sources = probe.get("results") or []
+            sources = probe_sources[:top_k] if probe_sources else store.search(message, top_k=top_k)
 
     if sources:
         prompt = rag_prompt(message, format_context(sources), req.conversation_history)

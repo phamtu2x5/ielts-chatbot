@@ -144,6 +144,7 @@ def rag_prompt(message: str, context: str, history: Optional[List[ChatMessage]] 
         "You must answer using only the study material context below.",
         "Do not invent passages, questions, people, dates, examples, answer options, or explanations that are not present in the context.",
         "If the context does not contain the requested content, say in Vietnamese that you cannot find it in the uploaded material. Do not give a generic IELTS answer.",
+        "If the user asks for the content or text of questions, list/transcribe the questions only. Do not solve, label True/False/Not Given, infer answers, or explain unless the user explicitly asks for answers or explanations.",
         "Always cite the source file name and page marker when answering from context.",
         "",
         f"Study material context:\n{context}",
