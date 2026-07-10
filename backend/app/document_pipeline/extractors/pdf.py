@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from PIL import Image
@@ -48,11 +49,36 @@ class PDFExtractor:
                         for idx, block in enumerate(blocks, 1)
                         if normalize_inline_text(block["text"])
                     ]
+                    processing_route = "native_pdf"
+                    page_quality_score = quality.score
+                    merge_reasons = self._ocr_merge_reasons(native_text)
+                    if merge_reasons:
+                        ocr_result = self._ocr_page(page)
+                        ocr_text = normalize_text(ocr_result.text)
+                        if ocr_text and self._adds_new_text(native_text, ocr_text):
+                            elements.append(
+                                DocumentElement(
+                                    element_id=f"p{page_index}-e{len(elements) + 1}",
+                                    page=page_index,
+                                    type="ocr_overlay",
+                                    raw_text=ocr_result.text,
+                                    normalized_text=ocr_text,
+                                    source="pdf_page_ocr",
+                                    confidence=ocr_result.confidence,
+                                    metadata={
+                                        "merge_reasons": merge_reasons,
+                                        "native_quality_score": quality.score,
+                                        **ocr_result.metadata,
+                                    },
+                                )
+                            )
+                            processing_route = "native_pdf_plus_ocr"
+                            page_quality_score = min(quality.score, ocr_result.confidence or quality.score)
                     pages.append(
                         ProcessedPage(
                             page_number=page_index,
-                            processing_route="native_pdf",
-                            quality_score=quality.score,
+                            processing_route=processing_route,
+                            quality_score=page_quality_score,
                             elements=elements,
                         )
                     )
@@ -131,3 +157,51 @@ class PDFExtractor:
         pixmap = page.get_pixmap(matrix=matrix, alpha=False)
         image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
         return self.ocr.image_to_text(image)
+
+    def _ocr_merge_reasons(self, native_text: str) -> list[str]:
+        reasons = []
+        lowered = native_text.lower()
+        layout_markers = [
+            "complete the table",
+            "complete the flow chart",
+            "complete the flowchart",
+            "complete the diagram",
+            "flow chart",
+            "flowchart",
+            "table.",
+        ]
+        if any(marker in lowered for marker in layout_markers):
+            reasons.append("ielts_layout_question")
+
+        for start, end in self._question_ranges(lowered):
+            expected = end - start + 1
+            if expected <= 1:
+                continue
+            text_without_headers = re.sub(r"questions?\s+\d{1,2}\s*(?:-|–|to)\s*\d{1,2}", "", lowered)
+            present = 0
+            for number in range(start, end + 1):
+                if re.search(rf"(?<!\d){number}\s*[\.)]", text_without_headers) or re.search(
+                    rf"\({number}\)", text_without_headers
+                ):
+                    present += 1
+            if present < max(1, expected // 2):
+                reasons.append(f"missing_question_numbers_{start}_{end}")
+        return reasons
+
+    def _question_ranges(self, text: str) -> list[tuple[int, int]]:
+        ranges = []
+        for match in re.finditer(r"questions?\s+(\d{1,2})\s*(?:-|–|to)\s*(\d{1,2})", text):
+            start = int(match.group(1))
+            end = int(match.group(2))
+            if start > end:
+                start, end = end, start
+            ranges.append((start, end))
+        return ranges
+
+    def _adds_new_text(self, native_text: str, ocr_text: str) -> bool:
+        native_terms = set(re.findall(r"[\w]+", native_text.lower(), flags=re.UNICODE))
+        ocr_terms = set(re.findall(r"[\w]+", ocr_text.lower(), flags=re.UNICODE))
+        if not ocr_terms:
+            return False
+        new_terms = ocr_terms - native_terms
+        return len(new_terms) >= 5 or len(ocr_text) > len(native_text) * 1.1

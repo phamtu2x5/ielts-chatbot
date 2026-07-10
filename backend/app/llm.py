@@ -72,6 +72,8 @@ def direct_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> 
     if history_text:
         return f"""{ASSISTANT_STYLE}
 
+If the user asks about uploaded files, documents, PDFs, page content, question numbers, tables, flow charts, or "nội dung trong tài liệu", do not invent document content. Ask the backend/user to use the uploaded document context instead.
+
 Previous conversation:
 {history_text}
 
@@ -83,6 +85,7 @@ Answer naturally and keep the conversation context in mind."""
     return f"""{ASSISTANT_STYLE}
 
 Help students with IELTS Reading, Listening, Writing, and Speaking.
+If the user asks about uploaded files, documents, PDFs, page content, question numbers, tables, flow charts, or "nội dung trong tài liệu", do not invent document content. Say that the answer needs the uploaded document context.
 
 Question:
 {message}
@@ -90,9 +93,14 @@ Question:
 Answer naturally and clearly."""
 
 
-def route_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
+def route_prompt(
+    message: str,
+    history: Optional[List[ChatMessage]] = None,
+    document_context: str = "",
+) -> str:
     history_text = format_history(history)
     context = f"\nPrevious conversation:\n{history_text}\n" if history_text else ""
+    docs = f"\nUploaded document context and retrieval probe:\n{document_context}\n" if document_context else ""
     return f"""You are a strict router for an IELTS chatbot.
 
 Decide whether the assistant should answer directly or use the uploaded document/vector knowledge base.
@@ -103,15 +111,26 @@ Choose "rag" when the user asks about:
 - "dựa vào tài liệu", "trong file", "PDF", "DOCX", "ảnh", "nội dung trên", or similar references
 
 Choose "direct" for general IELTS advice, greetings, study plans, grammar explanations, writing/speaking tips, or anything that does not need uploaded material.
+
+Use the uploaded document context and retrieval probe carefully:
+- If uploaded documents exist and the current question asks for file content, question numbers, page content, passages, tables, flow charts, summaries, explanations, or answers based on the material, choose "rag".
+- If the retrieval probe strength is strong or the probe hits clearly mention the requested content, choose "rag".
+- If the retrieval probe is weak_or_none and the question is clearly general IELTS advice, choose "direct".
+- Choose "direct" only when the question is clearly independent from uploaded material.
 {context}
+{docs}
 Current user message:
 {message}
 
 Return exactly one word: direct or rag."""
 
 
-async def classify_route(message: str, history: Optional[List[ChatMessage]] = None) -> str:
-    decision = await query_ollama(route_prompt(message, history), temperature=0.0, num_predict=8)
+async def classify_route(
+    message: str,
+    history: Optional[List[ChatMessage]] = None,
+    document_context: str = "",
+) -> str:
+    decision = await query_ollama(route_prompt(message, history, document_context), temperature=0.0, num_predict=8)
     decision = decision.strip().lower()
     if "rag" in decision and "direct" not in decision:
         return "rag"
@@ -122,14 +141,15 @@ def rag_prompt(message: str, context: str, history: Optional[List[ChatMessage]] 
     history_text = format_history(history)
     parts = [
         ASSISTANT_STYLE,
-        "Use the study material context below when it is relevant.",
-        "If the context does not contain enough information, say so briefly in Vietnamese and then give general IELTS guidance.",
-        "When useful, cite the source file name and page marker from the context.",
+        "You must answer using only the study material context below.",
+        "Do not invent passages, questions, people, dates, examples, answer options, or explanations that are not present in the context.",
+        "If the context does not contain the requested content, say in Vietnamese that you cannot find it in the uploaded material. Do not give a generic IELTS answer.",
+        "Always cite the source file name and page marker when answering from context.",
         "",
         f"Study material context:\n{context}",
     ]
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Question:\n{message}")
-    parts.append("Answer naturally and clearly. Cite source file names when useful.")
+    parts.append("Answer naturally and clearly, but stay strictly grounded in the provided context.")
     return "\n\n".join(parts)

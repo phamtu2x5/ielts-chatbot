@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class DocumentPipelineConfig:
-    parser_version: str = "1.0.0"
+    parser_version: str = "1.1.0"
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_MAX_UPLOAD_MB", "25")))
     max_pdf_pages: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_MAX_PDF_PAGES", "80")))
     native_min_chars: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_NATIVE_MIN_CHARS", "40")))

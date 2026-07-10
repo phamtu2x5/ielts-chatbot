@@ -41,6 +41,65 @@ def format_context(sources: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def format_router_document_context(catalog: list[dict], probe: dict) -> str:
+    lines = []
+    if catalog:
+        lines.append("Uploaded documents:")
+        for item in catalog:
+            pages = item.get("pages") or []
+            page_label = f"pages {pages[0]}-{pages[-1]}" if pages else "pages unknown"
+            mime_types = ", ".join(item.get("mime_types") or [])
+            lines.append(
+                f"- {item.get('source_file', 'unknown')} | chunks={item.get('chunks', 0)} | {page_label}"
+                + (f" | type={mime_types}" if mime_types else "")
+            )
+
+    results = probe.get("results") or []
+    lines.append(
+        "Retrieval probe strength: "
+        + ("strong" if probe.get("has_strong_hits") else "weak_or_none")
+    )
+    if results:
+        lines.append("Retrieval probe top hits:")
+        for index, result in enumerate(results[:3], 1):
+            source_file = result.get("source_file", "unknown")
+            pages = result.get("pages") or []
+            text = " ".join((result.get("text") or "").split())[:260]
+            dense = result.get("probe_dense_score", result.get("score", 0.0))
+            keyword = result.get("probe_keyword_score", 0.0)
+            question = result.get("probe_question_score", 0.0)
+            lines.append(
+                f"{index}. {source_file} pages={pages} dense={dense:.3f} keyword={keyword:.1f} question={question:.1f}: {text}"
+            )
+    else:
+        lines.append("Retrieval probe top hits: none")
+
+    return "\n".join(lines)
+
+
+def compact_probe_debug(probe: dict) -> dict:
+    return {
+        "has_hits": probe.get("has_hits", False),
+        "has_strong_hits": probe.get("has_strong_hits", False),
+        "top_score": probe.get("top_score", 0.0),
+        "top_keyword_score": probe.get("top_keyword_score", 0.0),
+        "top_question_score": probe.get("top_question_score", 0.0),
+        "results": [
+            {
+                "source_file": item.get("source_file"),
+                "pages": item.get("pages"),
+                "score": item.get("score", 0.0),
+                "dense": item.get("probe_dense_score", 0.0),
+                "keyword": item.get("probe_keyword_score", 0.0),
+                "question": item.get("probe_question_score", 0.0),
+                "chunk_id": item.get("chunk_id"),
+                "text_preview": " ".join((item.get("text") or "").split())[:220],
+            }
+            for item in (probe.get("results") or [])[:3]
+        ],
+    }
+
+
 @app.get("/health")
 async def health() -> dict:
     stats = get_store().stats()
@@ -121,22 +180,68 @@ async def chat(req: ChatRequest) -> ChatResponse:
     store = get_store()
     route = "direct"
     sources = []
+    catalog = []
+    document_context = ""
     if store.stats()["chunks"] > 0:
-        route = await classify_route(message, req.conversation_history)
+        probe = store.probe(message, top_k=int(os.getenv("RAG_PROBE_TOP_K", "3")))
+        catalog = store.document_catalog()
+        document_context = format_router_document_context(catalog, probe)
+        route = await classify_route(message, req.conversation_history, document_context)
+        if route == "direct" and probe.get("top_question_score", 0.0) >= 1:
+            route = "rag"
+    else:
+        probe = {"results": []}
 
     if route == "rag":
         top_k = int(os.getenv("RAG_TOP_K", "5"))
-        sources = store.search(message, top_k=top_k)
+        probe_sources = probe.get("results") or []
+        sources = probe_sources[:top_k] if probe_sources else store.search(message, top_k=top_k)
 
     if sources:
         prompt = rag_prompt(message, format_context(sources), req.conversation_history)
         answer = await query_ollama(prompt)
-        return ChatResponse(response=answer, route_used="vector_rag", sources=sources)
+        return ChatResponse(
+            response=answer,
+            route_used="vector_rag",
+            sources=sources,
+            debug={
+                "route_decision": route,
+                "catalog": catalog,
+                "probe": compact_probe_debug(probe),
+                "source_count": len(sources),
+            },
+        )
+
+    if route == "rag":
+        answer = (
+            "Mình chưa tìm thấy nội dung phù hợp trong tài liệu đã upload để trả lời câu hỏi này. "
+            "Bạn có thể hỏi rõ hơn theo tên bài, số trang, hoặc upload lại tài liệu nếu phần đó nằm trong bảng/ảnh chưa được trích xuất tốt."
+        )
+        return ChatResponse(
+            response=answer,
+            route_used="vector_rag_no_match",
+            sources=[],
+            debug={
+                "route_decision": route,
+                "catalog": catalog,
+                "probe": compact_probe_debug(probe),
+                "source_count": 0,
+            },
+        )
 
     prompt = direct_prompt(message, req.conversation_history)
     answer = await query_ollama(prompt)
-    route_used = "base_model_no_rag_match" if route == "rag" else "base_model"
-    return ChatResponse(response=answer, route_used=route_used, sources=None)
+    return ChatResponse(
+        response=answer,
+        route_used="base_model",
+        sources=None,
+        debug={
+            "route_decision": route,
+            "catalog": catalog,
+            "probe": compact_probe_debug(probe),
+            "source_count": 0,
+        },
+    )
 
 
 @app.post("/documents/upload", response_model=UploadResponse)

@@ -100,6 +100,8 @@ OLLAMA_API_URL=http://127.0.0.1:11434/api/generate
 OLLAMA_MODEL=hf.co/Zkare/Chatbot_Ielts_Assistant_v2:Q4_K_M
 OLLAMA_NUM_PREDICT=1200
 EMBEDDING_MODEL_NAME=BAAI/bge-m3
+RAG_PROBE_TOP_K=3
+RAG_PROBE_MIN_DENSE_SCORE=0.35
 ```
 
 Document ingestion settings:

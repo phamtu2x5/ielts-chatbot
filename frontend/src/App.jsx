@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Bot, CheckCircle2, FileText, FileUp, Send, Sparkles, UserRound, XCircle } from "lucide-react";
+import { Bot, Bug, CheckCircle2, FileText, FileUp, Send, Sparkles, UserRound, XCircle } from "lucide-react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -25,6 +25,7 @@ const routeLabels = {
   base_model_no_rag_match: "Model chính",
   rag: "Tài liệu RAG",
   vector_rag: "Tài liệu RAG",
+  vector_rag_no_match: "Tài liệu RAG",
   upload: "Tài liệu",
   error: "Lỗi",
 };
@@ -88,6 +89,31 @@ function AttachmentCard({ attachment }) {
   );
 }
 
+function DebugPanel({ debug, sources }) {
+  if (!debug) return null;
+
+  const sourceSummary = (sources || []).map((source) => ({
+    file: source.source_file,
+    pages: source.pages,
+    score: source.score,
+    dense: source.probe_dense_score,
+    keyword: source.probe_keyword_score,
+    question: source.probe_question_score,
+    chunk_id: source.chunk_id,
+    preview: source.text?.slice(0, 220),
+  }));
+
+  return (
+    <details className="debugPanel">
+      <summary>
+        <Bug size={14} />
+        Debug RAG
+      </summary>
+      <pre>{JSON.stringify({ ...debug, sources: sourceSummary }, null, 2)}</pre>
+    </details>
+  );
+}
+
 function App() {
   const [messages, setMessages] = useState([
     {
@@ -138,6 +164,7 @@ function App() {
           content: data.response,
           route_used: data.route_used,
           sources: data.sources || [],
+          debug: data.debug,
         },
       ]);
     } catch (error) {
@@ -259,6 +286,7 @@ function App() {
               <div className="bubble">
                 <MessageContent message={message} />
                 {routeLabel(message.route_used) && <div className="route">{routeLabel(message.route_used)}</div>}
+                <DebugPanel debug={message.debug} sources={message.sources} />
                 {message.sources?.length > 0 && (
                   <div className="sources">
                     {message.sources.map((source, sourceIndex) => (

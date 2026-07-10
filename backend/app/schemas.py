@@ -17,6 +17,7 @@ class ChatResponse(BaseModel):
     response: str
     route_used: str
     sources: Optional[List[Dict[str, Any]]] = None
+    debug: Optional[Dict[str, Any]] = None
 
 
 class UploadResponse(BaseModel):

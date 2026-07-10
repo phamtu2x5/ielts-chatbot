@@ -421,6 +421,33 @@ p {
   gap: 8px;
 }
 
+.debugPanel {
+  margin-top: 10px;
+  border-color: #f4c430;
+  background: #fffbeb;
+}
+
+.debugPanel summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #92400e;
+}
+
+.debugPanel pre {
+  max-height: 320px;
+  margin: 10px 0 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid #f3d27a;
+  border-radius: 8px;
+  color: #422006;
+  background: #fff7d6;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 details {
   padding: 10px;
   border: 1px solid #d0d5dd;
