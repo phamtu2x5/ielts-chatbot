@@ -334,8 +334,17 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 return
 
             yield stream_event("status", message="Đang soạn câu trả lời...")
+            has_token = False
             async for token in stream_ollama(prepared.prompt or ""):
+                has_token = True
                 yield stream_event("token", token=token)
+            if not has_token:
+                logger.warning("Ollama stream completed without visible tokens; retrying with non-stream request")
+                fallback_answer = await query_ollama(prepared.prompt or "")
+                if not fallback_answer.strip():
+                    yield stream_event("error", message="Không nhận được nội dung trả lời từ model. Vui lòng thử lại.")
+                    return
+                yield stream_event("token", token=fallback_answer)
             yield stream_event("done")
         except Exception:
             logger.exception("Streaming chat failed")

@@ -21,7 +21,7 @@ function routeLabel(route) {
 }
 
 function normalizeMarkdown(content) {
-  return content
+  return (content || "")
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/li>\s*<li>/gi, "\n- ")
     .replace(/<ul>\s*<li>/gi, "- ")
@@ -31,18 +31,23 @@ function normalizeMarkdown(content) {
 }
 
 function MessageContent({ message }) {
+  const content = message.content || "";
+
   if (message.role === "user") {
     return (
       <>
-        {message.content && <div className="messageText plainText">{message.content}</div>}
+        {content && <div className="messageText plainText">{content}</div>}
         {message.attachment && <AttachmentCard attachment={message.attachment} />}
       </>
     );
   }
 
+  const showStatus = !content && message.streamingStatus;
+  const showEmptyFallback = !content && !message.streaming && !message.streamingStatus;
+
   return (
     <div className="messageText markdownText">
-      {!message.content && message.streamingStatus && (
+      {showStatus && (
         <span className="inlineStatus">
           <span className="typingDots compact" aria-hidden="true">
             <span />
@@ -52,18 +57,21 @@ function MessageContent({ message }) {
           {message.streamingStatus}
         </span>
       )}
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          table: ({ children }) => (
-            <div className="tableScroll">
-              <table>{children}</table>
-            </div>
-          ),
-        }}
-      >
-        {normalizeMarkdown(message.content)}
-      </ReactMarkdown>
+      {content && (
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            table: ({ children }) => (
+              <div className="tableScroll">
+                <table>{children}</table>
+              </div>
+            ),
+          }}
+        >
+          {normalizeMarkdown(content)}
+        </ReactMarkdown>
+      )}
+      {showEmptyFallback && <span className="emptyAnswer">Chưa nhận được nội dung trả lời.</span>}
     </div>
   );
 }
@@ -211,7 +219,12 @@ function App() {
 
         for (const line of lines) {
           if (!line.trim()) continue;
-          const eventData = JSON.parse(line);
+          let eventData;
+          try {
+            eventData = JSON.parse(line);
+          } catch {
+            throw new Error("Dữ liệu stream từ backend không hợp lệ");
+          }
           if (eventData.type === "status") {
             setMessages((current) =>
               current.map((message) =>
@@ -246,7 +259,14 @@ function App() {
           } else if (eventData.type === "done") {
             setMessages((current) =>
               current.map((message) =>
-                message.id === assistantId ? { ...message, streaming: false, streamingStatus: "" } : message
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      content: message.content || "Mình chưa nhận được nội dung trả lời. Vui lòng thử lại.",
+                      streaming: false,
+                      streamingStatus: "",
+                    }
+                  : message
               )
             );
           } else if (eventData.type === "error") {

@@ -96,7 +96,7 @@ async def stream_ollama(
                 data = json.loads(line)
                 if data.get("error"):
                     raise RuntimeError(str(data["error"]))
-                token = data.get("response") or ""
+                token = data.get("response") or data.get("message", {}).get("content") or ""
                 token = re.sub(r"<br\s*/?>", "\n", token, flags=re.IGNORECASE)
                 if token:
                     yield token
