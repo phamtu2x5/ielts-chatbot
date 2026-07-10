@@ -9,3 +9,4 @@ backend/uploads/
 backend/data/
 *.log
 .DS_Store
+PROJECT_HANDOFF.md

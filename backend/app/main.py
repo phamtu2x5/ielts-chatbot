@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import aiofiles
@@ -6,8 +7,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
+from .document_pipeline import DocumentProcessor
 from .llm import OLLAMA_MODEL, OLLAMA_NUM_PREDICT, classify_route, direct_prompt, query_ollama, rag_prompt
-from .pdf_utils import chunk_text, extract_pdf_text
 from .rag import get_store
 from .schemas import ChatRequest, ChatResponse, SearchRequest, SearchResponse, StatsResponse, UploadResponse
 
@@ -16,6 +17,7 @@ load_dotenv()
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+DOCUMENT_PROCESSOR = DocumentProcessor()
 
 app = FastAPI(title="Standalone IELTS Chatbot", version="1.0.0")
 
@@ -32,8 +34,10 @@ def format_context(sources: list[dict]) -> str:
     parts = []
     for index, source in enumerate(sources, 1):
         source_file = source.get("source_file", "unknown")
+        pages = source.get("pages") or []
+        page_label = f", pages {', '.join(str(page) for page in pages)}" if pages else ""
         text = source.get("text", "")
-        parts.append(f"[Source {index}: {source_file}]\n{text}")
+        parts.append(f"[Source {index}: {source_file}{page_label}]\n{text}")
     return "\n\n".join(parts)
 
 
@@ -42,11 +46,69 @@ async def health() -> dict:
     stats = get_store().stats()
     return {
         "status": "ok",
+        "document_rag_documents": stats["documents"],
+        "document_rag_chunks": stats["chunks"],
         "pdf_rag_documents": stats["documents"],
         "pdf_rag_chunks": stats["chunks"],
         "ollama_api_url": os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/generate"),
         "ollama_model": OLLAMA_MODEL,
         "ollama_num_predict": OLLAMA_NUM_PREDICT,
+    }
+
+
+@app.post("/warmup")
+async def warmup() -> dict:
+    started = time.perf_counter()
+    results = {}
+
+    if os.getenv("WARMUP_LLM", "true").lower() == "true":
+        llm_started = time.perf_counter()
+        try:
+            response = await query_ollama(
+                "Warm up the IELTS assistant. Reply with exactly: ready",
+                temperature=0.0,
+                num_predict=8,
+            )
+            results["llm"] = {
+                "ok": True,
+                "model": OLLAMA_MODEL,
+                "duration_seconds": round(time.perf_counter() - llm_started, 2),
+                "sample": response[:120],
+            }
+        except Exception as exc:
+            results["llm"] = {"ok": False, "error": str(exc)}
+    else:
+        results["llm"] = {"skipped": True}
+
+    if os.getenv("WARMUP_EMBEDDING", "true").lower() == "true":
+        embedding_started = time.perf_counter()
+        try:
+            results["embedding"] = {
+                "ok": True,
+                "duration_seconds": round(time.perf_counter() - embedding_started, 2),
+                **get_store().warmup(),
+            }
+        except Exception as exc:
+            results["embedding"] = {"ok": False, "error": str(exc)}
+    else:
+        results["embedding"] = {"skipped": True}
+
+    ocr_started = time.perf_counter()
+    try:
+        ocr_result = DOCUMENT_PROCESSOR.warmup_ocr()
+        results["ocr"] = {
+            "ok": bool(ocr_result.get("skipped") or ocr_result.get("models_ready", False)),
+            "duration_seconds": round(time.perf_counter() - ocr_started, 2),
+            **ocr_result,
+        }
+    except Exception as exc:
+        results["ocr"] = {"ok": False, "error": str(exc)}
+
+    ok = all(component.get("ok", True) for component in results.values())
+    return {
+        "status": "ok" if ok else "partial",
+        "duration_seconds": round(time.perf_counter() - started, 2),
+        "results": results,
     }
 
 
@@ -77,36 +139,36 @@ async def chat(req: ChatRequest) -> ChatResponse:
     return ChatResponse(response=answer, route_used=route_used, sources=None)
 
 
+@app.post("/documents/upload", response_model=UploadResponse)
 @app.post("/rag/upload-pdf", response_model=UploadResponse)
-async def upload_pdf(file: UploadFile = File(...)) -> UploadResponse:
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Hiện chỉ hỗ trợ tệp PDF")
-
+async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Tên tệp không hợp lệ")
     file_path = UPLOAD_DIR / Path(file.filename).name
     async with aiofiles.open(file_path, "wb") as out:
         await out.write(await file.read())
 
     try:
-        text = extract_pdf_text(file_path)
-        chunks = chunk_text(
-            text,
-            source_file=file_path.name,
-            chunk_size=int(os.getenv("CHUNK_SIZE", "1200")),
-            overlap=int(os.getenv("CHUNK_OVERLAP", "180")),
-        )
+        document, chunks = DOCUMENT_PROCESSOR.process_file(file_path, file_path.name, file.content_type)
         if not chunks:
             raise HTTPException(
                 status_code=400,
-                detail="Không trích xuất được văn bản từ PDF. File có thể là bản scan quá mờ hoặc chưa có OCR phù hợp.",
+                detail="Không trích xuất được văn bản từ tài liệu. File có thể quá mờ, không có chữ, hoặc OCR chưa phù hợp.",
             )
 
-        inserted = get_store().upsert(chunks, source_file=file_path.name)
+        inserted = get_store().upsert([chunk.to_dict() for chunk in chunks], source_file=file_path.name)
         return UploadResponse(
             message=f"Processed {inserted} chunks",
-            file_name=file_path.name,
+            file_name=document.filename,
+            document_id=document.document_id,
+            document_type=document.mime_type,
             chunks_processed=inserted,
             collection_stats=get_store().stats(),
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
         file_path.unlink(missing_ok=True)
 

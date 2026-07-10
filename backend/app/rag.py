@@ -43,6 +43,10 @@ class LocalVectorStore:
         embeddings = self.model.encode(texts, normalize_embeddings=True)
         return np.asarray(embeddings, dtype=np.float32)
 
+    def warmup(self) -> Dict:
+        embedding = self._embed(["IELTS document retrieval warmup"])[0]
+        return {"embedding_model": self.model_name, "embedding_dimensions": int(embedding.shape[0])}
+
     def upsert(self, chunks: List[Dict], source_file: str) -> int:
         self.delete_source(source_file)
         if not chunks:

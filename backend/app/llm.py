@@ -95,12 +95,12 @@ def route_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> s
     context = f"\nPrevious conversation:\n{history_text}\n" if history_text else ""
     return f"""You are a strict router for an IELTS chatbot.
 
-Decide whether the assistant should answer directly or use the uploaded PDF/vector knowledge base.
+Decide whether the assistant should answer directly or use the uploaded document/vector knowledge base.
 
 Choose "rag" when the user asks about:
-- the uploaded PDF, file, document, material, source, lesson, or text
+- the uploaded file, document, PDF, DOCX, image, material, source, lesson, or text
 - a summary, explanation, extraction, comparison, or question based on uploaded material
-- "dựa vào tài liệu", "trong file", "PDF", "nội dung trên", or similar references
+- "dựa vào tài liệu", "trong file", "PDF", "DOCX", "ảnh", "nội dung trên", or similar references
 
 Choose "direct" for general IELTS advice, greetings, study plans, grammar explanations, writing/speaking tips, or anything that does not need uploaded material.
 {context}
@@ -124,6 +124,7 @@ def rag_prompt(message: str, context: str, history: Optional[List[ChatMessage]] 
         ASSISTANT_STYLE,
         "Use the study material context below when it is relevant.",
         "If the context does not contain enough information, say so briefly in Vietnamese and then give general IELTS guidance.",
+        "When useful, cite the source file name and page marker from the context.",
         "",
         f"Study material context:\n{context}",
     ]

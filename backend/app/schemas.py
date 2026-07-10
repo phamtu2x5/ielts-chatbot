@@ -22,6 +22,8 @@ class ChatResponse(BaseModel):
 class UploadResponse(BaseModel):
     message: str
     file_name: str
+    document_id: str
+    document_type: str
     chunks_processed: int
     collection_stats: Dict[str, Any]
 

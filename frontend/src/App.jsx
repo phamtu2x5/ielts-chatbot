@@ -23,9 +23,9 @@ async function apiPost(path, body) {
 const routeLabels = {
   base_model: "Model chính",
   base_model_no_rag_match: "Model chính",
-  rag: "PDF RAG",
-  vector_rag: "PDF RAG",
-  upload: "Tệp PDF",
+  rag: "Tài liệu RAG",
+  vector_rag: "Tài liệu RAG",
+  upload: "Tài liệu",
   error: "Lỗi",
 };
 
@@ -93,7 +93,7 @@ function App() {
     {
       role: "assistant",
       content:
-        "Xin chào, mình là trợ lý IELTS của bạn. Bạn có thể hỏi về Reading, Listening, Writing, Speaking hoặc tải PDF lên để mình hỗ trợ phân tích nội dung tài liệu.",
+        "Xin chào, mình là trợ lý IELTS của bạn. Bạn có thể hỏi về Reading, Listening, Writing, Speaking hoặc tải tài liệu lên để mình hỗ trợ phân tích nội dung.",
       route_used: "welcome",
     },
   ]);
@@ -154,7 +154,7 @@ function App() {
     }
   }
 
-  async function uploadPdf(event) {
+  async function uploadDocument(event) {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -177,13 +177,13 @@ function App() {
     formData.append("file", file);
 
     try {
-      const response = await fetch(`${API_BASE}/rag/upload-pdf`, {
+      const response = await fetch(`${API_BASE}/documents/upload`, {
         method: "POST",
         body: formData,
       });
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
-        throw new Error(error.detail || "Tải PDF không thành công");
+        throw new Error(error.detail || "Tải tài liệu không thành công");
       }
       const data = await response.json();
       setMessages((current) =>
@@ -204,7 +204,7 @@ function App() {
         ...current,
         {
           role: "assistant",
-          content: `Mình đã đọc xong **${data.file_name}**. Bạn có thể hỏi nội dung trong tài liệu này, mình sẽ ưu tiên dùng PDF để trả lời.`,
+          content: `Mình đã đọc xong **${data.file_name}**. Bạn có thể hỏi nội dung trong tài liệu này, mình sẽ ưu tiên dùng nguồn đã tải lên để trả lời.`,
           route_used: "upload",
         },
       ]);
@@ -247,7 +247,7 @@ function App() {
             </span>
             <div>
               <h1>IELTS Chatbot</h1>
-              <p>Trợ lý luyện IELTS chạy bằng Ollama, có hỗ trợ hỏi đáp theo PDF</p>
+              <p>Trợ lý luyện IELTS chạy bằng Ollama, có hỗ trợ hỏi đáp theo tài liệu</p>
             </div>
           </div>
         </header>
@@ -264,7 +264,9 @@ function App() {
                     {message.sources.map((source, sourceIndex) => (
                       <details key={`${source.source_file}-${sourceIndex}`}>
                         <summary>
-                          {source.source_file} · score {Number(source.score).toFixed(2)}
+                          {source.source_file}
+                          {source.pages?.length ? ` · trang ${source.pages.join(", ")}` : ""} · score{" "}
+                          {Number(source.score).toFixed(2)}
                         </summary>
                         <p>{source.text}</p>
                       </details>
@@ -298,12 +300,18 @@ function App() {
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading}
-            title="Tải PDF"
+            title="Tải tài liệu"
           >
             <FileUp size={19} />
-            <span>{isUploading ? "Đang tải" : "PDF"}</span>
+            <span>{isUploading ? "Đang tải" : "Tệp"}</span>
           </button>
-          <input ref={fileInputRef} className="hiddenInput" type="file" accept="application/pdf" onChange={uploadPdf} />
+          <input
+            ref={fileInputRef}
+            className="hiddenInput"
+            type="file"
+            accept=".txt,.md,.pdf,.docx,image/png,image/jpeg,image/webp"
+            onChange={uploadDocument}
+          />
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
