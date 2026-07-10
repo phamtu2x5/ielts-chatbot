@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Bot, Bug, CheckCircle2, FileText, FileUp, Send, Sparkles, UserRound, XCircle } from "lucide-react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
@@ -7,23 +7,8 @@ import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_CHATBOT_API_URL || "/api";
 
-async function apiPost(path, body) {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.detail || "Yêu cầu không thành công");
-  }
-  return response.json();
-}
-
 const routeLabels = {
   base_model: "Model chính",
-  base_model_no_rag_match: "Model chính",
-  rag: "Tài liệu RAG",
   vector_rag: "Tài liệu RAG",
   vector_rag_no_match: "Tài liệu RAG",
   upload: "Tài liệu",
@@ -36,7 +21,13 @@ function routeLabel(route) {
 }
 
 function normalizeMarkdown(content) {
-  return content.replace(/<br\s*\/?>/gi, "\n");
+  return content
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/li>\s*<li>/gi, "\n- ")
+    .replace(/<ul>\s*<li>/gi, "- ")
+    .replace(/<\/li>\s*<\/ul>/gi, "")
+    .replace(/<\/?ul>/gi, "")
+    .replace(/<\/?li>/gi, "");
 }
 
 function MessageContent({ message }) {
@@ -51,6 +42,16 @@ function MessageContent({ message }) {
 
   return (
     <div className="messageText markdownText">
+      {!message.content && message.streamingStatus && (
+        <span className="inlineStatus">
+          <span className="typingDots compact" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+          {message.streamingStatus}
+        </span>
+      )}
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -101,14 +102,19 @@ function DebugPanel({ debug, sources }) {
     question: source.probe_question_score,
     overview: source.probe_overview_score,
     chunk_id: source.chunk_id,
-    preview: source.text?.slice(0, 220),
+    unit_type: source.metadata?.unit_type,
+    chunk_reason: source.metadata?.chunk_reason,
+    passage_number: source.metadata?.passage_number,
+    question_range: source.metadata?.question_range,
+    parent_id: source.metadata?.parent_id,
+    preview: (source.display_text || source.text)?.slice(0, 220),
   }));
 
   return (
     <details className="debugPanel">
       <summary>
         <Bug size={14} />
-        Debug RAG
+        Debug pipeline
       </summary>
       <pre>{JSON.stringify({ ...debug, sources: sourceSummary }, null, 2)}</pre>
     </details>
@@ -142,6 +148,7 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const hasStreamingAssistant = messages.some((message) => message.streaming);
 
   const history = useMemo(
     () =>
@@ -160,37 +167,113 @@ function App() {
   async function sendMessage(event) {
     event?.preventDefault();
     const text = input.trim();
-    if (!text || isSending) return;
+    if (!text || isSending || isUploading) return;
 
+    const assistantId = `assistant-${Date.now()}`;
     setInput("");
     setIsSending(true);
-    setMessages((current) => [...current, { role: "user", content: text }]);
+    setMessages((current) => [
+      ...current,
+      { role: "user", content: text },
+      {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        streaming: true,
+        streamingStatus: "Đang gửi câu hỏi...",
+      },
+    ]);
 
     try {
-      const data = await apiPost("/chat", {
-        message: text,
-        conversation_history: history,
+      const response = await fetch(`${API_BASE}/chat/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: text,
+          conversation_history: history,
+        }),
       });
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content: data.response,
-          route_used: data.route_used,
-          sources: data.sources || [],
-          debug: data.debug,
-        },
-      ]);
+      if (!response.ok || !response.body) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.detail || "Yêu cầu không thành công");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const eventData = JSON.parse(line);
+          if (eventData.type === "status") {
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === assistantId ? { ...message, streamingStatus: eventData.message } : message
+              )
+            );
+          } else if (eventData.type === "metadata") {
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      route_used: eventData.route_used,
+                      sources: eventData.sources || [],
+                      debug: eventData.debug,
+                    }
+                  : message
+              )
+            );
+          } else if (eventData.type === "token") {
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === assistantId
+                  ? {
+                      ...message,
+                      content: `${message.content || ""}${eventData.token || ""}`,
+                      streamingStatus: "",
+                    }
+                  : message
+              )
+            );
+          } else if (eventData.type === "done") {
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === assistantId ? { ...message, streaming: false, streamingStatus: "" } : message
+              )
+            );
+          } else if (eventData.type === "error") {
+            throw new Error(eventData.message || "Yêu cầu không thành công");
+          }
+        }
+      }
     } catch (error) {
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content: error.message,
-          route_used: "error",
-        },
-      ]);
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                content: error.message,
+                route_used: "error",
+                streaming: false,
+                streamingStatus: "",
+              }
+            : message
+        )
+      );
     } finally {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId ? { ...message, streaming: false, streamingStatus: "" } : message
+        )
+      );
       setIsSending(false);
     }
   }
@@ -247,6 +330,7 @@ function App() {
           role: "assistant",
           content: `Mình đã đọc xong **${data.file_name}**. Bạn có thể hỏi nội dung trong tài liệu này, mình sẽ ưu tiên dùng nguồn đã tải lên để trả lời.`,
           route_used: "upload",
+          debug: data.debug,
         },
       ]);
     } catch (error) {
@@ -310,7 +394,7 @@ function App() {
                           {source.pages?.length ? ` · trang ${source.pages.join(", ")}` : ""} ·{" "}
                           {sourceScoreLabel(source)}
                         </summary>
-                        <p>{source.text}</p>
+                        <p>{source.display_text || source.text}</p>
                       </details>
                     ))}
                   </div>
@@ -318,7 +402,7 @@ function App() {
               </div>
             </article>
           ))}
-          {isSending && (
+          {isSending && !hasStreamingAssistant && (
             <article className="message assistant">
               <div className="avatar">
                 <Sparkles size={17} />
@@ -341,7 +425,7 @@ function App() {
             className="composerIconButton"
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading}
+            disabled={isUploading || isSending}
             title="Tải tài liệu"
           >
             <FileUp size={19} />
@@ -366,7 +450,7 @@ function App() {
             placeholder="Nhập câu hỏi IELTS..."
             rows={1}
           />
-          <button className="sendButton" type="submit" disabled={isSending || !input.trim()}>
+          <button className="sendButton" type="submit" disabled={isSending || isUploading || !input.trim()}>
             <Send size={18} />
             {isSending ? "Đang gửi" : "Gửi"}
           </button>

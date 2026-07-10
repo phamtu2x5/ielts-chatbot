@@ -29,7 +29,7 @@ class PDFExtractor:
 
             for page_index, page in enumerate(document, 1):
                 blocks = self._native_text_blocks(page)
-                native_text = "\n".join(block["text"] for block in blocks)
+                native_text = "\n".join(block["normalized_text"] for block in blocks)
                 image_coverage = self._image_coverage(page)
                 quality = evaluate_native_page_text(native_text, len(blocks), image_coverage, self.config)
 
@@ -39,18 +39,19 @@ class PDFExtractor:
                             element_id=f"p{page_index}-e{idx}",
                             page=page_index,
                             type="paragraph",
-                            raw_text=block["text"],
-                            normalized_text=normalize_inline_text(block["text"]),
+                            raw_text=block["raw_text"],
+                            normalized_text=block["normalized_text"],
                             source="native_pdf",
                             confidence=quality.score,
                             bbox=block["bbox"],
                             metadata={"quality_reasons": quality.reasons},
                         )
                         for idx, block in enumerate(blocks, 1)
-                        if normalize_inline_text(block["text"])
+                        if block["normalized_text"]
                     ]
                     processing_route = "native_pdf"
                     page_quality_score = quality.score
+                    ocr_result = None
                     merge_reasons = self._ocr_merge_reasons(native_text)
                     if merge_reasons:
                         ocr_result = self._ocr_page(page)
@@ -80,6 +81,16 @@ class PDFExtractor:
                             processing_route=processing_route,
                             quality_score=page_quality_score,
                             elements=elements,
+                            metadata={
+                                "native_quality": quality.score,
+                                "native_quality_reasons": quality.reasons,
+                                "native_text_blocks": len(blocks),
+                                "image_coverage": image_coverage,
+                                "requires_layout": quality.requires_layout,
+                                "requires_table_analysis": quality.requires_table_analysis,
+                                "ocr_engine": ocr_result.engine if ocr_result and processing_route != "native_pdf" else None,
+                                "ocr_quality": ocr_result.confidence if ocr_result and processing_route != "native_pdf" else None,
+                            },
                         )
                     )
                     continue
@@ -106,6 +117,14 @@ class PDFExtractor:
                         processing_route="pdf_page_ocr",
                         quality_score=ocr_result.confidence,
                         elements=elements,
+                        metadata={
+                            "native_quality": quality.score,
+                            "native_quality_reasons": quality.reasons,
+                            "native_text_blocks": len(blocks),
+                            "image_coverage": image_coverage,
+                            "ocr_engine": ocr_result.engine,
+                            "ocr_quality": ocr_result.confidence,
+                        },
                     )
                 )
 
@@ -125,10 +144,17 @@ class PDFExtractor:
             if len(block) < 5:
                 continue
             x0, y0, x1, y1, text = block[:5]
-            normalized = normalize_inline_text(text or "")
+            raw_text = text or ""
+            normalized = normalize_inline_text(raw_text)
             if not normalized:
                 continue
-            blocks.append({"bbox": [float(x0), float(y0), float(x1), float(y1)], "text": normalized})
+            blocks.append(
+                {
+                    "bbox": [float(x0), float(y0), float(x1), float(y1)],
+                    "raw_text": raw_text,
+                    "normalized_text": normalized,
+                }
+            )
         return blocks
 
     def _image_coverage(self, page) -> float:

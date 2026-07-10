@@ -1,3 +1,4 @@
+import unicodedata
 from collections import Counter
 from string import printable
 from typing import Iterable
@@ -19,14 +20,8 @@ def _readable_ratio(text: str) -> float:
 def _control_ratio(text: str) -> float:
     if not text:
         return 1.0
-    controls = sum(1 for char in text if unicodedata_category(char).startswith("C") and char not in "\n\t")
+    controls = sum(1 for char in text if unicodedata.category(char).startswith("C") and char not in "\n\t")
     return controls / len(text)
-
-
-def unicodedata_category(char: str) -> str:
-    import unicodedata
-
-    return unicodedata.category(char)
 
 
 def _repeated_line_ratio(lines: Iterable[str]) -> float:

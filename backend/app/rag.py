@@ -1,22 +1,36 @@
 import json
-import os
 import re
-from pathlib import Path
-from typing import Dict, List
+import threading
+from functools import wraps
+from typing import Callable, Dict, List, TypeVar
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
+from .config import settings
 
-DATA_DIR = Path(os.getenv("RAG_DATA_DIR", "data/rag"))
+DATA_DIR = settings.rag_data_dir
 INDEX_PATH = DATA_DIR / "embeddings.npy"
 DOCS_PATH = DATA_DIR / "documents.json"
+
+T = TypeVar("T")
+
+
+def synchronized(method: Callable[..., T]) -> Callable[..., T]:
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class LocalVectorStore:
     def __init__(self) -> None:
-        self.model_name = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
-        self.min_score = float(os.getenv("RAG_MIN_SCORE", "0.45"))
+        self.model_name = settings.embedding_model_name
+        self.min_score = settings.rag_min_score
+        self._lock = threading.RLock()
+        self._embedding_lock = threading.Lock()
         self._model = None
         self._docs: List[Dict] = []
         self._embeddings = np.empty((0, 0), dtype=np.float32)
@@ -30,47 +44,94 @@ class LocalVectorStore:
 
     def _load(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        if DOCS_PATH.exists():
-            self._docs = json.loads(DOCS_PATH.read_text())
-        if INDEX_PATH.exists():
-            self._embeddings = np.load(INDEX_PATH)
+        docs_exist = DOCS_PATH.exists()
+        index_exists = INDEX_PATH.exists()
+        if docs_exist != index_exists:
+            raise RuntimeError(
+                "RAG index is incomplete: documents.json and embeddings.npy must exist together. "
+                "Remove the incomplete index and upload the documents again."
+            )
+        if not docs_exist:
+            return
 
-    def _save(self) -> None:
+        try:
+            docs = json.loads(DOCS_PATH.read_text(encoding="utf-8"))
+            embeddings = np.load(INDEX_PATH, allow_pickle=False)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("RAG index cannot be loaded. Rebuild it by uploading the documents again.") from exc
+
+        if not isinstance(docs, list) or embeddings.ndim != 2 or len(docs) != embeddings.shape[0]:
+            raise RuntimeError(
+                "RAG index is inconsistent: document and embedding counts do not match. "
+                "Rebuild it by uploading the documents again."
+            )
+        self._docs = docs
+        self._embeddings = np.asarray(embeddings, dtype=np.float32)
+
+    def _save_state(self, docs: List[Dict], embeddings: np.ndarray) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        DOCS_PATH.write_text(json.dumps(self._docs, ensure_ascii=False, indent=2))
-        np.save(INDEX_PATH, self._embeddings)
+        docs_temp = DOCS_PATH.with_suffix(".json.tmp")
+        index_temp = INDEX_PATH.with_suffix(".npy.tmp")
+        try:
+            docs_temp.write_text(json.dumps(docs, ensure_ascii=False, indent=2), encoding="utf-8")
+            with index_temp.open("wb") as handle:
+                np.save(handle, embeddings)
+            index_temp.replace(INDEX_PATH)
+            docs_temp.replace(DOCS_PATH)
+        finally:
+            docs_temp.unlink(missing_ok=True)
+            index_temp.unlink(missing_ok=True)
 
     def _embed(self, texts: List[str]) -> np.ndarray:
-        embeddings = self.model.encode(texts, normalize_embeddings=True)
+        with self._embedding_lock:
+            embeddings = self.model.encode(texts, normalize_embeddings=True)
         return np.asarray(embeddings, dtype=np.float32)
 
+    @synchronized
     def warmup(self) -> Dict:
         embedding = self._embed(["IELTS document retrieval warmup"])[0]
         return {"embedding_model": self.model_name, "embedding_dimensions": int(embedding.shape[0])}
 
     def upsert(self, chunks: List[Dict], source_file: str) -> int:
-        self.delete_source(source_file)
         if not chunks:
             return 0
+        if any(not (chunk.get("retrieval_text") or chunk.get("text")) for chunk in chunks):
+            raise ValueError("Every RAG chunk must contain text or retrieval_text.")
 
-        texts = [chunk["text"] for chunk in chunks]
+        texts = [chunk.get("retrieval_text") or chunk["text"] for chunk in chunks]
         new_embeddings = self._embed(texts)
+        with self._lock:
+            keep_indices = [idx for idx, doc in enumerate(self._docs) if doc.get("source_file") != source_file]
+            kept_docs = [self._docs[idx] for idx in keep_indices]
+            kept_embeddings = (
+                self._embeddings[keep_indices]
+                if self._embeddings.size
+                else np.empty((0, 0), dtype=np.float32)
+            )
 
-        if self._embeddings.size == 0:
-            self._embeddings = new_embeddings
-        else:
-            self._embeddings = np.vstack([self._embeddings, new_embeddings])
+            if kept_embeddings.size == 0:
+                combined_embeddings = new_embeddings
+            else:
+                if kept_embeddings.shape[1] != new_embeddings.shape[1]:
+                    raise RuntimeError(
+                        "Embedding dimensions changed. Clear the RAG index before switching embedding models."
+                    )
+                combined_embeddings = np.vstack([kept_embeddings, new_embeddings])
 
-        self._docs.extend(chunks)
-        self._save()
+            combined_docs = kept_docs + chunks
+            self._save_state(combined_docs, combined_embeddings)
+            self._docs = combined_docs
+            self._embeddings = combined_embeddings
         return len(chunks)
 
+    @synchronized
     def search(self, query: str, top_k: int = 5) -> List[Dict]:
         if not self._docs or self._embeddings.size == 0:
             return []
 
-        return self._dense_search(query, top_k=top_k, min_score=self.min_score)
+        return self._dense_search(query, top_k=max(1, min(top_k, 50)), min_score=self.min_score)
 
+    @synchronized
     def probe(self, query: str, top_k: int = 3) -> Dict:
         if not self._docs:
             return {"results": [], "has_hits": False, "has_strong_hits": False}
@@ -78,7 +139,7 @@ class LocalVectorStore:
         is_overview = self._is_document_overview_query(query)
         has_document_intent = is_overview or self._has_document_intent(query)
         if is_overview:
-            results = self.overview(top_k=int(os.getenv("RAG_OVERVIEW_TOP_K", "6")))
+            results = self.overview(top_k=settings.rag_overview_top_k)
             for result in results:
                 result["probe_dense_score"] = float(result.get("score", 0.0))
                 result["probe_keyword_score"] = 0.0
@@ -96,7 +157,8 @@ class LocalVectorStore:
                 "top_overview_score": 1.0 if results else 0.0,
             }
 
-        probe_min_dense = float(os.getenv("RAG_PROBE_MIN_DENSE_SCORE", "0.35"))
+        top_k = max(1, min(top_k, 50))
+        probe_min_dense = settings.rag_probe_min_dense_score
         dense_results = self._dense_search(query, top_k=top_k, min_score=probe_min_dense) if self._embeddings.size else []
         keyword_results = self._keyword_search(query, top_k=top_k)
         question_results = self._question_range_search(query, top_k=top_k)
@@ -161,7 +223,27 @@ class LocalVectorStore:
             "top_overview_score": 0.0,
         }
 
-    def overview(self, top_k: int = 6) -> List[Dict]:
+    @synchronized
+    def probe_with_catalog(self, query: str, top_k: int = 3) -> tuple[Dict, List[Dict]]:
+        return self.probe(query, top_k), self.document_catalog()
+
+    @synchronized
+    def overview(self, top_k: int = 8) -> List[Dict]:
+        top_k = max(1, min(top_k, 50))
+        outline_docs = [
+            doc
+            for doc in self._docs
+            if doc.get("metadata", {}).get("unit_type") in {"document_outline", "passage_summary"}
+        ]
+        if outline_docs:
+            results = []
+            for doc in sorted(outline_docs, key=lambda item: item.get("chunk_index", 0))[:top_k]:
+                item = dict(doc)
+                item["score"] = 0.0
+                item["overview_score"] = 1.0
+                results.append(item)
+            return results
+
         docs = sorted(self._docs, key=lambda doc: (min(doc.get("pages") or [999]), doc.get("chunk_index", 0)))
         content_docs = [doc for doc in docs if doc.get("token_count", 0) >= 80]
         selected = content_docs[:top_k] if content_docs else docs[:top_k]
@@ -173,6 +255,7 @@ class LocalVectorStore:
             results.append(item)
         return results
 
+    @synchronized
     def document_catalog(self) -> List[Dict]:
         catalog: dict[str, Dict] = {}
         for doc in self._docs:
@@ -185,6 +268,8 @@ class LocalVectorStore:
                     "pages": set(),
                     "document_ids": set(),
                     "mime_types": set(),
+                    "unit_types": set(),
+                    "passage_numbers": set(),
                 },
             )
             entry["chunks"] += 1
@@ -194,6 +279,12 @@ class LocalVectorStore:
             mime_type = doc.get("metadata", {}).get("mime_type")
             if mime_type:
                 entry["mime_types"].add(mime_type)
+            unit_type = doc.get("metadata", {}).get("unit_type")
+            if unit_type:
+                entry["unit_types"].add(unit_type)
+            passage_number = doc.get("metadata", {}).get("passage_number")
+            if passage_number:
+                entry["passage_numbers"].add(passage_number)
 
         return [
             {
@@ -202,12 +293,18 @@ class LocalVectorStore:
                 "pages": sorted(item["pages"]),
                 "document_ids": sorted(item["document_ids"]),
                 "mime_types": sorted(item["mime_types"]),
+                "unit_types": sorted(item["unit_types"]),
+                "passage_numbers": sorted(item["passage_numbers"]),
             }
             for item in catalog.values()
         ]
 
     def _dense_search(self, query: str, top_k: int, min_score: float) -> List[Dict]:
         query_embedding = self._embed([query])[0]
+        if self._embeddings.shape[1] != query_embedding.shape[0]:
+            raise RuntimeError(
+                "Stored embeddings are incompatible with the configured embedding model. Rebuild the RAG index."
+            )
         scores = self._embeddings @ query_embedding
         order = np.argsort(scores)[::-1][:top_k]
 
@@ -228,7 +325,7 @@ class LocalVectorStore:
 
         results = []
         for doc in self._docs:
-            text = doc.get("text", "")
+            text = doc.get("retrieval_text") or doc.get("text", "")
             text_terms = set(self._terms(text))
             overlap = sum(1 for term in query_terms if term in text_terms)
             phrase_bonus = 2 if query.lower() in text.lower() else 0
@@ -249,13 +346,18 @@ class LocalVectorStore:
         header_results = []
         numeric_results = []
         for doc in self._docs:
+            metadata_score = self._question_metadata_match_score(doc, ranges)
             text = doc.get("text", "")
             header_score = 0.0
             numeric_score = 0.0
             for start, end in ranges:
                 header_score += self._question_header_match_score(text, start, end)
                 numeric_score += self._question_number_match_score(text, start, end)
-            if header_score > 0:
+            if metadata_score > 0:
+                item = dict(doc)
+                item["question_score"] = metadata_score + header_score + numeric_score
+                header_results.append(item)
+            elif header_score > 0:
                 item = dict(doc)
                 item["question_score"] = header_score + numeric_score
                 header_results.append(item)
@@ -266,6 +368,23 @@ class LocalVectorStore:
 
         results = header_results if header_results else numeric_results
         return sorted(results, key=lambda item: item["question_score"], reverse=True)[:top_k]
+
+    def _question_metadata_match_score(self, doc: Dict, ranges: List[tuple[int, int]]) -> float:
+        metadata = doc.get("metadata", {})
+        question_range = metadata.get("question_range")
+        if not isinstance(question_range, list) or len(question_range) != 2:
+            return 0.0
+        chunk_start, chunk_end = int(question_range[0]), int(question_range[1])
+        score = 0.0
+        unit_type = metadata.get("unit_type")
+        for start, end in ranges:
+            if not self._ranges_overlap(start, end, chunk_start, chunk_end):
+                continue
+            overlap = min(end, chunk_end) - max(start, chunk_start) + 1
+            exact_bonus = 20.0 if start == chunk_start and end == chunk_end else 0.0
+            unit_bonus = 8.0 if unit_type == "question_group" else 4.0 if unit_type == "question" else 0.0
+            score += 30.0 + overlap + exact_bonus + unit_bonus
+        return score
 
     def _question_ranges(self, query: str) -> List[tuple[int, int]]:
         ranges: list[tuple[int, int]] = []
@@ -366,6 +485,7 @@ class LocalVectorStore:
         terms = re.findall(r"[\w]+", text.lower(), flags=re.UNICODE)
         return [term for term in terms if term not in stopwords and (len(term) > 1 or term.isdigit())]
 
+    @synchronized
     def delete_source(self, source_file: str) -> int:
         if not self._docs:
             return 0
@@ -375,12 +495,14 @@ class LocalVectorStore:
         if removed == 0:
             return 0
 
-        self._docs = [self._docs[idx] for idx in keep_indices]
-        if self._embeddings.size:
-            self._embeddings = self._embeddings[keep_indices]
-        self._save()
+        docs = [self._docs[idx] for idx in keep_indices]
+        embeddings = self._embeddings[keep_indices] if self._embeddings.size else self._embeddings
+        self._save_state(docs, embeddings)
+        self._docs = docs
+        self._embeddings = embeddings
         return removed
 
+    @synchronized
     def stats(self) -> Dict:
         return {
             "documents": len({doc.get("source_file") for doc in self._docs}),
@@ -389,11 +511,14 @@ class LocalVectorStore:
         }
 
 
-_store = None
+_store: LocalVectorStore | None = None
+_store_lock = threading.Lock()
 
 
 def get_store() -> LocalVectorStore:
     global _store
     if _store is None:
-        _store = LocalVectorStore()
+        with _store_lock:
+            if _store is None:
+                _store = LocalVectorStore()
     return _store

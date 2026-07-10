@@ -105,7 +105,7 @@ class DOCXExtractor:
     def _table_to_markdown(self, table) -> str:
         rows = []
         for row in table.rows:
-            cells = [normalize_inline_text(cell.text) for cell in row.cells]
+            cells = [normalize_inline_text(cell.text).replace("|", "\\|") for cell in row.cells]
             if any(cells):
                 rows.append(cells)
         if not rows:

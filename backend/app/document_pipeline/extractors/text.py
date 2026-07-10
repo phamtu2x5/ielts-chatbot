@@ -10,7 +10,10 @@ class TextExtractor:
         self.config = config
 
     def extract(self, file_path: Path, filename: str, mime_type: str, document_id: str) -> ProcessedDocument:
-        raw = file_path.read_text(encoding="utf-8", errors="ignore")
+        try:
+            raw = file_path.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Tệp văn bản phải dùng encoding UTF-8.") from exc
         normalized = normalize_text(raw)
         elements = []
         for index, paragraph in enumerate([part.strip() for part in normalized.split("\n\n") if part.strip()], 1):

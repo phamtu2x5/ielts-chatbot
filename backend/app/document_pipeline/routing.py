@@ -22,16 +22,23 @@ class FileRouter:
         suffix = Path(filename).suffix.lower()
         guessed_type = content_type or mimetypes.guess_type(filename)[0] or ""
 
-        if suffix in SUPPORTED_TEXT_EXTENSIONS or guessed_type.startswith("text/"):
+        if suffix in SUPPORTED_TEXT_EXTENSIONS:
             return "text"
-        if suffix in SUPPORTED_PDF_EXTENSIONS or guessed_type == "application/pdf":
+        if suffix in SUPPORTED_PDF_EXTENSIONS:
             return "pdf"
-        if (
-            suffix in SUPPORTED_DOCX_EXTENSIONS
-            or guessed_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        ):
+        if suffix in SUPPORTED_DOCX_EXTENSIONS:
             return "docx"
-        if suffix in SUPPORTED_IMAGE_EXTENSIONS or guessed_type.startswith("image/"):
+        if suffix in SUPPORTED_IMAGE_EXTENSIONS:
             return "image"
+
+        if not suffix:
+            if guessed_type.startswith("text/"):
+                return "text"
+            if guessed_type == "application/pdf":
+                return "pdf"
+            if guessed_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                return "docx"
+            if guessed_type.startswith("image/"):
+                return "image"
 
         raise ValueError("Hiện chỉ hỗ trợ tài liệu dạng TXT/Markdown, PDF, DOCX và ảnh PNG/JPG/JPEG/WebP.")

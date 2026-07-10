@@ -291,6 +291,11 @@ p {
   gap: 4px;
 }
 
+.typingDots.compact span {
+  width: 5px;
+  height: 5px;
+}
+
 .typingDots span {
   width: 7px;
   height: 7px;
@@ -308,6 +313,14 @@ p {
 }
 
 .loadingText {
+  font-size: 14px;
+}
+
+.inlineStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #667085;
   font-size: 14px;
 }
 
@@ -466,6 +479,10 @@ details p {
   margin-top: 8px;
   color: #475467;
   font-size: 13px;
+}
+
+.sources details p {
+  white-space: pre-wrap;
 }
 
 .composer {

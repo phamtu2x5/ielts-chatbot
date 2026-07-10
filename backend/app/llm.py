@@ -1,15 +1,17 @@
-import os
+import json
 import re
+from collections.abc import AsyncIterator
 from typing import List, Optional
 
 import httpx
 
+from .config import settings
 from .schemas import ChatMessage
 
 
-OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/generate")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "hf.co/Zkare/Chatbot_Ielts_Assistant_v2:Q4_K_M")
-OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "1200"))
+OLLAMA_API_URL = settings.ollama_api_url
+OLLAMA_MODEL = settings.ollama_model
+OLLAMA_NUM_PREDICT = settings.ollama_num_predict
 
 
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
@@ -19,7 +21,9 @@ Open with a brief, friendly sentence when appropriate, then answer directly and 
 Avoid robotic, abrupt, or overly terse phrasing.
 Use simple Markdown only when it improves readability: short headings, numbered lists, or bullet points.
 Use Markdown tables when the user asks for a schedule, comparison, rubric, or other structured information.
-HTML line breaks and a small number of helpful emojis are acceptable when they make the answer easier to read."""
+Keep Markdown tables simple: no nested bullet lists, no HTML, and no multi-paragraph content inside table cells.
+Never output raw HTML tags such as <ul>, <li>, <br>, or <table>; use Markdown instead.
+A small number of helpful emojis are acceptable when they make the answer easier to read."""
 
 
 def format_history(history: Optional[List[ChatMessage]]) -> str:
@@ -40,22 +44,31 @@ def clean_response(text: str) -> str:
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 
-async def query_ollama(prompt: str, temperature: float = 0.7, num_predict: Optional[int] = None) -> str:
-    payload = {
+def _ollama_payload(
+    prompt: str,
+    stream: bool,
+    temperature: float,
+    num_predict: Optional[int],
+) -> dict:
+    return {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
-        "stream": False,
+        "stream": stream,
         "options": {
             "temperature": temperature,
             "top_p": 0.9,
             "top_k": 40,
-            "num_ctx": 4096,
+            "num_ctx": settings.ollama_num_ctx,
             "num_predict": num_predict or OLLAMA_NUM_PREDICT,
             "repeat_penalty": 1.1,
         },
     }
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
+
+async def query_ollama(prompt: str, temperature: float = 0.7, num_predict: Optional[int] = None) -> str:
+    payload = _ollama_payload(prompt, stream=False, temperature=temperature, num_predict=num_predict)
+
+    async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
         response = await client.post(OLLAMA_API_URL, json=payload)
         response.raise_for_status()
         data = response.json()
@@ -65,6 +78,28 @@ async def query_ollama(prompt: str, temperature: float = 0.7, num_predict: Optio
     if not text:
         return "Mình sẵn sàng hỗ trợ bạn luyện IELTS. Bạn có thể hỏi cụ thể về Reading, Listening, Writing hoặc Speaking nhé."
     return text
+
+
+async def stream_ollama(
+    prompt: str,
+    temperature: float = 0.7,
+    num_predict: Optional[int] = None,
+) -> AsyncIterator[str]:
+    payload = _ollama_payload(prompt, stream=True, temperature=temperature, num_predict=num_predict)
+
+    async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
+        async with client.stream("POST", OLLAMA_API_URL, json=payload) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                data = json.loads(line)
+                if data.get("error"):
+                    raise RuntimeError(str(data["error"]))
+                token = data.get("response") or ""
+                token = re.sub(r"<br\s*/?>", "\n", token, flags=re.IGNORECASE)
+                if token:
+                    yield token
 
 
 def direct_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
@@ -144,7 +179,8 @@ def rag_prompt(message: str, context: str, history: Optional[List[ChatMessage]] 
         "You must answer using only the study material context below.",
         "Do not invent passages, questions, people, dates, examples, answer options, or explanations that are not present in the context.",
         "If the context does not contain the requested content, say in Vietnamese that you cannot find it in the uploaded material. Do not give a generic IELTS answer.",
-        "If the user asks for the content or text of questions, list/transcribe the questions only. Do not solve, label True/False/Not Given, infer answers, or explain unless the user explicitly asks for answers or explanations.",
+        "If the user asks what the whole document contains, summarize all distinct passages or sections visible in the context. Do not focus on only one passage when multiple passages are present.",
+        "If the user asks for the content or text of questions, present the question type/instructions and each question clearly. You may add a brief Vietnamese meaning for each question, but do not solve, label True/False/Not Given, infer answers, or explain answer reasoning unless the user explicitly asks for answers or explanations.",
         "Always cite the source file name and page marker when answering from context.",
         "",
         f"Study material context:\n{context}",

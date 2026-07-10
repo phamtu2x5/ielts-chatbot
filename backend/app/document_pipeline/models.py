@@ -47,12 +47,14 @@ class ProcessedPage:
     processing_route: str
     quality_score: float
     elements: List[DocumentElement] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "page_number": self.page_number,
             "processing_route": self.processing_route,
             "quality_score": self.quality_score,
+            "metadata": self.metadata,
             "elements": [element.to_dict() for element in self.elements],
         }
 
@@ -93,10 +95,12 @@ class DocumentChunk:
     token_count: int
     min_confidence: float
     chunk_index: int
+    retrieval_text: Optional[str] = None
+    display_text: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "chunk_id": self.chunk_id,
             "document_id": self.document_id,
             "source_file": self.source_file,
@@ -109,3 +113,8 @@ class DocumentChunk:
             "chunk_index": self.chunk_index,
             "metadata": self.metadata,
         }
+        if self.retrieval_text is not None:
+            data["retrieval_text"] = self.retrieval_text
+        if self.display_text is not None:
+            data["display_text"] = self.display_text
+        return data

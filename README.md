@@ -27,10 +27,12 @@ Upload text/PDF/DOCX/image
 -> extract native text first
 -> OCR only pages/images that need it
 -> normalize into structured document elements
--> semantic chunk
+-> reconcile duplicate native/OCR content
+-> parse IELTS Passage/Question Group/Question structure when present
+-> structure-aware chunks, with semantic chunk fallback for general documents
 -> sentence-transformers embedding
 -> local vector store
--> LLM router decides direct answer vs document retrieval
+-> deterministic document-intent guard, then LLM router for ambiguous queries
 -> retrieve context
 -> Ollama answer with context
 ```
@@ -99,10 +101,18 @@ Then run all cells. The last cell prints a `trycloudflare.com` URL for the front
 OLLAMA_API_URL=http://127.0.0.1:11434/api/generate
 OLLAMA_MODEL=hf.co/Zkare/Chatbot_Ielts_Assistant_v2:Q4_K_M
 OLLAMA_NUM_PREDICT=1200
+OLLAMA_NUM_CTX=4096
+OLLAMA_TIMEOUT_SECONDS=180
 EMBEDDING_MODEL_NAME=BAAI/bge-m3
+UPLOAD_DIR=uploads
+RAG_DATA_DIR=data/rag
+CORS_ALLOW_ORIGINS=*
+RAG_TOP_K=5
+RAG_MIN_SCORE=0.45
 RAG_PROBE_TOP_K=3
 RAG_PROBE_MIN_DENSE_SCORE=0.35
-RAG_OVERVIEW_TOP_K=6
+RAG_OVERVIEW_TOP_K=8
+RAG_OVERVIEW_SOURCE_CHARS=900
 ```
 
 Document ingestion settings:
@@ -113,10 +123,16 @@ DOCUMENT_MAX_PDF_PAGES=80
 DOCUMENT_CHUNK_TARGET_TOKENS=600
 DOCUMENT_CHUNK_MAX_TOKENS=800
 DOCUMENT_CHUNK_OVERLAP_TOKENS=80
+DOCUMENT_ENABLE_IELTS_STRUCTURE=true
+DOCUMENT_OCR_DUPLICATE_SIMILARITY=0.88
+DOCUMENT_OCR_DUPLICATE_TOKEN_OVERLAP=0.92
+DOCUMENT_OCR_MIN_NEW_TOKEN_RATIO=0.08
 DOCUMENT_OCR_LANG=vie+eng
 DOCUMENT_OCR_DPI=180
 OCR_ENGINE=paddle
 OCR_FALLBACK_ENGINE=tesseract
+PADDLEOCR_DEVICE=cpu
+PADDLEOCR_LANG=latin
 PADDLEOCR_DEFAULT_DET_MODEL=PP-OCRv6_small_det
 PADDLEOCR_DEFAULT_REC_MODEL=PP-OCRv6_small_rec
 PADDLEOCR_FALLBACK_DET_MODEL=PP-OCRv6_medium_det
@@ -127,10 +143,13 @@ WARMUP_OCR=true
 WARMUP_OCR_MEDIUM=true
 ```
 
-For a lighter Colab RAG embedding model, use:
+Runtime paths are resolved relative to `backend/` unless an absolute path is configured. Uploaded source files are temporary; persistent chunks and embeddings are stored under `backend/data/rag/` by default.
 
-```env
-EMBEDDING_MODEL_NAME=intfloat/multilingual-e5-base
+## Tests
+
+```bash
+python -m unittest discover -s backend/tests -v
+cd frontend && npm run build
 ```
 
 ## Notes
