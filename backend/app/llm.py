@@ -172,7 +172,12 @@ async def classify_route(
     return "direct"
 
 
-def rag_prompt(message: str, context: str, history: Optional[List[ChatMessage]] = None) -> str:
+def rag_prompt(
+    message: str,
+    context: str,
+    history: Optional[List[ChatMessage]] = None,
+    query_intent: str = "semantic_qa",
+) -> str:
     history_text = format_history(history)
     parts = [
         ASSISTANT_STYLE,
@@ -180,11 +185,39 @@ def rag_prompt(message: str, context: str, history: Optional[List[ChatMessage]] 
         "Do not invent passages, questions, people, dates, examples, answer options, or explanations that are not present in the context.",
         "If the context does not contain the requested content, say in Vietnamese that you cannot find it in the uploaded material. Do not give a generic IELTS answer.",
         "If the user asks what the whole document contains, summarize all distinct passages or sections visible in the context. Do not focus on only one passage when multiple passages are present.",
-        "If the user asks for the content or text of questions, present the question type/instructions and each question clearly. You may add a brief Vietnamese meaning for each question, but do not solve, label True/False/Not Given, infer answers, or explain answer reasoning unless the user explicitly asks for answers or explanations.",
+        "Question statements are prompts to be answered; they are not evidence from the passage.",
         "Always cite the source file name and page marker when answering from context.",
         "",
         f"Study material context:\n{context}",
     ]
+    if query_intent in {"show_questions", "translate_questions", "explain_questions"}:
+        parts.extend(
+            [
+                "Generation policy:",
+                "- Present or explain the requested questions only.",
+                "- You may explain the task type, instructions, vocabulary, and Vietnamese meaning.",
+                "- Do not solve the questions, do not provide True/False/Not Given labels, do not choose A/B/C/D, and do not infer answers.",
+                "- Do not treat the question statements themselves as passage evidence.",
+            ]
+        )
+    elif query_intent == "solve_questions":
+        parts.extend(
+            [
+                "Generation policy:",
+                "- The user is asking to solve questions.",
+                "- Use passage evidence from the context before giving an answer.",
+                "- If the context only contains question text and lacks passage evidence, say that there is not enough passage evidence to solve reliably.",
+            ]
+        )
+    elif query_intent == "document_overview":
+        parts.extend(
+            [
+                "Generation policy:",
+                "- Summarize the document from the outline and passage context.",
+                "- Mention passage titles, page ranges, and question groups when available.",
+                "- Do not answer individual questions or invent answer keys.",
+            ]
+        )
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Question:\n{message}")

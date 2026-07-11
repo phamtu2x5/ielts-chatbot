@@ -242,6 +242,23 @@ class LocalVectorStore:
                 item["score"] = 0.0
                 item["overview_score"] = 1.0
                 results.append(item)
+            passage_docs = [
+                doc
+                for doc in sorted(self._docs, key=lambda item: item.get("chunk_index", 0))
+                if doc.get("metadata", {}).get("unit_type") == "passage"
+            ]
+            seen_passages = set()
+            for doc in passage_docs:
+                passage_number = doc.get("metadata", {}).get("passage_number")
+                if passage_number in seen_passages:
+                    continue
+                seen_passages.add(passage_number)
+                item = dict(doc)
+                item["score"] = 0.0
+                item["overview_score"] = 0.8
+                results.append(item)
+                if len(results) >= top_k:
+                    break
             return results
 
         docs = sorted(self._docs, key=lambda doc: (min(doc.get("pages") or [999]), doc.get("chunk_index", 0)))
@@ -298,6 +315,33 @@ class LocalVectorStore:
             }
             for item in catalog.values()
         ]
+
+    @synchronized
+    def passage_context_for_sources(self, sources: List[Dict], max_chunks_per_passage: int = 3) -> List[Dict]:
+        passage_numbers = {
+            source.get("metadata", {}).get("passage_number")
+            for source in sources
+            if source.get("metadata", {}).get("passage_number")
+        }
+        if not passage_numbers:
+            return []
+
+        results: list[Dict] = []
+        counts: dict[int, int] = {}
+        for doc in sorted(self._docs, key=lambda item: item.get("chunk_index", 0)):
+            metadata = doc.get("metadata", {})
+            passage_number = metadata.get("passage_number")
+            if metadata.get("unit_type") != "passage" or passage_number not in passage_numbers:
+                continue
+            count = counts.get(passage_number, 0)
+            if count >= max_chunks_per_passage:
+                continue
+            item = dict(doc)
+            item["score"] = 0.0
+            item["context_expansion_score"] = 1.0
+            results.append(item)
+            counts[passage_number] = count + 1
+        return results
 
     def _dense_search(self, query: str, top_k: int, min_score: float) -> List[Dict]:
         query_embedding = self._embed([query])[0]
@@ -449,14 +493,30 @@ class LocalVectorStore:
         lowered = query.lower()
         overview_markers = [
             "nội dung tài liệu",
+            "nội dung của tài liệu",
+            "nội dung tài liệu trên",
+            "nội dung file",
+            "nội dung của file",
             "tài liệu là gì",
+            "tài liệu trên là gì",
+            "tài liệu này là gì",
+            "tài liệu này nói gì",
+            "tài liệu trên nói gì",
             "file này là gì",
+            "file trên là gì",
             "pdf này là gì",
+            "pdf trên là gì",
             "tóm tắt tài liệu",
+            "tổng quan tài liệu",
             "summary of the document",
             "summarize the document",
         ]
-        return any(marker in lowered for marker in overview_markers)
+        if any(marker in lowered for marker in overview_markers):
+            return True
+        has_content_word = "nội dung" in lowered or "tóm tắt" in lowered or "tổng quan" in lowered
+        has_document_word = any(marker in lowered for marker in ["tài liệu", "file", "pdf", "document"])
+        has_reference_word = any(marker in lowered for marker in ["này", "trên", "đó", "uploaded", "đã tải"])
+        return has_content_word and has_document_word and has_reference_word
 
     def _terms(self, text: str) -> List[str]:
         stopwords = {

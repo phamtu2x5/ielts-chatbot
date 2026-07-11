@@ -217,6 +217,50 @@ class IELTSStructureTests(unittest.TestCase):
         self.assertEqual(len(structured.passages), 2)
         self.assertEqual(structured.passages[1].title, "Destination Mars")
 
+    def test_passage_chunks_do_not_keep_previous_question_sections(self) -> None:
+        text = (
+            "Make That Wine! Australia is a nation of wine drinkers. "
+            "Questions 1-4 Do the following statements agree with the information given in Reading Passage One? "
+            "1. Wine is popular in Australia because it is healthy. "
+            "2. Yeast is white-coloured. "
+            "3. Wine is popular in the Near East. "
+            "4. Blended wines are usually cheaper. "
+            "Questions 5-5 Complete the table. "
+            "That Vision Thing In the past, management took a minor role in influencing motivation. "
+            "People in organisations were considered personnel. "
+            "Questions 6-6 Choose the correct letter, A, B, C, or D. "
+            "6. With regard to envisioning, the author feels A critical. B contemptuous. C impartial. D suspicious. "
+            "Destination Mars Mars is the closest potentially habitable planet. It has solid ground and frozen water. "
+            "Questions 7-7 Do the following statements agree with the information? "
+            "7. Mars has basic minerals."
+        )
+        document = make_document([ProcessedPage(1, "native_pdf", 0.95, [make_element("p1-e1", 1, text)])])
+
+        structured = IELTSStructureParser(self.config).parse(document)
+        chunks = StructuredChunker(self.config).chunk(document, structured)
+        passage_chunks = [chunk for chunk in chunks if chunk.metadata["unit_type"] == "passage"]
+        question_six = next(chunk for chunk in chunks if chunk.chunk_id.endswith("-question-6"))
+
+        self.assertEqual([passage.title for passage in structured.passages], ["Make That Wine!", "That Vision Thing", "Destination Mars"])
+        self.assertTrue(all("Questions 1-4" not in chunk.text for chunk in passage_chunks))
+        self.assertTrue(all("Questions 6-6" not in chunk.text for chunk in passage_chunks))
+        self.assertNotIn("Destination Mars", question_six.text)
+        self.assertNotIn("It has solid ground", question_six.text)
+
+    def test_task_noise_is_removed_from_question_group(self) -> None:
+        text = (
+            "Destination Mars Mars is the closest potentially habitable planet. "
+            "Questions 36-40 Give TWO examples of the following categories. "
+            "Choose NO MORE THAN TWO WORDS from the passage for each example. "
+            "Task 2 - Some people think children should receive full-time education."
+        )
+        document = make_document([ProcessedPage(1, "native_pdf", 0.95, [make_element("p1-e1", 1, text)])])
+
+        structured = IELTSStructureParser(self.config).parse(document)
+        group = structured.passages[0].question_groups[0]
+
+        self.assertNotIn("Task 2", group.text)
+
 
 if __name__ == "__main__":
     unittest.main()

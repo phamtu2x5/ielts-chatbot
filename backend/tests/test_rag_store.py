@@ -92,6 +92,22 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertGreater(probe["top_question_score"], 0)
         self.assertTrue(probe["has_strong_hits"])
 
+    def test_vietnamese_overview_query_uses_outline_and_passage_context(self) -> None:
+        store = FakeVectorStore()
+        outline = self._chunk("outline", "reading.pdf", "IELTS Reading document outline")
+        outline["metadata"] = {"unit_type": "document_outline"}
+        passage_one = self._chunk("passage-1", "reading.pdf", "Passage 1: Make That Wine")
+        passage_one["metadata"] = {"unit_type": "passage", "passage_number": 1}
+        passage_two = self._chunk("passage-2", "reading.pdf", "Passage 2: That Vision Thing")
+        passage_two["metadata"] = {"unit_type": "passage", "passage_number": 2}
+        store.upsert([outline, passage_one, passage_two], "reading.pdf")
+
+        probe = store.probe("Nội dung của tài liệu trên là gì", top_k=3)
+
+        self.assertTrue(probe["is_overview"])
+        self.assertEqual([item["chunk_id"] for item in probe["results"]], ["outline", "passage-1", "passage-2"])
+        self.assertTrue(all(item["probe_overview_score"] == 1.0 for item in probe["results"]))
+
     def _chunk(self, chunk_id: str, source_file: str, text: str) -> dict:
         return {
             "chunk_id": chunk_id,

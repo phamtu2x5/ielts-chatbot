@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -135,6 +136,85 @@ NO_RAG_MATCH_RESPONSE = (
 )
 
 
+QUESTION_RANGE_RE = re.compile(
+    r"(?:questions?|question|câu hỏi|câu)\s*(\d{1,2})(?:\s*(?:-|–|to|đến|tới)\s*(\d{1,2}))?",
+    re.IGNORECASE,
+)
+
+
+def parse_question_ranges(message: str) -> list[tuple[int, int]]:
+    ranges = []
+    for match in QUESTION_RANGE_RE.finditer(message):
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if start > end:
+            start, end = end, start
+        ranges.append((start, end))
+    return ranges
+
+
+def detect_query_intent(message: str, probe: dict[str, Any]) -> str:
+    lowered = message.lower()
+    question_ranges = parse_question_ranges(message)
+    if probe.get("is_overview"):
+        return "document_overview"
+    if question_ranges:
+        if any(marker in lowered for marker in ["dịch", "translate", "nghĩa tiếng việt", "nghĩa là gì"]):
+            return "translate_questions"
+        solve_markers = [
+            "đáp án",
+            "answer key",
+            "giải bài",
+            "giải câu",
+            "làm câu",
+            "chọn đáp án",
+            "tìm đáp án",
+            "true false not given",
+            "t/f/ng",
+        ]
+        if any(marker in lowered for marker in solve_markers):
+            return "solve_questions"
+        if any(marker in lowered for marker in ["giải thích", "explain", "phân tích"]):
+            return "explain_questions"
+        return "show_questions"
+    return "semantic_qa" if probe.get("has_document_intent") else "direct"
+
+
+def ranges_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    return max(a_start, b_start) <= min(a_end, b_end)
+
+
+def filter_sources_for_intent(sources: list[dict[str, Any]], message: str, intent: str) -> list[dict[str, Any]]:
+    question_ranges = parse_question_ranges(message)
+    if not question_ranges or intent not in {"show_questions", "explain_questions", "translate_questions"}:
+        return sources
+
+    filtered = []
+    for source in sources:
+        metadata = source.get("metadata", {})
+        question_range = metadata.get("question_range")
+        if metadata.get("unit_type") not in {"question_group", "question"}:
+            continue
+        if not isinstance(question_range, list) or len(question_range) != 2:
+            continue
+        chunk_start, chunk_end = int(question_range[0]), int(question_range[1])
+        if any(ranges_overlap(start, end, chunk_start, chunk_end) for start, end in question_ranges):
+            filtered.append(source)
+    return filtered or sources
+
+
+def dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen = set()
+    deduped = []
+    for source in sources:
+        key = source.get("chunk_id") or (source.get("source_file"), tuple(source.get("pages") or []), source.get("text"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(source)
+    return deduped
+
+
 @dataclass
 class ChatPreparation:
     prompt: str | None
@@ -142,6 +222,7 @@ class ChatPreparation:
     route_used: str
     sources: list[dict[str, Any]]
     debug: dict[str, Any]
+    query_intent: str = "direct"
 
 
 async def prepare_chat(req: ChatRequest) -> ChatPreparation:
@@ -151,11 +232,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     sources: list[dict[str, Any]] = []
     catalog: list[dict[str, Any]] = []
     probe: dict[str, Any] = {"results": []}
+    query_intent = "direct"
 
     stats = await run_in_threadpool(store.stats)
     if stats["chunks"] > 0:
         probe_top_k = max(settings.rag_probe_top_k, settings.rag_top_k)
         probe, catalog = await run_in_threadpool(store.probe_with_catalog, message, probe_top_k)
+        query_intent = detect_query_intent(message, probe)
 
         if probe.get("has_document_intent"):
             route = "rag"
@@ -167,6 +250,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             probe.get("is_overview") or probe.get("top_question_score", 0.0) >= 1
         ):
             route = "rag"
+    else:
+        query_intent = "direct"
 
     if route == "rag":
         if probe.get("is_overview"):
@@ -177,9 +262,14 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             sources = (probe.get("results") or [])[: settings.rag_top_k]
         else:
             sources = await run_in_threadpool(store.search, message, settings.rag_top_k)
+        sources = filter_sources_for_intent(sources, message, query_intent)
+        if query_intent == "solve_questions" and sources:
+            expansion = await run_in_threadpool(store.passage_context_for_sources, sources, 3)
+            sources = dedupe_sources(sources + expansion)
 
     debug = {
         "route_decision": route,
+        "query_intent": query_intent,
         "catalog": catalog,
         "probe": compact_probe_debug(probe),
         "source_count": len(sources),
@@ -192,11 +282,12 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             else format_context(sources)
         )
         return ChatPreparation(
-            prompt=rag_prompt(message, context, req.conversation_history),
+            prompt=rag_prompt(message, context, req.conversation_history, query_intent=query_intent),
             static_response=None,
             route_used="vector_rag",
             sources=sources,
             debug=debug,
+            query_intent=query_intent,
         )
 
     if route == "rag":
@@ -206,6 +297,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             route_used="vector_rag_no_match",
             sources=[],
             debug=debug,
+            query_intent=query_intent,
         )
 
     return ChatPreparation(
@@ -214,6 +306,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         route_used="base_model",
         sources=[],
         debug=debug,
+        query_intent=query_intent,
     )
 
 
