@@ -118,6 +118,14 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertEqual(intent, "solve_questions")
 
+    def test_vietnamese_from_to_question_range_is_solve_intent(self) -> None:
+        intent = detect_query_intent(
+            "trả lời câu hỏi từ 1 đến 4 trong tài liệu trên",
+            {"is_overview": False, "has_document_intent": True},
+        )
+
+        self.assertEqual(intent, "solve_questions")
+
     def test_prompt_echo_is_detected(self) -> None:
         prompt = "You are an IELTS preparation assistant.\n\nStudy material context:\nQuestions 1-4..."
         echoed = prompt + "\n\nQuestion: trả lời question 1 đến question 4"

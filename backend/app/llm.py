@@ -219,6 +219,8 @@ def rag_prompt(
     query_intent: str = "semantic_qa",
 ) -> str:
     history_text = format_history(history)
+    if query_intent in {"show_questions", "translate_questions"}:
+        history_text = ""
     parts = [
         ASSISTANT_STYLE,
         "You must answer using only the study material context below.",
@@ -230,7 +232,26 @@ def rag_prompt(
         "",
         f"Study material context:\n{context}",
     ]
-    if query_intent in {"show_questions", "translate_questions", "explain_questions"}:
+    if query_intent == "show_questions":
+        parts.extend(
+            [
+                "Generation policy:",
+                "- Only list the requested question instructions and question statements.",
+                "- Do not mention passage evidence, do not evaluate the statements, and do not explain why any statement is true or false.",
+                "- Do not provide TRUE/FALSE/NOT GIVEN labels or answer choices.",
+                "- A short Vietnamese meaning for each statement is allowed, but keep it separate from answers.",
+            ]
+        )
+    elif query_intent == "translate_questions":
+        parts.extend(
+            [
+                "Generation policy:",
+                "- Translate only the requested question instructions and question statements.",
+                "- Do not mention passage evidence, do not evaluate the statements, and do not solve.",
+                "- Do not provide TRUE/FALSE/NOT GIVEN labels or answer choices.",
+            ]
+        )
+    elif query_intent == "explain_questions":
         parts.extend(
             [
                 "Generation policy:",

@@ -136,6 +136,12 @@ NO_RAG_MATCH_RESPONSE = (
 )
 
 
+def generation_fallback(prepared: "ChatPreparation") -> str:
+    if prepared.route_used.startswith("vector_rag"):
+        return NO_RAG_MATCH_RESPONSE
+    return "Mình chưa nhận được nội dung trả lời từ model. Vui lòng thử lại."
+
+
 @dataclass
 class ChatPreparation:
     prompt: str | None
@@ -313,6 +319,8 @@ async def chat(req: ChatRequest) -> ChatResponse:
     if answer is None and prepared.prompt is not None:
         try:
             answer = await query_ollama(prepared.prompt)
+            if not answer.strip():
+                answer = generation_fallback(prepared)
         except Exception as exc:
             logger.exception("Chat generation failed")
             raise HTTPException(
@@ -356,8 +364,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 logger.warning("Ollama stream completed without visible tokens; retrying with non-stream request")
                 fallback_answer = await query_ollama(prepared.prompt or "")
                 if not fallback_answer.strip():
-                    yield stream_event("error", message="Không nhận được nội dung trả lời từ model. Vui lòng thử lại.")
-                    return
+                    fallback_answer = generation_fallback(prepared)
                 yield stream_event("token", token=fallback_answer)
             yield stream_event("done")
         except Exception:

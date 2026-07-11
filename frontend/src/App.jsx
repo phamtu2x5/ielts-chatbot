@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Bug, CheckCircle2, FileText, FileUp, Send, Sparkles, UserRound, XCircle } from "lucide-react";
+import { Bot, Bug, CheckCircle2, Download, FileText, FileUp, Send, Sparkles, UserRound, XCircle } from "lucide-react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -28,6 +28,27 @@ function normalizeMarkdown(content) {
     .replace(/<\/li>\s*<\/ul>/gi, "")
     .replace(/<\/?ul>/gi, "")
     .replace(/<\/?li>/gi, "");
+}
+
+function safeFilename(value) {
+  return (value || "rag-debug")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function downloadJson(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function MessageContent({ message }) {
@@ -98,7 +119,7 @@ function AttachmentCard({ attachment }) {
   );
 }
 
-function DebugPanel({ debug, sources }) {
+function DebugPanel({ debug, sources, onDownload }) {
   if (!debug) return null;
 
   const sourceSummary = (sources || []).map((source) => ({
@@ -121,8 +142,24 @@ function DebugPanel({ debug, sources }) {
   return (
     <details className="debugPanel">
       <summary>
-        <Bug size={14} />
-        Debug pipeline
+        <span className="debugSummaryTitle">
+          <Bug size={14} />
+          Debug pipeline
+        </span>
+        {onDownload && (
+          <button
+            className="debugDownloadButton"
+            type="button"
+            title="Tải câu hỏi, câu trả lời và debug"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onDownload();
+            }}
+          >
+            <Download size={14} />
+          </button>
+        )}
       </summary>
       <pre>{JSON.stringify({ ...debug, sources: sourceSummary }, null, 2)}</pre>
     </details>
@@ -171,6 +208,41 @@ function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, isSending]);
+
+  function exportDebug(message, index) {
+    const previousQuestion = [...messages.slice(0, index)]
+      .reverse()
+      .find((item) => item.role === "user" && item.content?.trim());
+    const debug = message.debug || {};
+    const queryIntent = debug.query_intent || debug.probe?.query_intent || null;
+    const routeDecision = debug.route_decision || message.route_used || null;
+    const payload = {
+      exported_at: new Date().toISOString(),
+      question: previousQuestion?.content || "",
+      answer: message.content || "",
+      route_used: message.route_used || null,
+      route_decision: routeDecision,
+      query_intent: queryIntent,
+      debug,
+      sources: message.sources || [],
+      source_previews: (message.sources || []).map((source) => ({
+        file: source.source_file,
+        pages: source.pages,
+        score: source.score,
+        dense: source.probe_dense_score,
+        keyword: source.probe_keyword_score,
+        question: source.probe_question_score,
+        overview: source.probe_overview_score,
+        chunk_id: source.chunk_id,
+        unit_type: source.metadata?.unit_type,
+        passage_number: source.metadata?.passage_number,
+        question_range: source.metadata?.question_range,
+        text: source.display_text || source.text || "",
+      })),
+    };
+    const suffix = safeFilename(previousQuestion?.content || message.route_used || "rag-debug");
+    downloadJson(`ielts-chatbot-debug-${suffix}-${Date.now()}.json`, payload);
+  }
 
   async function sendMessage(event) {
     event?.preventDefault();
@@ -404,7 +476,11 @@ function App() {
               <div className="bubble">
                 <MessageContent message={message} />
                 {routeLabel(message.route_used) && <div className="route">{routeLabel(message.route_used)}</div>}
-                <DebugPanel debug={message.debug} sources={message.sources} />
+                <DebugPanel
+                  debug={message.debug}
+                  sources={message.sources}
+                  onDownload={message.debug ? () => exportDebug(message, index) : null}
+                />
                 {message.sources?.length > 0 && (
                   <div className="sources">
                     {message.sources.map((source, sourceIndex) => (

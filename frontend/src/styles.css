@@ -443,8 +443,32 @@ p {
 .debugPanel summary {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 6px;
   color: #92400e;
+}
+
+.debugSummaryTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.debugDownloadButton {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #f3d27a;
+  border-radius: 8px;
+  color: #92400e;
+  background: #fff7d6;
+  cursor: pointer;
+}
+
+.debugDownloadButton:hover {
+  background: #fdecc8;
 }
 
 .debugPanel pre {

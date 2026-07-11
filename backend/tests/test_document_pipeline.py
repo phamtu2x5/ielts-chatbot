@@ -261,6 +261,31 @@ class IELTSStructureTests(unittest.TestCase):
 
         self.assertNotIn("Task 2", group.text)
 
+    def test_tail_exclamation_is_not_used_as_next_passage_title(self) -> None:
+        first = "First Topic " + "The passage introduces a broad subject. " * 30
+        questions = "Questions 1-1 Choose the correct letter. 1. The topic is A old. B simple. C narrow. D broad. Closing Remark! "
+        second = "Second Main Topic In recent years, researchers have changed their explanation of the issue. " * 20
+        second_questions = "Questions 2-2 Choose the correct letter. 2. The writer feels A critical. B neutral. C hopeful. D unclear."
+        document = make_document(
+            [
+                ProcessedPage(
+                    1,
+                    "native_pdf",
+                    0.95,
+                    [
+                        make_element("p1-e1", 1, first),
+                        make_element("p1-e2", 1, questions + second),
+                        make_element("p1-e3", 1, second_questions),
+                    ],
+                )
+            ]
+        )
+
+        structured = IELTSStructureParser(self.config).parse(document)
+
+        self.assertEqual(structured.passages[1].title, "Second Main Topic")
+        self.assertNotEqual(structured.passages[1].title, "Closing Remark!")
+
 
 if __name__ == "__main__":
     unittest.main()

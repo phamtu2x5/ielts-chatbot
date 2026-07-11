@@ -3,7 +3,7 @@ from typing import Any
 
 
 QUESTION_RANGE_RE = re.compile(
-    r"(?:questions?|question|câu hỏi|câu)\s*(\d{1,2})(?:\s*(?:-|–|to|đến|tới)\s*(\d{1,2}))?",
+    r"(?:questions?|question|câu hỏi|câu)\s*(?:từ\s+)?(\d{1,2})(?:\s*(?:-|–|to|đến|tới)\s*(?:questions?|question|câu hỏi|câu)?\s*(\d{1,2}))?",
     re.IGNORECASE,
 )
 
