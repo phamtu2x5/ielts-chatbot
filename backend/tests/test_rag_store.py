@@ -28,6 +28,8 @@ except ImportError:
     sys.modules["sentence_transformers"] = sentence_transformers_stub
 
 from app import rag
+from app.intent import detect_query_intent
+from app.llm import looks_like_prompt_echo
 
 
 class FakeVectorStore(rag.LocalVectorStore):
@@ -107,6 +109,21 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertTrue(probe["is_overview"])
         self.assertEqual([item["chunk_id"] for item in probe["results"]], ["outline", "passage-1", "passage-2"])
         self.assertTrue(all(item["probe_overview_score"] == 1.0 for item in probe["results"]))
+
+    def test_answer_question_range_is_solve_intent(self) -> None:
+        intent = detect_query_intent(
+            "trả lời question 1 đến question 4",
+            {"is_overview": False, "has_document_intent": True},
+        )
+
+        self.assertEqual(intent, "solve_questions")
+
+    def test_prompt_echo_is_detected(self) -> None:
+        prompt = "You are an IELTS preparation assistant.\n\nStudy material context:\nQuestions 1-4..."
+        echoed = prompt + "\n\nQuestion: trả lời question 1 đến question 4"
+
+        self.assertTrue(looks_like_prompt_echo(echoed, prompt))
+        self.assertFalse(looks_like_prompt_echo("Câu 1 là TRUE vì đoạn văn nêu...", prompt))
 
     def _chunk(self, chunk_id: str, source_file: str, text: str) -> dict:
         return {

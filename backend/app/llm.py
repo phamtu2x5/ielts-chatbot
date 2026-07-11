@@ -44,6 +44,23 @@ def clean_response(text: str) -> str:
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 
+def looks_like_prompt_echo(text: str, prompt: str) -> bool:
+    cleaned_text = " ".join((text or "").split()).lower()
+    cleaned_prompt = " ".join((prompt or "").split()).lower()
+    if not cleaned_text:
+        return False
+    if cleaned_prompt and cleaned_text.startswith(cleaned_prompt[:180]):
+        return True
+    prompt_markers = [
+        "you must answer using only the study material context below",
+        "study material context:",
+        "generation policy:",
+        "previous conversation:",
+        "answer naturally and clearly, but stay strictly grounded",
+    ]
+    return sum(1 for marker in prompt_markers if marker in cleaned_text) >= 2
+
+
 def _ollama_payload(
     prompt: str,
     stream: bool,
@@ -75,6 +92,8 @@ async def query_ollama(prompt: str, temperature: float = 0.7, num_predict: Optio
 
     text = data.get("response") or data.get("thinking") or ""
     text = clean_response(text)
+    if looks_like_prompt_echo(text, prompt):
+        return ""
     if not text:
         return "Mình sẵn sàng hỗ trợ bạn luyện IELTS. Bạn có thể hỏi cụ thể về Reading, Listening, Writing hoặc Speaking nhé."
     return text
@@ -86,6 +105,9 @@ async def stream_ollama(
     num_predict: Optional[int] = None,
 ) -> AsyncIterator[str]:
     payload = _ollama_payload(prompt, stream=True, temperature=temperature, num_predict=num_predict)
+    prompt_prefix = " ".join(prompt.split()).lower()
+    guard_buffer = ""
+    guard_released = False
 
     async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
         async with client.stream("POST", OLLAMA_API_URL, json=payload) as response:
@@ -98,8 +120,26 @@ async def stream_ollama(
                     raise RuntimeError(str(data["error"]))
                 token = data.get("response") or data.get("message", {}).get("content") or ""
                 token = re.sub(r"<br\s*/?>", "\n", token, flags=re.IGNORECASE)
-                if token:
+                if not token:
+                    continue
+
+                if guard_released:
                     yield token
+                    continue
+
+                guard_buffer += token
+                buffer_prefix = " ".join(guard_buffer.split()).lower()
+                if looks_like_prompt_echo(guard_buffer, prompt):
+                    return
+                if buffer_prefix and not prompt_prefix.startswith(buffer_prefix):
+                    guard_released = True
+                    yield guard_buffer
+                    guard_buffer = ""
+                elif len(buffer_prefix) >= 220:
+                    return
+
+            if guard_buffer and not looks_like_prompt_echo(guard_buffer, prompt):
+                yield guard_buffer
 
 
 def direct_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
@@ -206,6 +246,7 @@ def rag_prompt(
                 "Generation policy:",
                 "- The user is asking to solve questions.",
                 "- Use passage evidence from the context before giving an answer.",
+                "- For True/False/Not Given questions, compare each statement against the passage evidence, then give TRUE, FALSE, or NOT GIVEN with a short reason.",
                 "- If the context only contains question text and lacks passage evidence, say that there is not enough passage evidence to solve reliably.",
             ]
         )
