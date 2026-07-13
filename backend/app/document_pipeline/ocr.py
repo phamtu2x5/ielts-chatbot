@@ -2,7 +2,7 @@ import os
 import tempfile
 import threading
 from dataclasses import dataclass
-from importlib import metadata, util
+from importlib import util
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -84,7 +84,6 @@ class OCRProcessor:
 
             results = {
                 "engine": self.config.ocr_engine,
-                "runtime": self._runtime_diagnostics(),
                 "small": None,
                 "medium": None,
             }
@@ -201,26 +200,6 @@ class OCRProcessor:
             # Some Paddle builds do not expose all flags to Python. Env vars are
             # still left in place for the C++ runtime before predictor creation.
             return
-
-    def _runtime_diagnostics(self) -> Dict[str, Any]:
-        packages = {}
-        for package_name in ["paddlepaddle", "paddlepaddle-gpu", "paddleocr", "paddlex"]:
-            try:
-                packages[package_name] = metadata.version(package_name)
-            except metadata.PackageNotFoundError:
-                packages[package_name] = None
-        flags = {
-            key: os.getenv(key)
-            for key in [
-                "PADDLEOCR_DISABLE_ONEDNN",
-                "FLAGS_use_mkldnn",
-                "FLAGS_use_onednn",
-                "FLAGS_enable_pir_api",
-                "FLAGS_enable_pir_in_executor",
-                "PADDLEOCR_DEVICE",
-            ]
-        }
-        return {"packages": packages, "flags": flags}
 
     def _save_temp_image(self, image: Image.Image) -> Path:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
