@@ -59,13 +59,28 @@ class DocLayoutDetector:
         if not self.config.warmup_layout:
             return {"skipped": True, "engine": self.config.layout_engine}
 
-        image = Image.new("RGB", (512, 384), "white")
-        result = self.detect(image)
+        try:
+            self._get_model()
+        except Exception as exc:
+            return {
+                "engine": self.config.layout_engine,
+                "ok": False,
+                "metadata": {
+                    "error": str(exc),
+                    "model_repo": self.config.layout_model_repo,
+                    "model_path": self.config.layout_model_path or None,
+                    "device": self.config.layout_device,
+                },
+            }
         return {
-            "engine": result.engine,
-            "ok": result.ok,
-            "regions": len(result.regions),
-            "metadata": result.metadata,
+            "engine": self.config.layout_engine,
+            "ok": True,
+            "metadata": {
+                "model_loaded": True,
+                "model_repo": self.config.layout_model_repo,
+                "model_path": self.config.layout_model_path or None,
+                "device": self.config.layout_device,
+            },
         }
 
     def _detect(self, image: Image.Image) -> LayoutResult:
