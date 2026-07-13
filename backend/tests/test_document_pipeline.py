@@ -16,7 +16,6 @@ from app.document_pipeline.config import DocumentPipelineConfig
 from app.document_pipeline.chunking import SemanticChunker
 from app.document_pipeline.ielts import IELTSStructureParser, StructuredChunker
 from app.document_pipeline.extractors.text import TextExtractor
-from app.document_pipeline.layout import PPStructureProcessor
 from app.document_pipeline.models import DocumentElement, ProcessedDocument, ProcessedPage
 from app.document_pipeline.ocr import OCRProcessor, OCRResult
 from app.document_pipeline.reconciliation import NativeOCRReconciler
@@ -116,18 +115,14 @@ class OCRProcessorTests(unittest.TestCase):
 
     def test_paddle_failure_returns_diagnostics_without_external_fallback(self) -> None:
         processor = OCRProcessor(DocumentPipelineConfig())
-        small = OCRResult("", 0.0, "paddleocr_error", {"error": "small failed"})
-        medium = OCRResult("", 0.0, "paddleocr_error", {"error": "medium failed"})
+        failure = OCRResult("", 0.0, "paddleocr_error", {"error": "ocr failed"})
 
-        with patch.object(processor, "_image_to_text_with_paddle", side_effect=[small, medium]):
+        with patch.object(processor, "_image_to_text_with_paddle", return_value=failure):
             result = processor.image_to_text(Image.new("RGB", (20, 20), "white"))
 
         self.assertEqual(result.engine, "paddleocr_failed")
         self.assertFalse(result.text)
-        self.assertEqual(
-            [attempt["error"] for attempt in result.metadata["cascade_attempts"]],
-            ["small failed", "medium failed"],
-        )
+        self.assertEqual(result.metadata["attempt"]["error"], "ocr failed")
 
 
 class WritingVisualParserTests(unittest.TestCase):
@@ -203,64 +198,6 @@ class WritingVisualParserTests(unittest.TestCase):
         self.assertEqual([chunk.metadata["unit_type"] for chunk in chunks[:2]], ["writing_prompt", "writing_table"])
         self.assertIn("table_row", [chunk.metadata["unit_type"] for chunk in chunks])
         self.assertEqual(chunks[1].metadata["table"]["rows"][1], ["B", 61, 89, 67, 94])
-
-
-class PPStructureProcessorTests(unittest.TestCase):
-    def test_extracts_table_structure_from_html_result(self) -> None:
-        processor = PPStructureProcessor(DocumentPipelineConfig())
-        raw = [
-            {
-                "type": "table",
-                "html": "<table><tr><th>Stage</th><th>Answer</th></tr><tr><td>First</td><td>18</td></tr></table>",
-                "bbox": [1, 2, 3, 4],
-                "score": 0.91,
-            }
-        ]
-
-        structures = processor._extract_structures(raw)
-
-        self.assertEqual(structures[0]["type"], "table")
-        self.assertEqual(structures[0]["columns"], ["Stage", "Answer"])
-        self.assertEqual(structures[0]["rows"], [["First", "18"]])
-        self.assertEqual(structures[0]["bbox"], [1.0, 2.0, 3.0, 4.0])
-
-    def test_warmup_runs_model_inference_when_enabled(self) -> None:
-        processor = PPStructureProcessor(DocumentPipelineConfig(warmup_pp_structure=True))
-        raw = [
-            {
-                "type": "table",
-                "html": "<table><tr><th>Country</th><th>Value</th></tr><tr><td>A</td><td>78</td></tr></table>",
-            }
-        ]
-
-        with patch.object(processor, "_get_model", return_value=object()) as get_model:
-            with patch.object(processor, "_predict_image", return_value=raw) as predict_image:
-                result = processor.warmup()
-
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["model_loaded"])
-        self.assertTrue(result["inference_ok"])
-        self.assertEqual(result["structures_found"], 1)
-        self.assertEqual(result["table_structures_found"], 1)
-        get_model.assert_called_once()
-        predict_image.assert_called_once()
-
-    def test_disabled_processor_marks_visual_groups_without_opening_pdf(self) -> None:
-        config = DocumentPipelineConfig(enable_pp_structure=False)
-        text = (
-            "A Practice Passage This passage explains a process. "
-            "Questions 1-2 Complete the table below. Choose NO MORE THAN TWO WORDS from the passage. "
-            "Category Answer Colour 1 Location 2 "
-        )
-        document = make_document([ProcessedPage(1, "native_pdf", 0.95, [make_element("p1-e1", 1, text)])])
-        structured = IELTSStructureParser(config).parse(document)
-
-        report = PPStructureProcessor(config).enrich_pdf(Path("missing.pdf"), document, structured)
-
-        group = structured.passages[0].question_groups[0]
-        self.assertEqual(report["status"], "skipped")
-        self.assertEqual(group.visual_element["layout_status"], "disabled")
-        self.assertEqual(document.metadata["ielts_structure"]["passages"][0]["question_groups"][0]["visual_element"]["layout_status"], "disabled")
 
 
 class IELTSStructureTests(unittest.TestCase):

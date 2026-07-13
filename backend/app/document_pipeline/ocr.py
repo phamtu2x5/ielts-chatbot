@@ -33,8 +33,7 @@ class OCRResult:
 class OCRProcessor:
     def __init__(self, config: DocumentPipelineConfig) -> None:
         self.config = config
-        self._paddle_small = None
-        self._paddle_medium = None
+        self._paddle_ocr = None
         self._lock = threading.RLock()
 
     def image_to_text(self, image: Image.Image) -> OCRResult:
@@ -42,18 +41,8 @@ class OCRProcessor:
             return self._image_to_text(image)
 
     def _image_to_text(self, image: Image.Image) -> OCRResult:
-        result = self._image_to_text_with_paddle(image, use_medium=False)
-        if result.text and result.confidence >= self.config.paddleocr_min_confidence:
-            return result
-
-        fallback_result = self._image_to_text_with_paddle(image, use_medium=True)
-        attempts = [self._attempt_summary(result), self._attempt_summary(fallback_result)]
-        if fallback_result.text and fallback_result.confidence >= result.confidence:
-            fallback_result.metadata["cascade_attempts"] = attempts
-            return fallback_result
-
+        result = self._image_to_text_with_paddle(image)
         if result.text:
-            result.metadata["cascade_attempts"] = attempts
             return result
 
         return OCRResult(
@@ -61,8 +50,8 @@ class OCRProcessor:
             0.0,
             "paddleocr_failed",
             {
-                "reason": "paddleocr_small_and_medium_failed",
-                "cascade_attempts": attempts,
+                "reason": "paddleocr_failed",
+                "attempt": self._attempt_summary(result),
             },
         )
 
@@ -74,7 +63,7 @@ class OCRProcessor:
             "error": result.metadata.get("error"),
         }
 
-    def warmup(self, include_medium: bool = True) -> Dict[str, Any]:
+    def warmup(self) -> Dict[str, Any]:
         with self._lock:
             image = Image.new("RGB", (420, 96), "white")
             from PIL import ImageDraw
@@ -84,38 +73,27 @@ class OCRProcessor:
 
             results = {
                 "engine": self.config.ocr_engine,
-                "small": None,
-                "medium": None,
+                "model": None,
             }
-            small = self._image_to_text_with_paddle(image, use_medium=False)
-            results["small"] = {
-                "engine": small.engine,
-                "confidence": small.confidence,
-                "ok": bool(small.text),
-                "metadata": small.metadata,
+            model = self._image_to_text_with_paddle(image)
+            results["model"] = {
+                "engine": model.engine,
+                "confidence": model.confidence,
+                "ok": bool(model.text),
+                "metadata": model.metadata,
             }
-            if include_medium:
-                medium = self._image_to_text_with_paddle(image, use_medium=True)
-                results["medium"] = {
-                    "engine": medium.engine,
-                    "confidence": medium.confidence,
-                    "ok": bool(medium.text),
-                    "metadata": medium.metadata,
-                }
-            results["models_ready"] = bool(results["small"]["ok"]) and (
-                not include_medium or bool(results["medium"] and results["medium"]["ok"])
-            )
+            results["models_ready"] = bool(results["model"]["ok"])
             return results
 
     def _paddle_is_available(self) -> bool:
         return util.find_spec("paddleocr") is not None
 
-    def _image_to_text_with_paddle(self, image: Image.Image, use_medium: bool) -> OCRResult:
+    def _image_to_text_with_paddle(self, image: Image.Image) -> OCRResult:
         if not self._paddle_is_available():
             return OCRResult("", 0.0, "paddleocr_unavailable", {"reason": "paddleocr_not_installed"})
 
         try:
-            ocr = self._get_paddle_ocr(use_medium)
+            ocr = self._get_paddle_ocr()
             image_path = self._save_temp_image(image)
             try:
                 raw_result = ocr.predict(str(image_path))
@@ -124,7 +102,7 @@ class OCRProcessor:
             texts, scores = self._extract_paddle_text_scores(raw_result)
         except Exception as exc:
             error = str(exc)
-            metadata = {"error": error, "tier": "medium" if use_medium else "small"}
+            metadata = {"error": error}
             if "ConvertPirAttribute2RuntimeAttribute" in error or "onednn_instruction" in error:
                 metadata["hint"] = (
                     "PaddleOCR failed inside Paddle oneDNN/PIR runtime. "
@@ -135,52 +113,38 @@ class OCRProcessor:
 
         text = normalize_text("\n".join(texts))
         confidence = sum(scores) / len(scores) if scores else (0.6 if text else 0.0)
-        tier = "medium" if use_medium else "small"
         return OCRResult(
             text=text,
             confidence=max(0.0, min(1.0, confidence)),
-            engine=f"paddleocr_ppocrv6_{tier}",
+            engine="paddleocr_ppocrv6_medium",
             metadata={
-                "tier": tier,
                 "word_count": len(texts),
                 "lang": self.config.paddleocr_lang,
-                "det_model": self.config.paddleocr_fallback_det_model
-                if use_medium
-                else self.config.paddleocr_default_det_model,
-                "rec_model": self.config.paddleocr_fallback_rec_model
-                if use_medium
-                else self.config.paddleocr_default_rec_model,
+                "det_model": self.config.paddleocr_det_model,
+                "rec_model": self.config.paddleocr_rec_model,
             },
         )
 
-    def _get_paddle_ocr(self, use_medium: bool):
-        if use_medium and self._paddle_medium is not None:
-            return self._paddle_medium
-        if not use_medium and self._paddle_small is not None:
-            return self._paddle_small
+    def _get_paddle_ocr(self):
+        if self._paddle_ocr is not None:
+            return self._paddle_ocr
 
         self._apply_paddle_runtime_flags()
         from paddleocr import PaddleOCR
 
-        det_model = self.config.paddleocr_fallback_det_model if use_medium else self.config.paddleocr_default_det_model
-        rec_model = self.config.paddleocr_fallback_rec_model if use_medium else self.config.paddleocr_default_rec_model
-
         ocr = PaddleOCR(
             ocr_version="PP-OCRv6",
             lang=self.config.paddleocr_lang,
-            text_detection_model_name=det_model,
-            text_recognition_model_name=rec_model,
+            text_detection_model_name=self.config.paddleocr_det_model,
+            text_recognition_model_name=self.config.paddleocr_rec_model,
             use_doc_orientation_classify=self.config.paddleocr_use_doc_orientation,
             use_doc_unwarping=self.config.paddleocr_use_doc_unwarping,
             use_textline_orientation=self.config.paddleocr_use_textline_orientation,
             device=self.config.paddleocr_device,
         )
 
-        if use_medium:
-            self._paddle_medium = ocr
-        else:
-            self._paddle_small = ocr
-        return ocr
+        self._paddle_ocr = ocr
+        return self._paddle_ocr
 
     def _apply_paddle_runtime_flags(self) -> None:
         if os.getenv("PADDLEOCR_DISABLE_ONEDNN", "1").lower() in {"0", "false", "no"}:

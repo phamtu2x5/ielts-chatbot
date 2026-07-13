@@ -614,17 +614,6 @@ async def warmup() -> dict:
     except Exception as exc:
         results["ocr"] = {"ok": False, "error": str(exc)}
 
-    layout_started = time.perf_counter()
-    try:
-        layout_result = await run_in_threadpool(DOCUMENT_PROCESSOR.warmup_layout)
-        results["layout"] = {
-            "ok": bool(layout_result.get("skipped") or layout_result.get("ok", False)),
-            "duration_seconds": round(time.perf_counter() - layout_started, 2),
-            **layout_result,
-        }
-    except Exception as exc:
-        results["layout"] = {"ok": False, "error": str(exc)}
-
     ok = all(component.get("ok", True) for component in results.values())
     return {
         "status": "ok" if ok else "partial",

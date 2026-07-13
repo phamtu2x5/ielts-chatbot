@@ -7,7 +7,7 @@ python-multipart>=0.0.20,<1
 aiofiles==24.1.0
 PyMuPDF>=1.24,<2
 paddlepaddle>=3.2,<3.3
-paddleocr[doc-parser]>=3.7,<3.8
+paddleocr>=3.7,<3.8
 Pillow>=10,<12
 python-docx>=1.1,<2
 numpy>=1.26,<2.1
