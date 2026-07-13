@@ -22,6 +22,7 @@ class DocumentPipelineConfig:
     ocr_runtime: str = field(default_factory=lambda: os.getenv("OCR_RUNTIME", "onnxruntime"))
     ocr_device: str = field(default_factory=lambda: os.getenv("OCR_DEVICE", "cpu"))
     ocr_lang: str = field(default_factory=lambda: os.getenv("OCR_LANG", "en"))
+    ocr_det_lang: str = field(default_factory=lambda: os.getenv("OCR_DET_LANG", "ch"))
     ocr_version: str = field(default_factory=lambda: os.getenv("OCR_VERSION", "PP-OCRv6"))
     ocr_model_size: str = field(default_factory=lambda: os.getenv("OCR_MODEL_SIZE", "medium"))
     ocr_min_confidence: float = field(default_factory=lambda: float(os.getenv("OCR_MIN_CONFIDENCE", "0.72")))
@@ -77,6 +78,10 @@ class DocumentPipelineConfig:
             raise ValueError("OCR_RUNTIME must be onnxruntime.")
         if self.ocr_device.lower() != "cpu":
             raise ValueError("OCR_DEVICE must be cpu.")
+        if self.ocr_version not in {"PP-OCRv4", "PP-OCRv5", "PP-OCRv6"}:
+            raise ValueError("OCR_VERSION must be PP-OCRv4, PP-OCRv5, or PP-OCRv6 for RapidOCR.")
+        if self.ocr_model_size.lower() not in {"mobile", "server", "tiny", "small", "medium"}:
+            raise ValueError("OCR_MODEL_SIZE must be mobile, server, tiny, small, or medium for RapidOCR.")
         if self.layout_enabled and self.layout_engine.lower() != "doclayout_yolo":
             raise ValueError("LAYOUT_ENGINE must be doclayout_yolo.")
         if self.layout_image_size <= 0:

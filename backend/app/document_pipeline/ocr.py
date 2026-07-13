@@ -97,10 +97,11 @@ class OCRProcessor:
         return OCRResult(
             text=text,
             confidence=max(0.0, min(1.0, confidence)),
-            engine="rapidocr_ppocrv6_medium_onnxruntime",
+            engine=f"rapidocr_{self.config.ocr_version.lower()}_{self.config.ocr_model_size.lower()}_onnxruntime",
             metadata={
                 "word_count": len(texts),
                 "lang": self.config.ocr_lang,
+                "det_lang": self.config.ocr_det_lang,
                 "runtime": self.config.ocr_runtime,
                 "device": self.config.ocr_device,
                 "ocr_version": self.config.ocr_version,
@@ -120,15 +121,17 @@ class OCRProcessor:
         return self._rapid_ocr
 
     def _rapidocr_params(self) -> Dict[str, Any]:
+        from rapidocr.utils.typings import EngineType, LangDet, LangRec, ModelType, OCRVersion
+
         return {
-            "Det.engine_type": "onnxruntime",
-            "Det.lang_type": self.config.ocr_lang,
-            "Det.model_type": self.config.ocr_model_size,
-            "Det.ocr_version": self.config.ocr_version,
-            "Rec.engine_type": "onnxruntime",
-            "Rec.lang_type": self.config.ocr_lang,
-            "Rec.model_type": self.config.ocr_model_size,
-            "Rec.ocr_version": self.config.ocr_version,
+            "Det.engine_type": EngineType.ONNXRUNTIME,
+            "Det.lang_type": LangDet(self.config.ocr_det_lang),
+            "Det.model_type": ModelType(self.config.ocr_model_size),
+            "Det.ocr_version": OCRVersion(self.config.ocr_version),
+            "Rec.engine_type": EngineType.ONNXRUNTIME,
+            "Rec.lang_type": LangRec(self.config.ocr_lang),
+            "Rec.model_type": ModelType(self.config.ocr_model_size),
+            "Rec.ocr_version": OCRVersion(self.config.ocr_version),
         }
 
     def _save_temp_image(self, image: Image.Image) -> Path:
