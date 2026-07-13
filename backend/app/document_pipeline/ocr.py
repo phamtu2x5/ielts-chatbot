@@ -12,9 +12,8 @@ from .config import DocumentPipelineConfig
 from .normalization import normalize_text
 
 
-# PaddleOCR on Colab CPU can hit a Paddle oneDNN/PIR runtime error before
-# inference starts. Force-disable those CPU paths before the first Paddle
-# import by default; advanced users can opt out with PADDLEOCR_DISABLE_ONEDNN=0.
+# Paddle CPU fallback paths can hit oneDNN/PIR runtime errors before inference
+# starts. Keep those paths disabled by default; GPU inference is unaffected.
 if os.getenv("PADDLEOCR_DISABLE_ONEDNN", "1").lower() not in {"0", "false", "no"}:
     os.environ["FLAGS_use_mkldnn"] = "0"
     os.environ["FLAGS_use_onednn"] = "0"

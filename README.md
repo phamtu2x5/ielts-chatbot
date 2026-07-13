@@ -79,7 +79,7 @@ curl -s -X POST http://127.0.0.1:2222/warmup
 
 This loads the Ollama LLM, embedding model, and PaddleOCR model up front so the first real user request is smoother.
 
-For Colab CPU, keep `paddlepaddle` below `3.3` for now. `paddlepaddle==3.3.1` has been observed to crash PaddleOCR PP-OCRv6 inference with `ConvertPirAttribute2RuntimeAttribute ... onednn_instruction.cc` even when oneDNN/PIR flags are disabled.
+The Colab runtime is configured for GPU OCR with `paddlepaddle-gpu==3.2.2`.
 
 ## Run On Colab
 
@@ -131,7 +131,7 @@ DOCUMENT_OCR_DUPLICATE_TOKEN_OVERLAP=0.92
 DOCUMENT_OCR_MIN_NEW_TOKEN_RATIO=0.08
 DOCUMENT_OCR_DPI=180
 OCR_ENGINE=paddle
-PADDLEOCR_DEVICE=cpu
+PADDLEOCR_DEVICE=gpu:0
 PADDLEOCR_LANG=latin
 PADDLEOCR_DET_MODEL=PP-OCRv6_medium_det
 PADDLEOCR_REC_MODEL=PP-OCRv6_medium_rec
@@ -147,7 +147,7 @@ WARMUP_OCR=true
 
 Runtime paths are resolved relative to `backend/` unless an absolute path is configured. Uploaded source files are temporary; persistent chunks and embeddings are stored under `backend/data/rag/` by default.
 
-On Colab CPU, PaddleOCR may fail inside Paddle's oneDNN/PIR runtime. Keep the `FLAGS_*` variables above in the backend process environment before importing Paddle/PaddleOCR. `/warmup` must report `ocr.ok=true` before uploading images or scanned PDFs.
+The backend expects a CUDA-capable Paddle runtime. `/warmup` must report `ocr.ok=true` before uploading images or scanned PDFs.
 
 The document pipeline uses one OCR model by default: PP-OCRv6 medium. PP-OCRv6 small and PP-StructureV3 are not loaded in the streamlined Colab pipeline.
 
