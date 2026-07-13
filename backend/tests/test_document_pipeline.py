@@ -224,6 +224,27 @@ class PPStructureProcessorTests(unittest.TestCase):
         self.assertEqual(structures[0]["rows"], [["First", "18"]])
         self.assertEqual(structures[0]["bbox"], [1.0, 2.0, 3.0, 4.0])
 
+    def test_warmup_runs_model_inference_when_enabled(self) -> None:
+        processor = PPStructureProcessor(DocumentPipelineConfig(warmup_pp_structure=True))
+        raw = [
+            {
+                "type": "table",
+                "html": "<table><tr><th>Country</th><th>Value</th></tr><tr><td>A</td><td>78</td></tr></table>",
+            }
+        ]
+
+        with patch.object(processor, "_get_model", return_value=object()) as get_model:
+            with patch.object(processor, "_predict_image", return_value=raw) as predict_image:
+                result = processor.warmup()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["model_loaded"])
+        self.assertTrue(result["inference_ok"])
+        self.assertEqual(result["structures_found"], 1)
+        self.assertEqual(result["table_structures_found"], 1)
+        get_model.assert_called_once()
+        predict_image.assert_called_once()
+
     def test_disabled_processor_marks_visual_groups_without_opening_pdf(self) -> None:
         config = DocumentPipelineConfig(enable_pp_structure=False)
         text = (

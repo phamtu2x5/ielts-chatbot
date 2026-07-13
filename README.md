@@ -149,7 +149,7 @@ WARMUP_LLM=true
 WARMUP_EMBEDDING=true
 WARMUP_OCR=true
 WARMUP_OCR_MEDIUM=true
-WARMUP_PP_STRUCTURE=false
+WARMUP_PP_STRUCTURE=true
 ```
 
 Runtime paths are resolved relative to `backend/` unless an absolute path is configured. Uploaded source files are temporary; persistent chunks and embeddings are stored under `backend/data/rag/` by default.

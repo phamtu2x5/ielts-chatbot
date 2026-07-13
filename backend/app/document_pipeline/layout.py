@@ -1,10 +1,11 @@
 import tempfile
 import threading
 from html.parser import HTMLParser
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from .config import DocumentPipelineConfig
 from .ielts import IELTSDocument, IELTSQuestionGroup
@@ -134,9 +135,26 @@ class PPStructureProcessor:
         try:
             with self._lock:
                 self._get_model()
-            return {"ok": True, "engine": "pp_structure_v3"}
+            raw = self._predict_image(self._warmup_image())
+            structures = self._extract_structures(raw)
+            return {
+                "ok": True,
+                "engine": "pp_structure_v3",
+                "runtime": self._runtime_diagnostics(),
+                "model_loaded": True,
+                "inference_ok": True,
+                "structures_found": len(structures),
+                "table_structures_found": sum(1 for structure in structures if structure.get("type") == "table"),
+            }
         except Exception as exc:
-            return {"ok": False, "engine": "pp_structure_v3", "error": str(exc)}
+            return {
+                "ok": False,
+                "engine": "pp_structure_v3",
+                "runtime": self._runtime_diagnostics(),
+                "model_loaded": self._model is not None,
+                "inference_ok": False,
+                "error": str(exc),
+            }
 
     def _visual_groups(self, structured: IELTSDocument) -> list[IELTSQuestionGroup]:
         return [
@@ -169,6 +187,26 @@ class PPStructureProcessor:
         pixmap = page.get_pixmap(matrix=matrix, alpha=False)
         return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
 
+    def _warmup_image(self) -> Image.Image:
+        image = Image.new("RGB", (640, 220), "white")
+        draw = ImageDraw.Draw(image)
+        x_positions = [24, 180, 360, 600]
+        y_positions = [32, 88, 144, 196]
+        for x in x_positions:
+            draw.line((x, y_positions[0], x, y_positions[-1]), fill="black", width=2)
+        for y in y_positions:
+            draw.line((x_positions[0], y, x_positions[-1], y), fill="black", width=2)
+        draw.text((44, 52), "Country", fill="black")
+        draw.text((204, 52), "Internet 2019", fill="black")
+        draw.text((384, 52), "Internet 2024", fill="black")
+        draw.text((44, 108), "A", fill="black")
+        draw.text((204, 108), "78", fill="black")
+        draw.text((384, 108), "96", fill="black")
+        draw.text((44, 164), "B", fill="black")
+        draw.text((204, 164), "61", fill="black")
+        draw.text((384, 164), "89", fill="black")
+        return image
+
     def _predict_image(self, image: Image.Image) -> Any:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
             image_path = Path(handle.name)
@@ -197,6 +235,15 @@ class PPStructureProcessor:
         except TypeError:
             self._model = PPStructureV3()
         return self._model
+
+    def _runtime_diagnostics(self) -> dict[str, Any]:
+        packages: dict[str, str | None] = {}
+        for package_name in ["paddlepaddle", "paddlepaddle-gpu", "paddleocr", "paddlex"]:
+            try:
+                packages[package_name] = metadata.version(package_name)
+            except metadata.PackageNotFoundError:
+                packages[package_name] = None
+        return {"packages": packages, "device": self.config.pp_structure_device}
 
     def _extract_structures(self, raw: Any) -> list[dict[str, Any]]:
         structures: list[dict[str, Any]] = []
