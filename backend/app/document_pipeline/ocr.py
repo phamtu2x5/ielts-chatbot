@@ -2,6 +2,7 @@ import os
 import tempfile
 import threading
 from dataclasses import dataclass
+from importlib import metadata, util
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -81,7 +82,12 @@ class OCRProcessor:
             draw = ImageDraw.Draw(image)
             draw.text((16, 32), "IELTS OCR warmup", fill="black")
 
-            results = {"engine": self.config.ocr_engine, "small": None, "medium": None}
+            results = {
+                "engine": self.config.ocr_engine,
+                "runtime": self._runtime_diagnostics(),
+                "small": None,
+                "medium": None,
+            }
             small = self._image_to_text_with_paddle(image, use_medium=False)
             results["small"] = {
                 "engine": small.engine,
@@ -103,11 +109,7 @@ class OCRProcessor:
             return results
 
     def _paddle_is_available(self) -> bool:
-        try:
-            __import__("paddleocr")
-        except ImportError:
-            return False
-        return True
+        return util.find_spec("paddleocr") is not None
 
     def _image_to_text_with_paddle(self, image: Image.Image, use_medium: bool) -> OCRResult:
         if not self._paddle_is_available():
@@ -158,6 +160,7 @@ class OCRProcessor:
         if not use_medium and self._paddle_small is not None:
             return self._paddle_small
 
+        self._apply_paddle_runtime_flags()
         from paddleocr import PaddleOCR
 
         det_model = self.config.paddleocr_fallback_det_model if use_medium else self.config.paddleocr_default_det_model
@@ -179,6 +182,45 @@ class OCRProcessor:
         else:
             self._paddle_small = ocr
         return ocr
+
+    def _apply_paddle_runtime_flags(self) -> None:
+        if os.getenv("PADDLEOCR_DISABLE_ONEDNN", "1").lower() in {"0", "false", "no"}:
+            return
+        flag_values = {
+            "FLAGS_use_mkldnn": "0",
+            "FLAGS_use_onednn": "0",
+            "FLAGS_enable_pir_api": "0",
+            "FLAGS_enable_pir_in_executor": "0",
+        }
+        os.environ.update(flag_values)
+        try:
+            import paddle
+
+            paddle.set_flags({key: False for key in flag_values})
+        except Exception:
+            # Some Paddle builds do not expose all flags to Python. Env vars are
+            # still left in place for the C++ runtime before predictor creation.
+            return
+
+    def _runtime_diagnostics(self) -> Dict[str, Any]:
+        packages = {}
+        for package_name in ["paddlepaddle", "paddlepaddle-gpu", "paddleocr", "paddlex"]:
+            try:
+                packages[package_name] = metadata.version(package_name)
+            except metadata.PackageNotFoundError:
+                packages[package_name] = None
+        flags = {
+            key: os.getenv(key)
+            for key in [
+                "PADDLEOCR_DISABLE_ONEDNN",
+                "FLAGS_use_mkldnn",
+                "FLAGS_use_onednn",
+                "FLAGS_enable_pir_api",
+                "FLAGS_enable_pir_in_executor",
+                "PADDLEOCR_DEVICE",
+            ]
+        }
+        return {"packages": packages, "flags": flags}
 
     def _save_temp_image(self, image: Image.Image) -> Path:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
