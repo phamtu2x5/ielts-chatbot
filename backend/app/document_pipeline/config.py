@@ -35,7 +35,7 @@ class DocumentPipelineConfig:
     layout_model_path: str = field(default_factory=lambda: os.getenv("LAYOUT_MODEL_PATH", ""))
     layout_confidence: float = field(default_factory=lambda: float(os.getenv("LAYOUT_CONFIDENCE", "0.25")))
     layout_image_size: int = field(default_factory=lambda: int(os.getenv("LAYOUT_IMAGE_SIZE", "1024")))
-    warmup_layout: bool = field(default_factory=lambda: os.getenv("WARMUP_LAYOUT", "false").lower() == "true")
+    warmup_layout: bool = field(default_factory=lambda: os.getenv("WARMUP_LAYOUT", "true").lower() == "true")
     warmup_ocr: bool = field(default_factory=lambda: os.getenv("WARMUP_OCR", "true").lower() == "true")
     chunk_target_tokens: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_CHUNK_TARGET_TOKENS", "600")))
     chunk_max_tokens: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_CHUNK_MAX_TOKENS", "800")))

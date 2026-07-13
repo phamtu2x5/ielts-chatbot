@@ -1,6 +1,7 @@
 import json
 import re
 import threading
+import time
 from functools import wraps
 from typing import Callable, Dict, List, TypeVar
 
@@ -35,6 +36,7 @@ class LocalVectorStore:
         self._model = None
         self._docs: List[Dict] = []
         self._embeddings = np.empty((0, 0), dtype=np.float32)
+        self.last_upsert_timing: Dict = {}
         self.structured_store = StructuredDocumentStore(lambda: self._docs)
         self._load()
 
@@ -95,14 +97,19 @@ class LocalVectorStore:
         return {"embedding_model": self.model_name, "embedding_dimensions": int(embedding.shape[0])}
 
     def upsert(self, chunks: List[Dict], source_file: str) -> int:
+        started = time.perf_counter()
         if not chunks:
+            self.last_upsert_timing = {"chunks": 0, "total_seconds": 0.0}
             return 0
         if any(not (chunk.get("retrieval_text") or chunk.get("text")) for chunk in chunks):
             raise ValueError("Every RAG chunk must contain text or retrieval_text.")
 
         texts = [chunk.get("retrieval_text") or chunk["text"] for chunk in chunks]
+        embedding_started = time.perf_counter()
         new_embeddings = self._embed(texts)
+        embedding_seconds = self._elapsed(embedding_started)
         with self._lock:
+            merge_started = time.perf_counter()
             keep_indices = [idx for idx, doc in enumerate(self._docs) if doc.get("source_file") != source_file]
             kept_docs = [self._docs[idx] for idx in keep_indices]
             kept_embeddings = (
@@ -121,9 +128,19 @@ class LocalVectorStore:
                 combined_embeddings = np.vstack([kept_embeddings, new_embeddings])
 
             combined_docs = kept_docs + chunks
+            merge_seconds = self._elapsed(merge_started)
+            save_started = time.perf_counter()
             self._save_state(combined_docs, combined_embeddings)
+            save_seconds = self._elapsed(save_started)
             self._docs = combined_docs
             self._embeddings = combined_embeddings
+            self.last_upsert_timing = {
+                "embedding_seconds": embedding_seconds,
+                "merge_seconds": merge_seconds,
+                "save_seconds": save_seconds,
+                "chunks": len(chunks),
+                "total_seconds": self._elapsed(started),
+            }
         return len(chunks)
 
     @synchronized
@@ -471,6 +488,9 @@ class LocalVectorStore:
         }
         terms = re.findall(r"[\w]+", text.lower(), flags=re.UNICODE)
         return [term for term in terms if term not in stopwords and (len(term) > 1 or term.isdigit())]
+
+    def _elapsed(self, started: float) -> float:
+        return round(time.perf_counter() - started, 3)
 
     @synchronized
     def delete_source(self, source_file: str) -> int:

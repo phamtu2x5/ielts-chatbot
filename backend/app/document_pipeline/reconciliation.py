@@ -128,4 +128,5 @@ class NativeOCRReconciler:
             "duplicates_removed": page_metadata.get("duplicates_removed", 0),
             "alternative_sources": len(page_metadata.get("alternative_sources", [])),
             "element_types": sorted({element.type for element in page.elements}),
+            "timing": page_metadata.get("timing", {}),
         }

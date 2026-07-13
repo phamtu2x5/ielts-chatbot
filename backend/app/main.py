@@ -699,6 +699,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 @app.post("/documents/upload", response_model=UploadResponse)
 @app.post("/rag/upload-pdf", response_model=UploadResponse)
 async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
+    upload_started = time.perf_counter()
+    upload_timing: dict[str, Any] = {}
     if not file.filename:
         raise HTTPException(status_code=400, detail="Tên tệp không hợp lệ")
 
@@ -706,6 +708,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     file_path = UPLOAD_DIR / f"{uuid4().hex}-{safe_name}"
     max_bytes = DOCUMENT_PROCESSOR.config.max_upload_mb * 1024 * 1024
     try:
+        save_started = time.perf_counter()
         total_bytes = 0
         async with aiofiles.open(file_path, "wb") as out:
             while chunk := await file.read(1024 * 1024):
@@ -716,24 +719,39 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
                         detail=f"Tệp quá lớn. Giới hạn hiện tại là {DOCUMENT_PROCESSOR.config.max_upload_mb}MB.",
                     )
                 await out.write(chunk)
+        upload_timing["save_file_seconds"] = round(time.perf_counter() - save_started, 3)
 
+        process_started = time.perf_counter()
         document, chunks = await run_in_threadpool(
             DOCUMENT_PROCESSOR.process_file,
             file_path,
             safe_name,
             file.content_type,
         )
+        upload_timing["process_file_seconds"] = round(time.perf_counter() - process_started, 3)
         if not chunks:
             raise HTTPException(
                 status_code=400,
                 detail=document_extraction_failure_detail(document),
             )
 
+        store = get_store()
+        upsert_started = time.perf_counter()
         inserted = await run_in_threadpool(
-            get_store().upsert,
+            store.upsert,
             [chunk.to_dict() for chunk in chunks],
             safe_name,
         )
+        upload_timing["upsert_seconds"] = round(time.perf_counter() - upsert_started, 3)
+        upload_timing["total_seconds"] = round(time.perf_counter() - upload_started, 3)
+        document_timing = document.metadata.get("timing", {})
+        timing_debug = {
+            "upload": upload_timing,
+            "extraction": document_timing.get("extraction", {}),
+            "process_file": document_timing.get("process_file", {}),
+            "chunking": document_timing.get("chunking", {}),
+            "embedding": store.last_upsert_timing,
+        }
         logger.info(
             "Document indexed",
             extra={
@@ -751,6 +769,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
             chunks_processed=inserted,
             collection_stats=await run_in_threadpool(get_store().stats),
             debug={
+                "timing": timing_debug,
                 "extraction": document.metadata.get("extraction_report", {}),
                 "structure": document.metadata.get("ielts_structure", {}).get("diagnostics", {}),
                 "outline": document.metadata.get("ielts_structure", {}).get("outline", {}),

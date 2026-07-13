@@ -1,4 +1,5 @@
 import re
+import time
 from pathlib import Path
 
 from PIL import Image
@@ -24,16 +25,26 @@ class PDFExtractor:
             raise RuntimeError("PyMuPDF is required to process PDF files") from exc
 
         pages = []
+        pdf_started = time.perf_counter()
         with fitz.open(file_path) as document:
+            pdf_open_seconds = self._elapsed(pdf_started)
             page_count = len(document)
             if page_count > self.config.max_pdf_pages:
                 raise ValueError(f"PDF có {page_count} trang, vượt giới hạn {self.config.max_pdf_pages} trang.")
 
             for page_index, page in enumerate(document, 1):
+                page_timing = {"page": page_index}
+                native_started = time.perf_counter()
                 blocks = self._native_text_blocks(page)
                 native_text = "\n".join(block["normalized_text"] for block in blocks)
                 image_coverage = self._image_coverage(page)
+                page_timing["native_extract_seconds"] = self._elapsed(native_started)
+                quality_started = time.perf_counter()
                 quality = evaluate_native_page_text(native_text, len(blocks), image_coverage, self.config)
+                page_timing["quality_eval_seconds"] = self._elapsed(quality_started)
+                page_timing["render_seconds"] = 0.0
+                page_timing["layout_seconds"] = 0.0
+                page_timing["ocr_seconds"] = 0.0
 
                 if quality.native_text_is_usable:
                     elements = [
@@ -57,12 +68,18 @@ class PDFExtractor:
                     merge_reasons = self._ocr_merge_reasons(native_text)
                     layout_result = self._empty_layout_result()
                     rendered_page = None
-                    layout_needed = bool(merge_reasons or quality.requires_layout or quality.requires_table_analysis)
+                    layout_needed = bool(merge_reasons)
                     if layout_needed:
+                        render_started = time.perf_counter()
                         rendered_page = self._render_page(page)
+                        page_timing["render_seconds"] = self._elapsed(render_started)
+                        layout_started = time.perf_counter()
                         layout_result = self.layout.detect(rendered_page)
+                        page_timing["layout_seconds"] = self._elapsed(layout_started)
                     if merge_reasons and rendered_page is not None:
+                        ocr_started = time.perf_counter()
                         ocr_result = self.ocr.image_to_text(rendered_page)
+                        page_timing["ocr_seconds"] = self._elapsed(ocr_started)
                         ocr_text = normalize_text(ocr_result.text)
                         if ocr_text and self._adds_new_text(native_text, ocr_text):
                             elements.append(
@@ -103,14 +120,21 @@ class PDFExtractor:
                                 "layout_engine": layout_result.engine,
                                 "layout_regions": layout_result.region_dicts(),
                                 "layout_metadata": layout_result.metadata,
+                                "timing": {**page_timing, "route": processing_route},
                             },
                         )
                     )
                     continue
 
+                render_started = time.perf_counter()
                 rendered_page = self._render_page(page)
+                page_timing["render_seconds"] = self._elapsed(render_started)
+                layout_started = time.perf_counter()
                 layout_result = self.layout.detect(rendered_page)
+                page_timing["layout_seconds"] = self._elapsed(layout_started)
+                ocr_started = time.perf_counter()
                 ocr_result = self.ocr.image_to_text(rendered_page)
+                page_timing["ocr_seconds"] = self._elapsed(ocr_started)
                 text = normalize_text(ocr_result.text)
                 elements = []
                 if text:
@@ -143,6 +167,7 @@ class PDFExtractor:
                             "layout_engine": layout_result.engine,
                             "layout_regions": layout_result.region_dicts(),
                             "layout_metadata": layout_result.metadata,
+                            "timing": {**page_timing, "route": "pdf_page_ocr"},
                         },
                     )
                 )
@@ -152,7 +177,16 @@ class PDFExtractor:
             filename=filename,
             mime_type=mime_type,
             parser_version=self.config.parser_version,
-            metadata={"page_count": len(pages), "languages": []},
+            metadata={
+                "page_count": len(pages),
+                "languages": [],
+                "timing": {
+                    "extraction": {
+                        "pdf_open_seconds": pdf_open_seconds,
+                        "pages": [page.metadata.get("timing", {}) for page in pages],
+                    }
+                },
+            },
             pages=pages,
         )
 
@@ -201,6 +235,9 @@ class PDFExtractor:
         matrix = fitz.Matrix(self.config.ocr_dpi / 72, self.config.ocr_dpi / 72)
         pixmap = page.get_pixmap(matrix=matrix, alpha=False)
         return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+
+    def _elapsed(self, started: float) -> float:
+        return round(time.perf_counter() - started, 3)
 
     def _empty_layout_result(self) -> LayoutResult:
         return LayoutResult("layout_not_attempted", [], {"skipped": True})
