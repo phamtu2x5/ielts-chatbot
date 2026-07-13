@@ -68,6 +68,7 @@ class DocLayoutDetector:
                 "metadata": {
                     "error": str(exc),
                     "model_repo": self.config.layout_model_repo,
+                    "model_filename": self.config.layout_model_filename,
                     "model_path": self.config.layout_model_path or None,
                     "device": self.config.layout_device,
                 },
@@ -78,6 +79,7 @@ class DocLayoutDetector:
             "metadata": {
                 "model_loaded": True,
                 "model_repo": self.config.layout_model_repo,
+                "model_filename": self.config.layout_model_filename,
                 "model_path": self.config.layout_model_path or None,
                 "device": self.config.layout_device,
             },
@@ -106,6 +108,7 @@ class DocLayoutDetector:
                 regions,
                 {
                     "model_repo": self.config.layout_model_repo,
+                    "model_filename": self.config.layout_model_filename,
                     "model_path": self.config.layout_model_path or None,
                     "device": self.config.layout_device,
                     "image_size": self.config.layout_image_size,
@@ -126,8 +129,17 @@ class DocLayoutDetector:
         if self.config.layout_model_path:
             self._model = YOLOv10(self.config.layout_model_path)
         else:
-            self._model = YOLOv10.from_pretrained(self.config.layout_model_repo)
+            model_path = self._download_model_checkpoint()
+            self._model = YOLOv10(model_path)
         return self._model
+
+    def _download_model_checkpoint(self) -> str:
+        from huggingface_hub import hf_hub_download
+
+        return hf_hub_download(
+            repo_id=self.config.layout_model_repo,
+            filename=self.config.layout_model_filename,
+        )
 
     def _extract_regions(self, raw_result: Any) -> list[LayoutRegion]:
         regions: list[LayoutRegion] = []

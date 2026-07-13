@@ -32,6 +32,9 @@ class DocumentPipelineConfig:
     layout_model_repo: str = field(
         default_factory=lambda: os.getenv("LAYOUT_MODEL_REPO", "juliozhao/DocLayout-YOLO-DocStructBench")
     )
+    layout_model_filename: str = field(
+        default_factory=lambda: os.getenv("LAYOUT_MODEL_FILENAME", "doclayout_yolo_docstructbench_imgsz1024.pt")
+    )
     layout_model_path: str = field(default_factory=lambda: os.getenv("LAYOUT_MODEL_PATH", ""))
     layout_confidence: float = field(default_factory=lambda: float(os.getenv("LAYOUT_CONFIDENCE", "0.25")))
     layout_image_size: int = field(default_factory=lambda: int(os.getenv("LAYOUT_IMAGE_SIZE", "1024")))
