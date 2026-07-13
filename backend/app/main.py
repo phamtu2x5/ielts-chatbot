@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,11 +64,15 @@ def format_router_document_context(catalog: list[dict], probe: dict) -> str:
             page_label = f"pages {pages[0]}-{pages[-1]}" if pages else "pages unknown"
             mime_types = ", ".join(item.get("mime_types") or [])
             unit_types = ", ".join(item.get("unit_types") or [])
+            document_types = ", ".join(item.get("document_types") or [])
+            task_types = ", ".join(item.get("task_types") or [])
             passage_numbers = item.get("passage_numbers") or []
             lines.append(
                 f"- {item.get('source_file', 'unknown')} | chunks={item.get('chunks', 0)} | {page_label}"
                 + (f" | type={mime_types}" if mime_types else "")
                 + (f" | units={unit_types}" if unit_types else "")
+                + (f" | doc_type={document_types}" if document_types else "")
+                + (f" | task_type={task_types}" if task_types else "")
                 + (f" | passages={passage_numbers}" if passage_numbers else "")
             )
 
@@ -142,6 +147,233 @@ def generation_fallback(prepared: "ChatPreparation") -> str:
     return "Mình chưa nhận được nội dung trả lời từ model. Vui lòng thử lại."
 
 
+def _markdown_table(table: dict[str, Any]) -> str:
+    columns = table.get("columns") or []
+    rows = table.get("rows") or []
+    if not columns or not rows:
+        return ""
+    header = "| " + " | ".join(str(column) for column in columns) + " |"
+    separator = "| " + " | ".join("---" for _ in columns) + " |"
+    body = []
+    for row in rows:
+        cells = list(row) + [""] * max(0, len(columns) - len(row))
+        body.append("| " + " | ".join(str(cell) for cell in cells[: len(columns)]) + " |")
+    return "\n".join([header, separator, *body])
+
+
+def _visual_incomplete_text(visual: dict[str, Any], source: dict[str, Any]) -> str:
+    visual_type = visual.get("type", "visual")
+    question_range = visual.get("question_range") or []
+    range_label = f" Questions {question_range[0]}-{question_range[1]}" if len(question_range) == 2 else ""
+    blanks = ", ".join(str(number) for number in visual.get("blank_question_numbers") or [])
+    raw_text = visual.get("raw_text") or ""
+    return (
+        f"Mình đã nhận diện được {visual_type}{range_label}, nhưng chưa trích xuất đủ cấu trúc hàng/cột hoặc node/edge đáng tin cậy.\n\n"
+        + (f"Các ô/câu trống nhận diện được: {blanks}.\n\n" if blanks else "")
+        + (f"Nội dung OCR/native liên quan:\n{raw_text}\n\n" if raw_text else "")
+        + f"Nguồn: {_source_label(source)}."
+    )
+
+
+def _source_label(source: dict[str, Any]) -> str:
+    source_file = source.get("source_file", "unknown")
+    pages = source.get("pages") or []
+    if not pages:
+        return source_file
+    return f"{source_file}, trang {', '.join(str(page) for page in pages)}"
+
+
+def _table_from_source(source: dict[str, Any]) -> dict[str, Any] | None:
+    metadata = source.get("metadata", {})
+    table = metadata.get("table")
+    if isinstance(table, dict):
+        return table
+    return None
+
+
+def _lookup_terms(text: str) -> set[str]:
+    return {
+        term
+        for term in re.findall(r"[\w]+", text.lower(), flags=re.UNICODE)
+        if len(term) > 1 or term.isdigit()
+    }
+
+
+def _row_match_score(message: str, row_label: Any) -> float:
+    label = str(row_label).strip()
+    if not label:
+        return 0.0
+    lowered = message.lower()
+    label_lower = label.lower()
+    if re.search(rf"(?<!\w){re.escape(label_lower)}(?!\w)", lowered):
+        return 10.0
+    overlap = _lookup_terms(message) & _lookup_terms(label)
+    return float(len(overlap))
+
+
+def _column_match_score(message: str, column_label: Any) -> float:
+    label = str(column_label).strip()
+    if not label:
+        return 0.0
+    query_terms = _lookup_terms(message)
+    column_terms = _lookup_terms(label)
+    score = float(len(query_terms & column_terms))
+    query_years = set(re.findall(r"\b\d{4}\b", message))
+    column_years = set(re.findall(r"\b\d{4}\b", label))
+    if query_years and query_years & column_years:
+        score += 4.0
+    return score
+
+
+def _render_show_questions(sources: list[dict[str, Any]]) -> str | None:
+    question_groups = [
+        source
+        for source in sources
+        if source.get("metadata", {}).get("unit_type") == "question_group"
+    ]
+    if question_groups:
+        lines = []
+        for source in question_groups:
+            text = (source.get("display_text") or source.get("text") or "").strip()
+            if not text:
+                continue
+            lines.append(text)
+            lines.append(f"Nguồn: {_source_label(source)}.")
+        return "\n\n".join(lines).strip() or None
+
+    questions = [
+        source
+        for source in sources
+        if source.get("metadata", {}).get("unit_type") == "question"
+    ]
+    if not questions:
+        return None
+    questions = sorted(questions, key=lambda source: source.get("metadata", {}).get("question_start") or 999)
+    lines = ["Nội dung câu hỏi:"]
+    for source in questions:
+        text = (source.get("display_text") or source.get("text") or "").strip()
+        if text:
+            lines.append(f"- {text}")
+    lines.append(f"\nNguồn: {_source_label(questions[0])}.")
+    return "\n".join(lines)
+
+
+def _lookup_table_cell(message: str, sources: list[dict[str, Any]]) -> str | None:
+    best_match: tuple[float, Any, dict[str, Any]] | None = None
+    for source in sources:
+        table = _table_from_source(source)
+        metadata = source.get("metadata", {})
+        if table:
+            columns = table.get("columns") or []
+            rows = table.get("rows") or []
+        else:
+            columns = metadata.get("table_columns") or []
+            row = metadata.get("table_row")
+            rows = [row] if isinstance(row, list) else []
+        if len(columns) < 2 or not rows:
+            continue
+        column_scores = [
+            (index, _column_match_score(message, column))
+            for index, column in enumerate(columns[1:], 1)
+        ]
+        column_scores = [(index, score) for index, score in column_scores if score > 0]
+        if not column_scores:
+            continue
+        target_index, column_score = max(column_scores, key=lambda item: item[1])
+        for row in rows:
+            if not row or len(row) <= target_index:
+                continue
+            row_score = _row_match_score(message, row[0])
+            if row_score <= 0:
+                continue
+            score = row_score + column_score
+            if best_match is None or score > best_match[0]:
+                best_match = (score, row[target_index], source)
+    if best_match is None:
+        return None
+    _, value, source = best_match
+    return f"{value}\n\nNguồn: {_source_label(source)}."
+
+
+def static_response_for_sources(message: str, query_intent: str, sources: list[dict[str, Any]]) -> str | None:
+    cell_answer = _lookup_table_cell(message, sources)
+    if cell_answer:
+        return cell_answer
+
+    if query_intent == "show_questions":
+        questions = _render_show_questions(sources)
+        if questions:
+            return questions
+
+    if query_intent in {"show_table", "extract_table"}:
+        for source in sources:
+            table = _table_from_source(source)
+            table_markdown = _markdown_table(table) if table else ""
+            if table_markdown:
+                return f"Dưới đây là bảng mình trích xuất được từ tài liệu:\n\n{table_markdown}\n\nNguồn: {_source_label(source)}."
+            if table:
+                return _visual_incomplete_text(table, source)
+        return (
+            "Mình chưa có dữ liệu bảng đã được trích xuất theo cấu trúc cho phần này. "
+            "Để tránh tự dựng sai hàng/cột hoặc ô trống, mình chưa hiển thị bảng."
+        )
+
+    if query_intent == "show_flowchart":
+        for source in sources:
+            metadata = source.get("metadata", {})
+            flowchart = metadata.get("flowchart")
+            if isinstance(flowchart, dict):
+                nodes = flowchart.get("nodes") or []
+                edges = flowchart.get("edges") or []
+                if not nodes or not edges:
+                    return _visual_incomplete_text(flowchart, source)
+                lines = ["Mình tìm thấy cấu trúc flowchart:"]
+                for node in nodes:
+                    label = f"Question {node['question_number']} blank" if node.get("question_number") else node.get("text", "")
+                    lines.append(f"- {node['id']}: {label}")
+                for edge in edges:
+                    lines.append(f"- edge: {edge['from']} -> {edge['to']}")
+                lines.append(f"\nNguồn: {_source_label(source)}.")
+                return "\n".join(lines)
+        return (
+            "Mình chưa có dữ liệu flowchart đã được trích xuất theo node/edge cho phần này. "
+            "Để tránh tự tưởng tượng cấu trúc, mình chưa mô tả flowchart."
+        )
+
+    return None
+
+
+def is_presence_check_query(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in ["có nhắc đến", "có nói về", "có đề cập", "mentions", "mention"])
+
+
+def has_lexical_source_hit(sources: list[dict[str, Any]]) -> bool:
+    for source in sources:
+        if source.get("probe_keyword_score", 0.0) > 0 or source.get("keyword_score", 0.0) > 0:
+            return True
+        if source.get("probe_question_score", 0.0) > 0 or source.get("question_score", 0.0) > 0:
+            return True
+        if source.get("probe_overview_score", 0.0) > 0 or source.get("overview_score", 0.0) > 0:
+            return True
+    return False
+
+
+def compact_final_context_debug(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "chunk_id": source.get("chunk_id"),
+            "method": source.get("retrieval_method"),
+            "unit_type": source.get("metadata", {}).get("unit_type"),
+            "passage_number": source.get("metadata", {}).get("passage_number"),
+            "question_range": source.get("metadata", {}).get("question_range"),
+            "parent_id": source.get("metadata", {}).get("parent_id"),
+            "pages": source.get("pages"),
+        }
+        for source in sources
+    ]
+
+
 @dataclass
 class ChatPreparation:
     prompt: str | None
@@ -181,28 +413,75 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         query_intent = "direct"
 
     if route == "rag":
-        if probe.get("is_overview"):
+        structured_sources = await run_in_threadpool(
+            store.structured_lookup,
+            message,
+            query_intent,
+            max(settings.rag_top_k, settings.rag_overview_top_k),
+        )
+        retrieval_method = "structured" if structured_sources else None
+        if structured_sources:
+            sources = structured_sources[: settings.rag_top_k]
+        elif probe.get("is_overview"):
             sources = await run_in_threadpool(store.overview, settings.rag_overview_top_k)
             for source in sources:
                 source["probe_overview_score"] = 1.0
+            retrieval_method = "overview"
         elif probe.get("has_strong_hits"):
             sources = (probe.get("results") or [])[: settings.rag_top_k]
+            retrieval_method = "probe"
         else:
             sources = await run_in_threadpool(store.search, message, settings.rag_top_k)
+            retrieval_method = "dense"
+        before_filter_count = len(sources)
         sources = filter_sources_for_intent(sources, message, query_intent)
         if query_intent == "solve_questions" and sources:
+            question_context = await run_in_threadpool(store.question_context_for_sources, sources, 8)
             expansion = await run_in_threadpool(store.passage_context_for_sources, sources, 3)
-            sources = dedupe_sources(sources + expansion)
+            sources = dedupe_sources(sources + question_context + expansion)
+        sources = dedupe_sources(sources)
+    else:
+        structured_sources = []
+        retrieval_method = None
+        before_filter_count = 0
 
     debug = {
         "route_decision": route,
         "query_intent": query_intent,
         "catalog": catalog,
         "probe": compact_probe_debug(probe),
+        "retrieval": {
+            "method": retrieval_method,
+            "structured_hits": len(structured_sources),
+            "before_filter_count": before_filter_count,
+            "after_filter_count": len(sources),
+            "final_context": compact_final_context_debug(sources),
+        },
         "source_count": len(sources),
     }
 
     if sources:
+        if is_presence_check_query(message) and not has_lexical_source_hit(sources):
+            debug["no_match_guard"] = "presence_check_without_lexical_hit"
+            return ChatPreparation(
+                prompt=None,
+                static_response=NO_RAG_MATCH_RESPONSE,
+                route_used="vector_rag_no_match",
+                sources=sources,
+                debug=debug,
+                query_intent=query_intent,
+            )
+        static_response = static_response_for_sources(message, query_intent, sources)
+        if static_response:
+            debug["static_response"] = True
+            return ChatPreparation(
+                prompt=None,
+                static_response=static_response,
+                route_used="vector_rag_static",
+                sources=sources,
+                debug=debug,
+                query_intent=query_intent,
+            )
         context = (
             format_context(sources, max_chars_per_source=settings.rag_overview_source_chars)
             if probe.get("is_overview")
@@ -300,6 +579,17 @@ async def warmup() -> dict:
         }
     except Exception as exc:
         results["ocr"] = {"ok": False, "error": str(exc)}
+
+    layout_started = time.perf_counter()
+    try:
+        layout_result = await run_in_threadpool(DOCUMENT_PROCESSOR.warmup_layout)
+        results["layout"] = {
+            "ok": bool(layout_result.get("skipped") or layout_result.get("ok", False)),
+            "duration_seconds": round(time.perf_counter() - layout_started, 2),
+            **layout_result,
+        }
+    except Exception as exc:
+        results["layout"] = {"ok": False, "error": str(exc)}
 
     ok = all(component.get("ok", True) for component in results.values())
     return {

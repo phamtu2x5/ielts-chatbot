@@ -8,6 +8,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 from .config import settings
+from .structured_store import StructuredDocumentStore
 
 DATA_DIR = settings.rag_data_dir
 INDEX_PATH = DATA_DIR / "embeddings.npy"
@@ -34,6 +35,7 @@ class LocalVectorStore:
         self._model = None
         self._docs: List[Dict] = []
         self._embeddings = np.empty((0, 0), dtype=np.float32)
+        self.structured_store = StructuredDocumentStore(lambda: self._docs)
         self._load()
 
     @property
@@ -229,119 +231,26 @@ class LocalVectorStore:
 
     @synchronized
     def overview(self, top_k: int = 8) -> List[Dict]:
-        top_k = max(1, min(top_k, 50))
-        outline_docs = [
-            doc
-            for doc in self._docs
-            if doc.get("metadata", {}).get("unit_type") in {"document_outline", "passage_summary"}
-        ]
-        if outline_docs:
-            results = []
-            for doc in sorted(outline_docs, key=lambda item: item.get("chunk_index", 0))[:top_k]:
-                item = dict(doc)
-                item["score"] = 0.0
-                item["overview_score"] = 1.0
-                results.append(item)
-            passage_docs = [
-                doc
-                for doc in sorted(self._docs, key=lambda item: item.get("chunk_index", 0))
-                if doc.get("metadata", {}).get("unit_type") == "passage"
-            ]
-            seen_passages = set()
-            for doc in passage_docs:
-                passage_number = doc.get("metadata", {}).get("passage_number")
-                if passage_number in seen_passages:
-                    continue
-                seen_passages.add(passage_number)
-                item = dict(doc)
-                item["score"] = 0.0
-                item["overview_score"] = 0.8
-                results.append(item)
-                if len(results) >= top_k:
-                    break
-            return results
+        return self.structured_store.overview(top_k=top_k)
 
-        docs = sorted(self._docs, key=lambda doc: (min(doc.get("pages") or [999]), doc.get("chunk_index", 0)))
-        content_docs = [doc for doc in docs if doc.get("token_count", 0) >= 80]
-        selected = content_docs[:top_k] if content_docs else docs[:top_k]
-        results = []
-        for doc in selected:
-            item = dict(doc)
-            item["score"] = 0.0
-            item["overview_score"] = 1.0
-            results.append(item)
-        return results
+    @synchronized
+    def structured_lookup(self, query: str, intent: str, top_k: int = 8) -> List[Dict]:
+        return self.structured_store.structured_lookup(query=query, intent=intent, top_k=top_k)
 
     @synchronized
     def document_catalog(self) -> List[Dict]:
-        catalog: dict[str, Dict] = {}
-        for doc in self._docs:
-            source_file = doc.get("source_file", "unknown")
-            entry = catalog.setdefault(
-                source_file,
-                {
-                    "source_file": source_file,
-                    "chunks": 0,
-                    "pages": set(),
-                    "document_ids": set(),
-                    "mime_types": set(),
-                    "unit_types": set(),
-                    "passage_numbers": set(),
-                },
-            )
-            entry["chunks"] += 1
-            entry["pages"].update(doc.get("pages") or [])
-            if doc.get("document_id"):
-                entry["document_ids"].add(doc["document_id"])
-            mime_type = doc.get("metadata", {}).get("mime_type")
-            if mime_type:
-                entry["mime_types"].add(mime_type)
-            unit_type = doc.get("metadata", {}).get("unit_type")
-            if unit_type:
-                entry["unit_types"].add(unit_type)
-            passage_number = doc.get("metadata", {}).get("passage_number")
-            if passage_number:
-                entry["passage_numbers"].add(passage_number)
+        return self.structured_store.document_catalog()
 
-        return [
-            {
-                "source_file": item["source_file"],
-                "chunks": item["chunks"],
-                "pages": sorted(item["pages"]),
-                "document_ids": sorted(item["document_ids"]),
-                "mime_types": sorted(item["mime_types"]),
-                "unit_types": sorted(item["unit_types"]),
-                "passage_numbers": sorted(item["passage_numbers"]),
-            }
-            for item in catalog.values()
-        ]
+    @synchronized
+    def question_context_for_sources(self, sources: List[Dict], top_k: int = 8) -> List[Dict]:
+        return self.structured_store.question_context_for_sources(sources=sources, top_k=top_k)
 
     @synchronized
     def passage_context_for_sources(self, sources: List[Dict], max_chunks_per_passage: int = 3) -> List[Dict]:
-        passage_numbers = {
-            source.get("metadata", {}).get("passage_number")
-            for source in sources
-            if source.get("metadata", {}).get("passage_number")
-        }
-        if not passage_numbers:
-            return []
-
-        results: list[Dict] = []
-        counts: dict[int, int] = {}
-        for doc in sorted(self._docs, key=lambda item: item.get("chunk_index", 0)):
-            metadata = doc.get("metadata", {})
-            passage_number = metadata.get("passage_number")
-            if metadata.get("unit_type") != "passage" or passage_number not in passage_numbers:
-                continue
-            count = counts.get(passage_number, 0)
-            if count >= max_chunks_per_passage:
-                continue
-            item = dict(doc)
-            item["score"] = 0.0
-            item["context_expansion_score"] = 1.0
-            results.append(item)
-            counts[passage_number] = count + 1
-        return results
+        return self.structured_store.passage_context_for_sources(
+            sources=sources,
+            max_chunks_per_passage=max_chunks_per_passage,
+        )
 
     def _dense_search(self, query: str, top_k: int, min_score: float) -> List[Dict]:
         query_embedding = self._embed([query])[0]
@@ -433,7 +342,11 @@ class LocalVectorStore:
     def _question_ranges(self, query: str) -> List[tuple[int, int]]:
         ranges: list[tuple[int, int]] = []
         normalized = query.lower().replace("đến", "to").replace("tới", "to")
-        for match in re.finditer(r"(?:questions?|câu hỏi|câu)\s*(\d{1,2})(?:\s*(?:-|–|to)\s*(\d{1,2}))?", normalized):
+        for match in re.finditer(
+            r"(?:questions?|question|câu hỏi|câu)\s*(?:từ\s+)?(\d{1,2})"
+            r"(?:\s*(?:-|–|to)\s*(?:questions?|question|câu hỏi|câu)?\s*(\d{1,2}))?",
+            normalized,
+        ):
             start = int(match.group(1))
             end = int(match.group(2) or start)
             if start > end:
@@ -486,6 +399,20 @@ class LocalVectorStore:
             "table",
             "flow",
             "nội dung",
+            "ảnh",
+            "hình",
+            "image",
+            "writing",
+            "task 1",
+            "task 2",
+            "đề trên",
+            "đề writing",
+            "tỷ lệ",
+            "giá trị",
+            "số liệu",
+            "có nhắc đến",
+            "đã tải",
+            "uploaded",
         ]
         return any(marker in lowered for marker in markers)
 

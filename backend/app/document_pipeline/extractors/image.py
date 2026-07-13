@@ -6,12 +6,14 @@ from ..config import DocumentPipelineConfig
 from ..models import DocumentElement, ProcessedDocument, ProcessedPage
 from ..normalization import normalize_text
 from ..ocr import OCRProcessor
+from ..visual import WritingTaskTableParser
 
 
 class ImageExtractor:
     def __init__(self, config: DocumentPipelineConfig, ocr: OCRProcessor) -> None:
         self.config = config
         self.ocr = ocr
+        self.visual_parser = WritingTaskTableParser()
 
     def extract(self, file_path: Path, filename: str, mime_type: str, document_id: str) -> ProcessedDocument:
         with Image.open(file_path) as image:
@@ -33,13 +35,68 @@ class ImageExtractor:
                     metadata=ocr_result.metadata,
                 )
             )
+        parsed_visual = self.visual_parser.parse(text)
+        metadata = {
+            "page_count": 1,
+            "languages": [],
+            "ocr_engine": ocr_result.engine,
+            "ocr_quality": ocr_result.confidence,
+            "ocr_metadata": ocr_result.metadata,
+        }
+        if parsed_visual:
+            metadata.update(
+                {
+                    "document_type": parsed_visual.document_type,
+                    "task_type": parsed_visual.task_type,
+                    "visual_structure": {
+                        "prompt": parsed_visual.prompt,
+                        "visual_elements": [parsed_visual.table],
+                    },
+                }
+            )
+            prompt_text = parsed_visual.prompt_text()
+            table_text = parsed_visual.table_markdown()
+            if prompt_text:
+                elements.append(
+                    DocumentElement(
+                        element_id="p1-e2",
+                        page=1,
+                        type="writing_prompt",
+                        raw_text=prompt_text,
+                        normalized_text=prompt_text,
+                        source="image_ocr_structured",
+                        confidence=ocr_result.confidence,
+                        metadata={
+                            "document_type": parsed_visual.document_type,
+                            "task_type": parsed_visual.task_type,
+                            "prompt": parsed_visual.prompt,
+                        },
+                    )
+                )
+            if table_text:
+                elements.append(
+                    DocumentElement(
+                        element_id="p1-e3",
+                        page=1,
+                        type="table",
+                        raw_text=table_text,
+                        normalized_text=table_text,
+                        source="image_ocr_structured",
+                        confidence=ocr_result.confidence,
+                        metadata={
+                            "document_type": parsed_visual.document_type,
+                            "task_type": parsed_visual.task_type,
+                            "table": parsed_visual.table,
+                        },
+                    )
+                )
 
         return ProcessedDocument(
             document_id=document_id,
             filename=filename,
             mime_type=mime_type,
             parser_version=self.config.parser_version,
-            metadata={"page_count": 1, "languages": [], "ocr_engine": ocr_result.engine},
+            metadata=metadata,
             pages=[
                 ProcessedPage(
                     page_number=1,

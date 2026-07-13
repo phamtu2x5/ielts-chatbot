@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -12,12 +13,15 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.document_pipeline.config import DocumentPipelineConfig
+from app.document_pipeline.chunking import SemanticChunker
 from app.document_pipeline.ielts import IELTSStructureParser, StructuredChunker
 from app.document_pipeline.extractors.text import TextExtractor
+from app.document_pipeline.layout import PPStructureProcessor
 from app.document_pipeline.models import DocumentElement, ProcessedDocument, ProcessedPage
 from app.document_pipeline.ocr import OCRProcessor, OCRResult
 from app.document_pipeline.reconciliation import NativeOCRReconciler
 from app.document_pipeline.routing import FileRouter
+from app.document_pipeline.visual import WritingTaskTableParser
 
 
 def make_element(element_id: str, page: int, text: str, source: str = "native_pdf") -> DocumentElement:
@@ -105,21 +109,137 @@ class FileRoutingTests(unittest.TestCase):
 
 
 class OCRProcessorTests(unittest.TestCase):
-    def test_tesseract_fallback_keeps_paddle_failure_diagnostics(self) -> None:
+    def test_ocr_engine_must_be_paddle(self) -> None:
+        with patch.dict(os.environ, {"OCR_ENGINE": "easyocr"}):
+            with self.assertRaisesRegex(ValueError, "OCR_ENGINE must be paddle"):
+                DocumentPipelineConfig()
+
+    def test_paddle_failure_returns_diagnostics_without_external_fallback(self) -> None:
         processor = OCRProcessor(DocumentPipelineConfig())
         small = OCRResult("", 0.0, "paddleocr_error", {"error": "small failed"})
         medium = OCRResult("", 0.0, "paddleocr_error", {"error": "medium failed"})
-        tesseract = OCRResult("fallback text", 0.7, "tesseract", {})
 
         with patch.object(processor, "_image_to_text_with_paddle", side_effect=[small, medium]):
-            with patch.object(processor, "_image_to_text_with_tesseract", return_value=tesseract):
-                result = processor.image_to_text(Image.new("RGB", (20, 20), "white"))
+            result = processor.image_to_text(Image.new("RGB", (20, 20), "white"))
 
-        self.assertEqual(result.engine, "tesseract")
+        self.assertEqual(result.engine, "paddleocr_failed")
+        self.assertFalse(result.text)
         self.assertEqual(
             [attempt["error"] for attempt in result.metadata["cascade_attempts"]],
             ["small failed", "medium failed"],
         )
+
+
+class WritingVisualParserTests(unittest.TestCase):
+    def test_writing_task_table_parser_extracts_rows_and_columns(self) -> None:
+        text = (
+            "WRITING TASK 1 You should spend about 20 minutes on this task. "
+            "The table below shows the percentages of people in three countries who had Internet Access "
+            "and Smartphone Ownership in 2019 and 2024. Summarise the information by selecting and reporting "
+            "the main features, and make comparisons where relevant. Write at least 150 words. "
+            "Country Internet Access 2019 Internet Access 2024 Smartphone Ownership 2019 Smartphone Ownership 2024 "
+            "A 78% 96% 82% 99% B 61% 89% 67% 94% Cc 42% 75% 48% 83%"
+        )
+
+        parsed = WritingTaskTableParser().parse(text)
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.document_type, "ielts_writing_task_1")
+        self.assertEqual(parsed.table["columns"][0], "Country")
+        self.assertEqual(parsed.table["rows"], [["A", 78, 96, 82, 99], ["B", 61, 89, 67, 94], ["C", 42, 75, 48, 83]])
+
+    def test_writing_task_chunker_emits_prompt_table_and_rows(self) -> None:
+        parser = WritingTaskTableParser()
+        parsed = parser.parse(
+            "The table below shows Internet Access and Smartphone Ownership in 2019 and 2024. "
+            "Summarise the information. Write at least 150 words. "
+            "Country Internet Access 2019 Internet Access 2024 Smartphone Ownership 2019 Smartphone Ownership 2024 "
+            "A 78 96 82 99 B 61 89 67 94 C 42 75 48 83"
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        document = ProcessedDocument(
+            document_id="writing-doc",
+            filename="writing.png",
+            mime_type="image/png",
+            parser_version="test",
+            metadata={
+                "document_type": parsed.document_type,
+                "task_type": parsed.task_type,
+            },
+            pages=[
+                ProcessedPage(
+                    1,
+                    "image_ocr",
+                    0.9,
+                    [
+                        DocumentElement(
+                            "p1-e1",
+                            1,
+                            "writing_prompt",
+                            parsed.prompt_text(),
+                            parsed.prompt_text(),
+                            "image_ocr_structured",
+                            0.9,
+                        ),
+                        DocumentElement(
+                            "p1-e2",
+                            1,
+                            "table",
+                            parsed.table_markdown(),
+                            parsed.table_markdown(),
+                            "image_ocr_structured",
+                            0.9,
+                            metadata={"table": parsed.table},
+                        ),
+                    ],
+                )
+            ],
+        )
+
+        chunks = SemanticChunker(DocumentPipelineConfig()).chunk(document)
+
+        self.assertEqual([chunk.metadata["unit_type"] for chunk in chunks[:2]], ["writing_prompt", "writing_table"])
+        self.assertIn("table_row", [chunk.metadata["unit_type"] for chunk in chunks])
+        self.assertEqual(chunks[1].metadata["table"]["rows"][1], ["B", 61, 89, 67, 94])
+
+
+class PPStructureProcessorTests(unittest.TestCase):
+    def test_extracts_table_structure_from_html_result(self) -> None:
+        processor = PPStructureProcessor(DocumentPipelineConfig())
+        raw = [
+            {
+                "type": "table",
+                "html": "<table><tr><th>Stage</th><th>Answer</th></tr><tr><td>First</td><td>18</td></tr></table>",
+                "bbox": [1, 2, 3, 4],
+                "score": 0.91,
+            }
+        ]
+
+        structures = processor._extract_structures(raw)
+
+        self.assertEqual(structures[0]["type"], "table")
+        self.assertEqual(structures[0]["columns"], ["Stage", "Answer"])
+        self.assertEqual(structures[0]["rows"], [["First", "18"]])
+        self.assertEqual(structures[0]["bbox"], [1.0, 2.0, 3.0, 4.0])
+
+    def test_disabled_processor_marks_visual_groups_without_opening_pdf(self) -> None:
+        config = DocumentPipelineConfig(enable_pp_structure=False)
+        text = (
+            "A Practice Passage This passage explains a process. "
+            "Questions 1-2 Complete the table below. Choose NO MORE THAN TWO WORDS from the passage. "
+            "Category Answer Colour 1 Location 2 "
+        )
+        document = make_document([ProcessedPage(1, "native_pdf", 0.95, [make_element("p1-e1", 1, text)])])
+        structured = IELTSStructureParser(config).parse(document)
+
+        report = PPStructureProcessor(config).enrich_pdf(Path("missing.pdf"), document, structured)
+
+        group = structured.passages[0].question_groups[0]
+        self.assertEqual(report["status"], "skipped")
+        self.assertEqual(group.visual_element["layout_status"], "disabled")
+        self.assertEqual(document.metadata["ielts_structure"]["passages"][0]["question_groups"][0]["visual_element"]["layout_status"], "disabled")
 
 
 class IELTSStructureTests(unittest.TestCase):
@@ -246,6 +366,90 @@ class IELTSStructureTests(unittest.TestCase):
         self.assertTrue(all("Questions 6-6" not in chunk.text for chunk in passage_chunks))
         self.assertNotIn("Destination Mars", question_six.text)
         self.assertNotIn("It has solid ground", question_six.text)
+
+    def test_instruction_only_gaps_do_not_create_passages(self) -> None:
+        text = (
+            "Make That Wine! Australia is a nation of wine drinkers. "
+            "Wine is made by fermentation and can be classified in several ways. "
+            "Questions 1-4 Do the following statements agree with the information given in Reading Passage One? "
+            "1. Wine is popular in Australia because it is healthy. "
+            "2. Yeast is white-coloured. "
+            "3. Wine is popular in the Near East. "
+            "4. Blended wines are usually cheaper. "
+            "Questions 5-10 Complete the table. "
+            "Choose NO MORE THAN TWO WORDS from the passage for each answer. "
+            "Classification based on colour grape species location method. "
+            "Questions 11-13 Choose the correct letter, A, B, C, or D. "
+            "11. First multiple choice? A one. B two. C three. D four. "
+            "12. Second multiple choice? A one. B two. C three. D four. "
+            "13. Third multiple choice? A one. B two. C three. D four. "
+            "That Vision Thing In the past, management took a minor role in influencing motivation. "
+            "People in organisations were considered personnel. "
+            "Questions 14-17 Answer the questions. Choose NO MORE THAN TWO WORDS from the passage for each answer. "
+            "14. Broadly, what do staff need? "
+            "15. Which people advise envisioning? "
+            "16. What can a lack of vision cause? "
+            "17. Which aspects are never shared? "
+        )
+        document = make_document([ProcessedPage(1, "native_pdf", 0.95, [make_element("p1-e1", 1, text)])])
+
+        structured = IELTSStructureParser(self.config).parse(document)
+
+        self.assertEqual([passage.title for passage in structured.passages], ["Make That Wine!", "That Vision Thing"])
+        self.assertEqual(
+            [
+                (group.question_start, group.question_end)
+                for group in structured.passages[0].question_groups
+            ],
+            [(1, 4), (5, 10), (11, 13)],
+        )
+        self.assertEqual(structured.diagnostics["instruction_as_title"], [])
+
+    def test_visual_question_groups_emit_table_and_flowchart_chunks(self) -> None:
+        text = (
+            "A Practice Passage\n"
+            "This passage explains a process with several categories and stages.\n"
+            "Questions 1-2 Complete the table below. Choose NO MORE THAN TWO WORDS from the passage.\n"
+            "| Category | Answer |\n"
+            "| --- | --- |\n"
+            "| Colour | 1 |\n"
+            "| Location | 2 |\n"
+            "Questions 3-4 Complete the flow chart. Choose NO MORE THAN TWO WORDS from the passage.\n"
+            "Start -> 3 -> Result -> 4\n"
+        )
+        document = make_document([ProcessedPage(1, "native_pdf", 0.95, [make_element("p1-e1", 1, text)])])
+
+        structured = IELTSStructureParser(self.config).parse(document)
+        chunks = StructuredChunker(self.config).chunk(document, structured)
+        table_chunk = next(chunk for chunk in chunks if chunk.metadata["unit_type"] == "table")
+        flowchart_chunk = next(chunk for chunk in chunks if chunk.metadata["unit_type"] == "flowchart")
+
+        self.assertEqual(structured.diagnostics["tables_found"], 1)
+        self.assertEqual(structured.diagnostics["flowcharts_found"], 1)
+        self.assertEqual(table_chunk.metadata["table"]["blank_question_numbers"], [1, 2])
+        self.assertEqual(table_chunk.metadata["table"]["columns"], ["Category", "Answer"])
+        self.assertEqual(flowchart_chunk.metadata["flowchart"]["blank_question_numbers"], [3, 4])
+        self.assertGreater(len(flowchart_chunk.metadata["flowchart"]["edges"]), 0)
+
+    def test_visual_question_group_keeps_low_confidence_fallback_when_layout_is_flat(self) -> None:
+        text = (
+            "A Practice Passage This passage explains a process. "
+            "Questions 5-7 Complete the table below. Choose NO MORE THAN TWO WORDS from the passage. "
+            "Category Answer Colour 5 Location 6 Method 7 "
+        )
+        document = make_document([ProcessedPage(1, "native_pdf", 0.95, [make_element("p1-e1", 1, text)])])
+
+        structured = IELTSStructureParser(self.config).parse(document)
+        chunks = StructuredChunker(self.config).chunk(document, structured)
+        table_chunk = next(chunk for chunk in chunks if chunk.metadata["unit_type"] == "table")
+
+        self.assertEqual(table_chunk.metadata["table"]["blank_question_numbers"], [5, 6, 7])
+        self.assertEqual(table_chunk.metadata["table"]["rows"], [])
+        self.assertLess(table_chunk.metadata["table"]["confidence"], 0.6)
+        self.assertEqual(
+            structured.diagnostics["low_confidence_visual_elements"][0]["question_range"],
+            [5, 7],
+        )
 
     def test_task_noise_is_removed_from_question_group(self) -> None:
         text = (

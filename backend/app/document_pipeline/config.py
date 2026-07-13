@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class DocumentPipelineConfig:
-    parser_version: str = "1.2.0"
+    parser_version: str = "1.3.0"
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_MAX_UPLOAD_MB", "25")))
     max_pdf_pages: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_MAX_PDF_PAGES", "80")))
     native_min_chars: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_NATIVE_MIN_CHARS", "40")))
@@ -17,10 +17,8 @@ class DocumentPipelineConfig:
     scanned_image_coverage: float = field(
         default_factory=lambda: float(os.getenv("DOCUMENT_SCANNED_IMAGE_COVERAGE", "0.65"))
     )
-    ocr_lang: str = field(default_factory=lambda: os.getenv("DOCUMENT_OCR_LANG", os.getenv("PDF_OCR_LANG", "vie+eng")))
     ocr_dpi: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_OCR_DPI", os.getenv("PDF_OCR_DPI", "180"))))
     ocr_engine: str = field(default_factory=lambda: os.getenv("OCR_ENGINE", "paddle"))
-    ocr_fallback_engine: str = field(default_factory=lambda: os.getenv("OCR_FALLBACK_ENGINE", "tesseract"))
     paddleocr_device: str = field(default_factory=lambda: os.getenv("PADDLEOCR_DEVICE", "cpu"))
     paddleocr_lang: str = field(default_factory=lambda: os.getenv("PADDLEOCR_LANG", "latin"))
     paddleocr_default_det_model: str = field(
@@ -47,6 +45,14 @@ class DocumentPipelineConfig:
     )
     warmup_ocr: bool = field(default_factory=lambda: os.getenv("WARMUP_OCR", "true").lower() == "true")
     warmup_ocr_medium: bool = field(default_factory=lambda: os.getenv("WARMUP_OCR_MEDIUM", "true").lower() == "true")
+    enable_pp_structure: bool = field(
+        default_factory=lambda: os.getenv("DOCUMENT_ENABLE_PP_STRUCTURE", "true").lower() == "true"
+    )
+    pp_structure_device: str = field(default_factory=lambda: os.getenv("PP_STRUCTURE_DEVICE", os.getenv("PADDLEOCR_DEVICE", "cpu")))
+    pp_structure_dpi: int = field(default_factory=lambda: int(os.getenv("PP_STRUCTURE_DPI", "180")))
+    warmup_pp_structure: bool = field(
+        default_factory=lambda: os.getenv("WARMUP_PP_STRUCTURE", "false").lower() == "true"
+    )
     chunk_target_tokens: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_CHUNK_TARGET_TOKENS", "600")))
     chunk_max_tokens: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_CHUNK_MAX_TOKENS", "800")))
     chunk_overlap_tokens: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_CHUNK_OVERLAP_TOKENS", "80")))
@@ -81,10 +87,10 @@ class DocumentPipelineConfig:
         )
         if any(value < 0 or value > 1 for value in thresholds):
             raise ValueError("Document quality and OCR thresholds must be between 0 and 1.")
-        if self.ocr_engine.lower() not in {"paddle", "tesseract"}:
-            raise ValueError("OCR_ENGINE must be paddle or tesseract.")
-        if self.ocr_fallback_engine.lower() not in {"tesseract", "none"}:
-            raise ValueError("OCR_FALLBACK_ENGINE must be tesseract or none.")
+        if self.ocr_engine.lower() != "paddle":
+            raise ValueError("OCR_ENGINE must be paddle.")
+        if self.pp_structure_dpi <= 0:
+            raise ValueError("PP_STRUCTURE_DPI must be positive.")
 
 
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".text"}

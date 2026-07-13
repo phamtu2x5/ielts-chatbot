@@ -1,0 +1,97 @@
+[
+  {
+    "test_id": 1,
+    "message": "Hiện tôi đã tải lên những tài liệu nào? Hãy mô tả ngắn từng tài liệu, không giải bài.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 2,
+    "message": "Tài liệu IELTS Reading gồm những passage nào và mỗi passage có những nhóm câu hỏi nào?",
+    "conversation_history": []
+  },
+  {
+    "test_id": 3,
+    "message": "Tóm tắt nội dung của cả ba passage trong đề Reading. Không giải câu hỏi.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 4,
+    "message": "Đề Writing trong ảnh yêu cầu người học làm gì? Chỉ giải thích yêu cầu, chưa viết bài.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 5,
+    "message": "Dịch Questions 1–4 sang tiếng Việt nhưng không đưa đáp án.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 6,
+    "message": "Giải thích yêu cầu và cách làm Questions 1–4, nhưng chưa giải từng câu.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 7,
+    "message": "Trả lời Questions 1–4 và dẫn bằng chứng ngắn từ passage cho từng câu.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 8,
+    "message": "Hiển thị lại toàn bộ bảng của Questions 5–10 theo dạng Markdown, giữ đúng hàng, cột và vị trí các ô trống. Không giải bài.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 9,
+    "message": "Hiển thị cấu trúc flowchart của Questions 18–23. Hãy mô tả các node và hướng nối giữa chúng, chưa điền đáp án.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 10,
+    "message": "Passage 1 giải thích màu đỏ hoặc trắng của rượu được tạo ra như thế nào?",
+    "conversation_history": []
+  },
+  {
+    "test_id": 11,
+    "message": "Tại sao tác giả của Passage 2 phản đối việc “envisioning” trong tổ chức? Hãy nêu ba lý do chính.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 12,
+    "message": "Hãy trích xuất toàn bộ bảng số liệu trong ảnh Writing thành bảng Markdown. Chưa phân tích và chưa viết bài.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 13,
+    "message": "Tỷ lệ sở hữu smartphone của nước B năm 2024 là bao nhiêu? Chỉ trả lời giá trị và nguồn.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 14,
+    "message": "Quốc gia nào có mức tăng Internet Access lớn nhất từ 2019 đến 2024? Trình bày phép tính.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 15,
+    "message": "Viết riêng một đoạn overview cho đề Writing, không viết introduction hoặc body paragraph.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 16,
+    "message": "Viết một bài IELTS Writing Task 1 khoảng 170–190 từ dựa hoàn toàn trên bảng trong ảnh.",
+    "conversation_history": []
+  },
+  {
+    "test_id": 17,
+    "message": "Đề Reading có nhắc đến mạng xã hội và việc học tiếng Anh của sinh viên không?",
+    "conversation_history": []
+  },
+  {
+    "test_id": 18,
+    "message": "Trong Reading Passage 1, tác giả nói rằng smartphone ownership tăng mạnh nhất ở Country C đúng không?",
+    "conversation_history": []
+  },
+  {
+    "test_id": 19,
+    "message": "Task 2 ở cuối file Reading yêu cầu gì? Nó có giống đề Writing trong ảnh không?",
+    "conversation_history": []
+  }
+]

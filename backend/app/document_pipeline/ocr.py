@@ -1,4 +1,3 @@
-import shutil
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -31,30 +30,29 @@ class OCRProcessor:
             return self._image_to_text(image)
 
     def _image_to_text(self, image: Image.Image) -> OCRResult:
-        if self.config.ocr_engine.lower() == "paddle":
-            result = self._image_to_text_with_paddle(image, use_medium=False)
-            if result.text and result.confidence >= self.config.paddleocr_min_confidence:
-                return result
+        result = self._image_to_text_with_paddle(image, use_medium=False)
+        if result.text and result.confidence >= self.config.paddleocr_min_confidence:
+            return result
 
-            fallback_result = self._image_to_text_with_paddle(image, use_medium=True)
-            if fallback_result.text and fallback_result.confidence >= result.confidence:
-                fallback_result.metadata["cascade_attempts"] = [self._attempt_summary(result)]
-                return fallback_result
+        fallback_result = self._image_to_text_with_paddle(image, use_medium=True)
+        attempts = [self._attempt_summary(result), self._attempt_summary(fallback_result)]
+        if fallback_result.text and fallback_result.confidence >= result.confidence:
+            fallback_result.metadata["cascade_attempts"] = attempts
+            return fallback_result
 
-            if result.text:
-                result.metadata["cascade_attempts"] = [self._attempt_summary(fallback_result)]
-                return result
+        if result.text:
+            result.metadata["cascade_attempts"] = attempts
+            return result
 
-        if self.config.ocr_fallback_engine.lower() == "tesseract" or self.config.ocr_engine.lower() == "tesseract":
-            tesseract_result = self._image_to_text_with_tesseract(image)
-            if self.config.ocr_engine.lower() == "paddle":
-                tesseract_result.metadata["cascade_attempts"] = [
-                    self._attempt_summary(result),
-                    self._attempt_summary(fallback_result),
-                ]
-            return tesseract_result
-
-        return OCRResult("", 0.0, "unavailable", {"reason": "no_ocr_engine_available"})
+        return OCRResult(
+            "",
+            0.0,
+            "paddleocr_failed",
+            {
+                "reason": "paddleocr_small_and_medium_failed",
+                "cascade_attempts": attempts,
+            },
+        )
 
     def _attempt_summary(self, result: OCRResult) -> Dict[str, Any]:
         return {
@@ -73,17 +71,6 @@ class OCRProcessor:
             draw.text((16, 32), "IELTS OCR warmup", fill="black")
 
             results = {"engine": self.config.ocr_engine, "small": None, "medium": None}
-            if self.config.ocr_engine.lower() != "paddle":
-                result = self._image_to_text_with_tesseract(image)
-                results["small"] = {
-                    "engine": result.engine,
-                    "confidence": result.confidence,
-                    "ok": bool(result.text),
-                    "metadata": result.metadata,
-                }
-                results["models_ready"] = bool(result.text)
-                return results
-
             small = self._image_to_text_with_paddle(image, use_medium=False)
             results["small"] = {
                 "engine": small.engine,
@@ -110,9 +97,6 @@ class OCRProcessor:
         except ImportError:
             return False
         return True
-
-    def _tesseract_is_available(self) -> bool:
-        return bool(shutil.which("tesseract"))
 
     def _image_to_text_with_paddle(self, image: Image.Image, use_medium: bool) -> OCRResult:
         if not self._paddle_is_available():
@@ -256,47 +240,3 @@ class OCRProcessor:
         if score > 1:
             score /= 100
         return max(0.0, min(1.0, score))
-
-    def _image_to_text_with_tesseract(self, image: Image.Image) -> OCRResult:
-        if not self._tesseract_is_available():
-            return OCRResult("", 0.0, "tesseract_unavailable", {"reason": "tesseract_not_found"})
-
-        try:
-            import pytesseract
-        except ImportError:
-            return OCRResult("", 0.0, "tesseract_unavailable", {"reason": "pytesseract_not_installed"})
-
-        lang = self.config.ocr_lang
-        try:
-            data = pytesseract.image_to_data(image, lang=lang, output_type=pytesseract.Output.DICT)
-        except pytesseract.TesseractError:
-            if lang == "eng":
-                return OCRResult("", 0.0, "tesseract", {"lang": lang, "fallback": False})
-            try:
-                data = pytesseract.image_to_data(image, lang="eng", output_type=pytesseract.Output.DICT)
-                lang = "eng"
-            except pytesseract.TesseractError:
-                return OCRResult("", 0.0, "tesseract", {"lang": self.config.ocr_lang, "fallback": True})
-
-        words = []
-        confidences = []
-        for text, conf in zip(data.get("text", []), data.get("conf", [])):
-            word = (text or "").strip()
-            if not word:
-                continue
-            words.append(word)
-            try:
-                score = float(conf)
-            except (TypeError, ValueError):
-                score = -1.0
-            if score >= 0:
-                confidences.append(score / 100)
-
-        text = normalize_text(" ".join(words))
-        confidence = sum(confidences) / len(confidences) if confidences else (0.55 if text else 0.0)
-        return OCRResult(
-            text=text,
-            confidence=max(0.0, min(1.0, confidence)),
-            engine="tesseract",
-            metadata={"lang": lang, "word_count": len(words)},
-        )

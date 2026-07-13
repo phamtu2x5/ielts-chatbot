@@ -5,6 +5,7 @@ from typing import Any
 from .chunking import estimate_tokens
 from .config import DocumentPipelineConfig
 from .models import DocumentChunk, DocumentElement, ProcessedDocument
+from .visual import IELTSQuestionVisualParser
 
 
 QUESTION_HEADER_RE = re.compile(r"Questions?\s+(\d{1,2})\s*(?:-|–|to)\s*(\d{1,2})", re.IGNORECASE)
@@ -15,6 +16,24 @@ NUMBERED_QUESTION_RE = re.compile(
 PAGE_MARKER_RE = re.compile(r"\n{1,3}\[Page\s+\d+\]", re.IGNORECASE)
 FOOTER_RE = re.compile(r"https?://\S+|Page\s+\d+", re.IGNORECASE)
 TITLE_WORD_RE = re.compile(r"[A-Z][A-Za-z'’.-]+")
+INSTRUCTION_RE = re.compile(
+    r"\b("
+    r"questions?\s+\d{1,2}\s*(?:-|–|to)\s*\d{1,2}|"
+    r"choose\s+no\s+more\s+than|"
+    r"no\s+more\s+than\s+\w+\s+words?|"
+    r"complete\s+the\s+(?:table|flow\s*-?\s*chart|flowchart|summary|sentence|notes?)|"
+    r"choose\s+the\s+correct\s+letter|"
+    r"give\s+two\s+examples|"
+    r"write\s+true|"
+    r"false\s+if|"
+    r"not\s+given|"
+    r"answer\s+the\s+questions?|"
+    r"match\s+each|"
+    r"do\s+the\s+following\s+statements|"
+    r"use\s+no\s+more\s+than"
+    r")\b",
+    re.IGNORECASE,
+)
 PASSAGE_TITLE_BLACKLIST = {
     "reading passage one",
     "reading passage two",
@@ -57,6 +76,7 @@ class IELTSQuestionGroup:
     source_element_ids: list[str]
     text: str
     visual_element_id: str | None = None
+    visual_element: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +88,7 @@ class IELTSQuestionGroup:
             "page_numbers": self.page_numbers,
             "source_element_ids": self.source_element_ids,
             "visual_element_id": self.visual_element_id,
+            "visual_element": self.visual_element,
         }
 
 
@@ -136,6 +157,7 @@ class _TitleCandidate:
 class IELTSStructureParser:
     def __init__(self, config: DocumentPipelineConfig) -> None:
         self.config = config
+        self.visual_parser = IELTSQuestionVisualParser()
 
     def parse(self, document: ProcessedDocument) -> IELTSDocument:
         full_text, spans = self._linearize(document)
@@ -188,12 +210,14 @@ class IELTSStructureParser:
                 start, end = end, start
             next_start = headers[index + 1].start() if index + 1 < len(headers) else len(full_text)
             logical_end = self._logical_group_end(full_text, header.start(), next_start, start, end)
-            raw_text = self._clean_section_text(full_text[header.start() : logical_end])
+            raw_section = full_text[header.start() : logical_end]
+            raw_text = self._clean_section_text(raw_section)
             instructions = self._instructions(raw_text, start)
             question_type = self._infer_question_type(raw_text)
             element_ids, pages = self._span_metadata(spans, header.start(), logical_end)
             questions = self._parse_questions(raw_text, start, end, question_type, element_ids, pages)
             text = self._group_display_text(raw_text, instructions, questions)
+            visual = self.visual_parser.parse(raw_section, start, end, question_type, pages, element_ids)
             groups.append(
                 _ParsedGroup(
                     start_offset=header.start(),
@@ -207,6 +231,8 @@ class IELTSStructureParser:
                         page_numbers=pages,
                         source_element_ids=element_ids,
                         text=text,
+                        visual_element_id=visual.element_id if visual else None,
+                        visual_element=visual.payload if visual else None,
                     ),
                 )
             )
@@ -270,7 +296,9 @@ class IELTSStructureParser:
         else:
             title_offset = self._passage_title_offset(section)
             if title_offset is not None:
-                stop_candidates.append(header_start + title_offset)
+                question_type = self._infer_question_type(section)
+                if question_type not in {"table_completion", "flowchart_completion"} or self._visual_tail_is_passage_body(section[title_offset:]):
+                    stop_candidates.append(header_start + title_offset)
         return min(stop_candidates)
 
     def _passage_title_offset(
@@ -358,6 +386,7 @@ class IELTSStructureParser:
             return []
 
         passages: list[IELTSPassage] = []
+        state = "SEARCHING_PASSAGE"
         current_text = full_text[: parsed_groups[0].start_offset].strip()
         current_start = 0
         current_groups: list[IELTSQuestionGroup] = []
@@ -365,22 +394,30 @@ class IELTSStructureParser:
 
         for parsed in parsed_groups:
             gap = full_text[previous_group_end : parsed.start_offset].strip()
-            if current_groups and self._looks_like_new_passage(gap):
+            gap_kind = self._classify_inter_group_gap(gap)
+            if current_groups and gap_kind == "new_passage":
                 passages.append(
                     self._make_passage(len(passages) + 1, current_text, current_groups, spans, current_start, previous_group_end)
                 )
                 current_text = gap
                 current_start = previous_group_end
                 current_groups = []
-            elif gap:
+                state = "READING_PASSAGE_BODY"
+            elif gap and gap_kind == "passage_body":
                 current_text = f"{current_text}\n\n{gap}".strip()
+                state = "READING_PASSAGE_BODY"
+            elif gap_kind == "instruction":
+                state = "READING_INSTRUCTIONS"
 
+            state = "READING_QUESTIONS"
             current_groups.append(parsed.group)
             previous_group_end = parsed.end_offset
 
+        state = "WAITING_NEXT_PASSAGE"
         passages.append(
             self._make_passage(len(passages) + 1, current_text, current_groups, spans, current_start, previous_group_end)
         )
+        _ = state
         return [passage for passage in passages if passage.text or passage.question_groups]
 
     def _make_passage(
@@ -420,6 +457,8 @@ class IELTSStructureParser:
                             "range": [group.question_start, group.question_end],
                             "type": group.question_type,
                             "pages": group.page_numbers,
+                            "visual_type": group.visual_element.get("type") if group.visual_element else None,
+                            "visual_confidence": group.visual_element.get("confidence") if group.visual_element else None,
                         }
                         for group in passage.question_groups
                     ],
@@ -449,6 +488,46 @@ class IELTSStructureParser:
         duplicates = sorted(
             {number for number in parsed_questions if parsed_questions.count(number) > 1}
         )
+        group_ranges = [
+            (group.question_start, group.question_end, passage.passage_number)
+            for passage in passages
+            for group in passage.question_groups
+        ]
+        overlapping_groups = []
+        for index, (start, end, passage_number) in enumerate(group_ranges):
+            for other_start, other_end, other_passage_number in group_ranges[index + 1 :]:
+                if max(start, other_start) <= min(end, other_end):
+                    overlapping_groups.append(
+                        {
+                            "range": [start, end],
+                            "passage_number": passage_number,
+                            "overlaps": [other_start, other_end],
+                            "overlap_passage_number": other_passage_number,
+                        }
+                    )
+        instruction_as_title = [
+            {
+                "passage_number": passage.passage_number,
+                "title": passage.title,
+            }
+            for passage in passages
+            if passage.title and self._is_instruction_like_text(passage.title)
+        ]
+        suspicious_boundaries = []
+        for passage in passages:
+            if not passage.title and len(passage.question_groups) > 1:
+                suspicious_boundaries.append(
+                    {
+                        "passage_number": passage.passage_number,
+                        "reason": "missing_title_with_multiple_question_groups",
+                    }
+                )
+        visual_elements = [
+            group.visual_element
+            for passage in passages
+            for group in passage.question_groups
+            if group.visual_element
+        ]
         return {
             "passages_found": len(passages),
             "question_groups_found": sum(len(passage.question_groups) for passage in passages),
@@ -457,6 +536,21 @@ class IELTSStructureParser:
             "missing_questions": sorted(expected - covered_questions),
             "duplicate_questions": duplicates,
             "unassigned_questions": [],
+            "overlapping_question_groups": overlapping_groups,
+            "instruction_as_title": instruction_as_title,
+            "suspicious_boundaries": suspicious_boundaries,
+            "visual_elements_found": len(visual_elements),
+            "tables_found": sum(1 for element in visual_elements if element.get("type") == "table"),
+            "flowcharts_found": sum(1 for element in visual_elements if element.get("type") == "flowchart"),
+            "low_confidence_visual_elements": [
+                {
+                    "type": element.get("type"),
+                    "question_range": element.get("question_range"),
+                    "confidence": element.get("confidence"),
+                }
+                for element in visual_elements
+                if float(element.get("confidence") or 0.0) < 0.6
+            ],
         }
 
     def _span_metadata(self, spans: list[_Span], start: int, end: int) -> tuple[list[str], list[int]]:
@@ -485,9 +579,28 @@ class IELTSStructureParser:
             return "matching"
         return None
 
+    def _classify_inter_group_gap(self, text: str) -> str:
+        cleaned = self._clean_passage_text(text)
+        if not cleaned:
+            return "empty"
+        if self._is_instruction_like_text(cleaned):
+            return "instruction"
+        if self._is_passage_boundary_candidate(cleaned):
+            return "new_passage"
+        return "passage_body"
+
     def _looks_like_new_passage(self, text: str) -> bool:
         cleaned = self._clean_passage_text(text)
-        return estimate_tokens(cleaned) >= 120 or bool(self._infer_title(cleaned))
+        return self._is_passage_boundary_candidate(cleaned)
+
+    def _is_passage_boundary_candidate(self, text: str) -> bool:
+        cleaned = self._clean_passage_text(text)
+        if not cleaned or self._is_instruction_like_text(cleaned):
+            return False
+        title = self._infer_title(cleaned)
+        if title and not self._is_instruction_like_text(title):
+            return True
+        return estimate_tokens(cleaned) >= 120
 
     def _infer_title(self, text: str) -> str | None:
         cleaned = self._clean_passage_text(text)
@@ -516,6 +629,11 @@ class IELTSStructureParser:
                 if title_end < len(text) and text[title_end] in "!?":
                     title_end += 1
                 title = text[first_word.start() : title_end].strip()
+                line_start = text.rfind("\n", 0, first_word.start()) + 1
+                line_end = text.find("\n", title_end)
+                line = text[line_start : line_end if line_end != -1 else len(text)]
+                if "|" in line:
+                    continue
                 if not self._is_plausible_title(title):
                     continue
                 after_title = text[title_end : title_end + 180]
@@ -539,6 +657,11 @@ class IELTSStructureParser:
         if not candidates:
             return None
         return max(candidates, key=lambda item: item.score)
+
+    def _visual_tail_is_passage_body(self, text: str) -> bool:
+        snippet = self._clean_section_text(text[:240])
+        word_count = len(re.findall(r"[A-Za-z]+", snippet))
+        return word_count >= 16 and bool(re.search(r"[.!?]", snippet))
 
     def _has_line_boundary_before(self, text: str, offset: int) -> bool:
         prefix = text[max(0, offset - 8) : offset]
@@ -603,9 +726,43 @@ class IELTSStructureParser:
         normalized = re.sub(r"\s+", " ", title).strip().lower().rstrip(".?!")
         if normalized in PASSAGE_TITLE_BLACKLIST:
             return False
-        if "ielts" in normalized or "question" in normalized or "passage" in normalized or "write true" in normalized:
+        if normalized in {"no", "more", "than", "one", "two", "three", "four", "word", "words"}:
+            return False
+        if (
+            "ielts" in normalized
+            or "question" in normalized
+            or "passage" in normalized
+            or "write true" in normalized
+            or "no more" in normalized
+            or "no more than" in normalized
+            or "more than" in normalized
+            or "than " in normalized
+            or normalized.endswith("words")
+            or "complete the" in normalized
+            or normalized.startswith("choose")
+            or "from the passage" in normalized
+        ):
+            return False
+        if self._is_instruction_like_text(title):
             return False
         return 1 <= len(title.split()) <= 6
+
+    def _is_instruction_like_text(self, text: str) -> bool:
+        normalized = self._clean_section_text(text).lower()
+        if not normalized:
+            return False
+        if INSTRUCTION_RE.search(normalized):
+            return True
+        first_words = " ".join(normalized.split()[:5])
+        return first_words in {
+            "choose no more",
+            "choose no more than",
+            "complete the table",
+            "complete the flow chart",
+            "complete the flow-chart",
+            "choose the correct letter",
+            "give two examples",
+        }
 
     def _strip_leading_title(self, text: str, title: str | None) -> str:
         if not title:
@@ -641,6 +798,8 @@ class StructuredChunker:
                 chunks.extend(self._passage_chunks(document, passage, len(chunks)))
             for group in passage.question_groups:
                 chunks.append(self._question_group_chunk(document, passage, group, len(chunks)))
+                if group.visual_element:
+                    chunks.append(self._visual_chunk(document, passage, group, len(chunks)))
                 for question in group.questions:
                     chunks.append(self._question_chunk(document, passage, group, question, len(chunks)))
 
@@ -782,6 +941,90 @@ class StructuredChunker:
                 "question_end": question.question_number,
                 "question_type": question.question_type,
             },
+        )
+
+    def _visual_chunk(
+        self,
+        document: ProcessedDocument,
+        passage: IELTSPassage,
+        group: IELTSQuestionGroup,
+        index: int,
+    ) -> DocumentChunk:
+        visual = group.visual_element or {}
+        visual_type = str(visual.get("type") or "visual")
+        display = self._visual_display_text(visual)
+        retrieval = (
+            f"IELTS Reading visual structure. Passage {passage.passage_number}. "
+            f"Questions {group.question_start}-{group.question_end}. "
+            f"Question Type: {group.question_type or 'unknown'}. Visual Type: {visual_type}.\n\n{display}"
+        )
+        return self._make_chunk(
+            document=document,
+            index=index,
+            chunk_id=f"{document.document_id}-{visual_type}-{group.question_start}-{group.question_end}",
+            text=display,
+            retrieval_text=retrieval,
+            pages=group.page_numbers,
+            element_ids=group.source_element_ids,
+            heading_path=[
+                f"Passage {passage.passage_number}",
+                f"Questions {group.question_start}-{group.question_end}",
+                visual_type,
+            ],
+            min_confidence=float(visual.get("confidence") or self._min_confidence(document, group.source_element_ids)),
+            metadata={
+                "unit_type": visual_type,
+                "chunk_reason": visual_type,
+                "parent_id": f"questions-{group.question_start}-{group.question_end}",
+                "passage_number": passage.passage_number,
+                "passage_title": passage.title,
+                "question_range": [group.question_start, group.question_end],
+                "question_start": group.question_start,
+                "question_end": group.question_end,
+                "question_type": group.question_type,
+                visual_type: visual,
+            },
+        )
+
+    def _visual_display_text(self, visual: dict[str, Any]) -> str:
+        visual_type = visual.get("type")
+        if visual_type == "table":
+            columns = visual.get("columns") or []
+            rows = visual.get("rows") or []
+            if columns and rows:
+                lines = [
+                    "| " + " | ".join(str(column) for column in columns) + " |",
+                    "| " + " | ".join("---" for _ in columns) + " |",
+                ]
+                for row in rows:
+                    lines.append("| " + " | ".join(str(cell) for cell in row) + " |")
+                return "\n".join(lines)
+            return self._visual_fallback_text("Table", visual)
+        if visual_type == "flowchart":
+            nodes = visual.get("nodes") or []
+            edges = visual.get("edges") or []
+            if nodes:
+                lines = [
+                    f"Flowchart Questions {visual['question_range'][0]}-{visual['question_range'][1]}"
+                ]
+                for node in nodes:
+                    label = f"Question {node['question_number']} blank" if node.get("question_number") else node.get("text", "")
+                    lines.append(f"- {node['id']}: {label}")
+                for edge in edges:
+                    lines.append(f"- edge: {edge['from']} -> {edge['to']}")
+                return "\n".join(lines)
+            return self._visual_fallback_text("Flowchart", visual)
+        return str(visual)
+
+    def _visual_fallback_text(self, label: str, visual: dict[str, Any]) -> str:
+        start, end = visual.get("question_range") or ["?", "?"]
+        blanks = ", ".join(str(number) for number in visual.get("blank_question_numbers") or [])
+        raw_text = visual.get("raw_text") or ""
+        return (
+            f"{label} Questions {start}-{end}\n"
+            f"Blank question numbers: {blanks}\n"
+            "Structured rows/nodes could not be inferred reliably from the extracted text.\n"
+            f"Raw visual text: {raw_text}"
         )
 
     def _make_chunk(

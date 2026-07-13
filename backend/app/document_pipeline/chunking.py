@@ -12,6 +12,11 @@ class SemanticChunker:
         self.config = config
 
     def chunk(self, document: ProcessedDocument) -> list[DocumentChunk]:
+        if document.metadata.get("document_type") == "ielts_writing_task_1":
+            chunks = self._chunk_writing_task_1(document)
+            if chunks:
+                return chunks
+
         chunks: list[DocumentChunk] = []
         current: list[DocumentElement] = []
         heading_path: list[str] = []
@@ -40,6 +45,74 @@ class SemanticChunker:
             chunks.append(self._make_chunk(document, current, heading_path, len(chunks)))
 
         return [chunk for chunk in chunks if chunk.text.strip()]
+
+    def _chunk_writing_task_1(self, document: ProcessedDocument) -> list[DocumentChunk]:
+        chunks: list[DocumentChunk] = []
+        prompt_elements = [element for element in document.elements if element.type == "writing_prompt"]
+        table_elements = [element for element in document.elements if element.type == "table"]
+        raw_elements = [element for element in document.elements if element.type == "paragraph"]
+
+        for element in prompt_elements:
+            chunks.append(
+                self._make_special_chunk(
+                    document=document,
+                    element=element,
+                    chunk_index=len(chunks),
+                    unit_type="writing_prompt",
+                    chunk_reason="writing_prompt",
+                    retrieval_prefix="IELTS Writing Task 1 prompt. Academic table task.",
+                )
+            )
+
+        for element in table_elements:
+            table = element.metadata.get("table") or {}
+            chunks.append(
+                self._make_special_chunk(
+                    document=document,
+                    element=element,
+                    chunk_index=len(chunks),
+                    unit_type="writing_table",
+                    chunk_reason="writing_table",
+                    retrieval_prefix="IELTS Writing Task 1 data table. Structured table values.",
+                    extra_metadata={"table": table},
+                )
+            )
+            columns = table.get("columns") or []
+            for row_index, row in enumerate(table.get("rows") or [], 1):
+                row_text = self._row_text(columns, row)
+                row_element = DocumentElement(
+                    element_id=f"{element.element_id}-r{row_index}",
+                    page=element.page,
+                    type="table_row",
+                    raw_text=row_text,
+                    normalized_text=row_text,
+                    source=element.source,
+                    confidence=element.confidence,
+                    metadata={
+                        "document_type": document.metadata.get("document_type"),
+                        "task_type": document.metadata.get("task_type"),
+                        "table_row": row,
+                        "table_columns": columns,
+                    },
+                )
+                chunks.append(
+                    self._make_special_chunk(
+                        document=document,
+                        element=row_element,
+                        chunk_index=len(chunks),
+                        unit_type="table_row",
+                        chunk_reason="table_row",
+                        retrieval_prefix="IELTS Writing Task 1 table row.",
+                        extra_metadata={
+                            "table_row": row,
+                            "table_columns": columns,
+                        },
+                    )
+                )
+
+        if not chunks and raw_elements:
+            chunks.append(self._make_chunk(document, raw_elements, [], 0))
+        return chunks
 
     def _overlap_elements(self, elements: list[DocumentElement]) -> list[DocumentElement]:
         overlap: list[DocumentElement] = []
@@ -78,10 +151,55 @@ class SemanticChunker:
             metadata={
                 "mime_type": document.mime_type,
                 "parser_version": document.parser_version,
+                "document_type": document.metadata.get("document_type"),
+                "task_type": document.metadata.get("task_type"),
                 "element_types": sorted({element.type for element in elements}),
                 "sources": sorted({element.source for element in elements}),
             },
         )
+
+    def _make_special_chunk(
+        self,
+        document: ProcessedDocument,
+        element: DocumentElement,
+        chunk_index: int,
+        unit_type: str,
+        chunk_reason: str,
+        retrieval_prefix: str,
+        extra_metadata: dict | None = None,
+    ) -> DocumentChunk:
+        metadata = {
+            "mime_type": document.mime_type,
+            "parser_version": document.parser_version,
+            "document_type": document.metadata.get("document_type"),
+            "task_type": document.metadata.get("task_type"),
+            "unit_type": unit_type,
+            "chunk_reason": chunk_reason,
+            "element_types": [element.type],
+            "sources": [element.source],
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        return DocumentChunk(
+            chunk_id=f"{document.document_id}-{unit_type}-{chunk_index + 1}",
+            document_id=document.document_id,
+            source_file=document.filename,
+            pages=[element.page],
+            element_ids=[element.element_id],
+            heading_path=[unit_type],
+            text=element.normalized_text,
+            retrieval_text=f"{retrieval_prefix}\n\n{element.normalized_text}",
+            display_text=element.normalized_text,
+            token_count=estimate_tokens(element.normalized_text),
+            min_confidence=element.confidence,
+            chunk_index=chunk_index,
+            metadata=metadata,
+        )
+
+    def _row_text(self, columns: list, row: list) -> str:
+        if not columns or len(columns) != len(row):
+            return " | ".join(str(cell) for cell in row)
+        return "; ".join(f"{column}: {cell}" for column, cell in zip(columns, row))
 
     def _elements_text(self, elements: list[DocumentElement], heading_path: list[str]) -> str:
         parts = []

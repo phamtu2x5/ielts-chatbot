@@ -7,6 +7,7 @@ from .chunking import SemanticChunker
 from .config import DocumentPipelineConfig
 from .extractors import DOCXExtractor, ImageExtractor, PDFExtractor, TextExtractor
 from .ielts import IELTSStructureParser, StructuredChunker
+from .layout import PPStructureProcessor
 from .models import DocumentChunk, ProcessedDocument
 from .ocr import OCRProcessor
 from .reconciliation import NativeOCRReconciler
@@ -23,6 +24,7 @@ class DocumentProcessor:
         self.ocr = OCRProcessor(self.config)
         self.reconciler = NativeOCRReconciler(self.config)
         self.structure_parser = IELTSStructureParser(self.config)
+        self.layout_processor = PPStructureProcessor(self.config)
         self.structured_chunker = StructuredChunker(self.config)
         self.chunker = SemanticChunker(self.config)
         self.extractors = {
@@ -46,6 +48,8 @@ class DocumentProcessor:
         document = self.reconciler.reconcile(document)
         if self.config.enable_ielts_structure_parser:
             structured_document = self.structure_parser.parse(document)
+            if route == "pdf":
+                self.layout_processor.enrich_pdf(file_path, document, structured_document)
             chunks = self.structured_chunker.chunk(document, structured_document)
             if not chunks:
                 chunks = self.chunker.chunk(document)
@@ -64,6 +68,9 @@ class DocumentProcessor:
         if not self.config.warmup_ocr:
             return {"skipped": True}
         return self.ocr.warmup(include_medium=self.config.warmup_ocr_medium)
+
+    def warmup_layout(self) -> dict:
+        return self.layout_processor.warmup()
 
     def _sha256(self, file_path: Path) -> str:
         digest = hashlib.sha256()

@@ -267,7 +267,9 @@ def rag_prompt(
                 "Generation policy:",
                 "- The user is asking to solve questions.",
                 "- Use passage evidence from the context before giving an answer.",
-                "- For True/False/Not Given questions, compare each statement against the passage evidence, then give TRUE, FALSE, or NOT GIVEN with a short reason.",
+                "- For True/False/Not Given questions, first classify the relationship between the statement and passage evidence as supports, contradicts, or absent.",
+                "- Mapping is strict: supports -> TRUE; contradicts -> FALSE; absent -> NOT GIVEN.",
+                "- Do not mark FALSE just because the passage lacks a reason, cause, date, comparison, or detail. If the required detail is absent, the answer is NOT GIVEN.",
                 "- If the context only contains question text and lacks passage evidence, say that there is not enough passage evidence to solve reliably.",
             ]
         )

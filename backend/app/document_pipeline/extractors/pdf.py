@@ -88,8 +88,10 @@ class PDFExtractor:
                                 "image_coverage": image_coverage,
                                 "requires_layout": quality.requires_layout,
                                 "requires_table_analysis": quality.requires_table_analysis,
-                                "ocr_engine": ocr_result.engine if ocr_result and processing_route != "native_pdf" else None,
-                                "ocr_quality": ocr_result.confidence if ocr_result and processing_route != "native_pdf" else None,
+                                "ocr_attempted": bool(ocr_result),
+                                "ocr_engine": ocr_result.engine if ocr_result else None,
+                                "ocr_quality": ocr_result.confidence if ocr_result else None,
+                                "ocr_metadata": ocr_result.metadata if ocr_result else None,
                             },
                         )
                     )
@@ -124,6 +126,7 @@ class PDFExtractor:
                             "image_coverage": image_coverage,
                             "ocr_engine": ocr_result.engine,
                             "ocr_quality": ocr_result.confidence,
+                            "ocr_metadata": ocr_result.metadata,
                         },
                     )
                 )

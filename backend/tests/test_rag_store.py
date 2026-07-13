@@ -28,8 +28,9 @@ except ImportError:
     sys.modules["sentence_transformers"] = sentence_transformers_stub
 
 from app import rag
-from app.intent import detect_query_intent
+from app.intent import detect_query_intent, filter_sources_for_intent
 from app.llm import looks_like_prompt_echo
+from app.structured_store import StructuredDocumentStore
 
 
 class FakeVectorStore(rag.LocalVectorStore):
@@ -66,6 +67,11 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual(store._docs[0]["chunk_id"], "a-2")
         self.assertEqual(store._embeddings.shape, (1, 2))
 
+    def test_structured_lookup_is_owned_by_structured_store(self) -> None:
+        store = FakeVectorStore()
+
+        self.assertIsInstance(store.structured_store, StructuredDocumentStore)
+
     def test_embedding_failure_preserves_previous_source(self) -> None:
         store = FakeVectorStore()
         store.upsert([self._chunk("a-1", "a.pdf", "first")], "a.pdf")
@@ -93,6 +99,53 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual(probe["results"][0]["chunk_id"], "questions-1-4")
         self.assertGreater(probe["top_question_score"], 0)
         self.assertTrue(probe["has_strong_hits"])
+
+    def test_structured_question_lookup_uses_metadata_without_dense_search(self) -> None:
+        store = FakeVectorStore()
+        group = self._chunk("questions-1-4", "reading.pdf", "Questions 1-4")
+        group["metadata"] = {"unit_type": "question_group", "question_range": [1, 4]}
+        question = self._chunk("question-2", "reading.pdf", "2. Yeast is white-coloured.")
+        question["metadata"] = {"unit_type": "question", "question_range": [2, 2], "parent_id": "questions-1-4"}
+        unrelated = self._chunk("passage", "reading.pdf", "A long unrelated passage")
+        unrelated["metadata"] = {"unit_type": "passage", "passage_number": 3}
+        store.upsert([unrelated, question, group], "reading.pdf")
+
+        hits = store.structured_lookup("Liệt kê Questions 1-4", "show_questions", top_k=3)
+
+        self.assertEqual(hits[0]["chunk_id"], "questions-1-4")
+        self.assertEqual(hits[0]["retrieval_method"], "structured_question")
+        self.assertGreater(hits[0]["structured_score"], hits[1]["structured_score"])
+
+    def test_structured_question_lookup_supports_vietnamese_from_to_range(self) -> None:
+        store = FakeVectorStore()
+        group = self._chunk("questions-1-4", "reading.pdf", "Questions 1-4")
+        group["metadata"] = {"unit_type": "question_group", "question_range": [1, 4]}
+        store.upsert([group], "reading.pdf")
+
+        hits = store.structured_lookup("trả lời câu hỏi từ 1 đến 4 trong tài liệu", "solve_questions", top_k=1)
+
+        self.assertEqual(hits[0]["chunk_id"], "questions-1-4")
+
+    def test_structured_writing_table_lookup_prefers_writing_table(self) -> None:
+        store = FakeVectorStore()
+        reading_table = self._chunk("questions-5-10", "reading.pdf", "Questions 5-10 Complete the table")
+        reading_table["metadata"] = {"unit_type": "table", "question_type": "table_completion", "question_range": [5, 10]}
+        writing_table = self._chunk("writing-table", "writing.png", "Country B Smartphone Ownership 2024 94")
+        writing_table["metadata"] = {
+            "unit_type": "writing_table",
+            "document_type": "ielts_writing_task_1",
+            "table": {
+                "columns": ["Country", "Internet Access 2019", "Internet Access 2024", "Smartphone Ownership 2019", "Smartphone Ownership 2024"],
+                "rows": [["A", 78, 96, 82, 99], ["B", 61, 89, 67, 94]],
+            },
+        }
+        store.upsert([reading_table], "reading.pdf")
+        store.upsert([writing_table], "writing.png")
+
+        hits = store.structured_lookup("Smartphone Ownership của nước B năm 2024 là bao nhiêu?", "show_table", top_k=2)
+
+        self.assertEqual(hits[0]["chunk_id"], "writing-table")
+        self.assertEqual(hits[0]["retrieval_method"], "structured_table_cell")
 
     def test_vietnamese_overview_query_uses_outline_and_passage_context(self) -> None:
         store = FakeVectorStore()
@@ -125,6 +178,51 @@ class LocalVectorStoreTests(unittest.TestCase):
         )
 
         self.assertEqual(intent, "solve_questions")
+
+    def test_no_solution_constraint_wins_over_question_markers(self) -> None:
+        intent = detect_query_intent(
+            "Hiển thị lại toàn bộ bảng của Questions 5-10, giữ đúng ô trống. Không giải bài.",
+            {"is_overview": False, "has_document_intent": True},
+        )
+
+        self.assertEqual(intent, "show_table")
+
+    def test_flowchart_no_fill_is_show_flowchart_intent(self) -> None:
+        intent = detect_query_intent(
+            "Hiển thị cấu trúc flowchart của Questions 18-23, chưa điền đáp án.",
+            {"is_overview": False, "has_document_intent": True},
+        )
+
+        self.assertEqual(intent, "show_flowchart")
+
+    def test_exact_table_cell_query_is_show_table_intent(self) -> None:
+        intent = detect_query_intent(
+            "Tỷ lệ sở hữu smartphone của nước B năm 2024 là bao nhiêu?",
+            {"is_overview": False, "has_document_intent": True},
+        )
+
+        self.assertEqual(intent, "show_table")
+
+    def test_explicit_passage_filter_does_not_fallback_to_wrong_passage(self) -> None:
+        sources = [
+            {"chunk_id": "p1", "metadata": {"unit_type": "passage", "passage_number": 1}},
+            {"chunk_id": "p3", "metadata": {"unit_type": "passage", "passage_number": 3}},
+        ]
+
+        filtered = filter_sources_for_intent(sources, "Passage 2 nói gì?", "semantic_qa")
+
+        self.assertEqual(filtered, [])
+
+    def test_writing_image_terms_are_document_intent(self) -> None:
+        store = FakeVectorStore()
+        table = self._chunk("writing-table", "writing.png", "Smartphone Ownership 2024 Country B 94")
+        table["metadata"] = {"unit_type": "writing_table", "document_type": "ielts_writing_task_1"}
+        store.upsert([table], "writing.png")
+
+        probe = store.probe("Tỷ lệ sở hữu smartphone của nước B năm 2024 là bao nhiêu?", top_k=1)
+
+        self.assertTrue(probe["has_document_intent"])
+        self.assertEqual(probe["results"][0]["chunk_id"], "writing-table")
 
     def test_prompt_echo_is_detected(self) -> None:
         prompt = "You are an IELTS preparation assistant.\n\nStudy material context:\nQuestions 1-4..."
