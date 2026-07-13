@@ -79,6 +79,8 @@ curl -s -X POST http://127.0.0.1:2222/warmup
 
 This loads the Ollama LLM, embedding model, and PaddleOCR models up front so the first real user request is smoother.
 
+For Colab CPU, keep `paddlepaddle` below `3.3` for now. `paddlepaddle==3.3.1` has been observed to crash PaddleOCR PP-OCRv6 inference with `ConvertPirAttribute2RuntimeAttribute ... onednn_instruction.cc` even when oneDNN/PIR flags are disabled.
+
 ## Run On Colab
 
 Use the companion notebook kept outside this repo in the project folder:
