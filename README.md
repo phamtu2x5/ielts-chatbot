@@ -79,7 +79,7 @@ curl -s -X POST http://127.0.0.1:2222/warmup
 
 This loads the Ollama LLM, embedding model, and PaddleOCR model up front so the first real user request is smoother.
 
-The Colab runtime is configured for GPU OCR with `paddlepaddle-gpu==3.2.2`.
+The Colab runtime is configured for GPU OCR with `paddlepaddle-gpu==3.2.2`. The notebook installs this Paddle GPU runtime with `--no-deps` before installing backend requirements so Colab's working Torch/CUDA stack is not replaced by pip dependency resolution.
 
 ## Run On Colab
 
