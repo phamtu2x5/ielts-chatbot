@@ -135,6 +135,11 @@ PADDLEOCR_DEFAULT_DET_MODEL=PP-OCRv6_small_det
 PADDLEOCR_DEFAULT_REC_MODEL=PP-OCRv6_small_rec
 PADDLEOCR_FALLBACK_DET_MODEL=PP-OCRv6_medium_det
 PADDLEOCR_FALLBACK_REC_MODEL=PP-OCRv6_medium_rec
+PADDLEOCR_DISABLE_ONEDNN=1
+FLAGS_use_mkldnn=0
+FLAGS_use_onednn=0
+FLAGS_enable_pir_api=0
+FLAGS_enable_pir_in_executor=0
 DOCUMENT_ENABLE_PP_STRUCTURE=true
 PP_STRUCTURE_DEVICE=cpu
 PP_STRUCTURE_DPI=180
@@ -146,6 +151,8 @@ WARMUP_PP_STRUCTURE=false
 ```
 
 Runtime paths are resolved relative to `backend/` unless an absolute path is configured. Uploaded source files are temporary; persistent chunks and embeddings are stored under `backend/data/rag/` by default.
+
+On Colab CPU, PaddleOCR may fail inside Paddle's oneDNN/PIR runtime. Keep the `FLAGS_*` variables above in the backend process environment before importing Paddle/PaddleOCR. `/warmup` must report `ocr.ok=true` before uploading images or scanned PDFs.
 
 ## Tests
 

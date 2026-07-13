@@ -161,7 +161,8 @@ def document_extraction_failure_detail(document: Any) -> str:
         if any("ConvertPirAttribute2RuntimeAttribute" in error or "onednn_instruction" in error for error in errors):
             return (
                 "PaddleOCR đã được gọi nhưng lỗi ở runtime Paddle oneDNN/PIR, nên ảnh chưa được OCR. "
-                "Hãy restart backend sau khi tắt FLAGS_use_mkldnn và FLAGS_enable_pir_api, rồi upload lại ảnh."
+                "Hãy restart backend sau khi tắt FLAGS_use_mkldnn, FLAGS_use_onednn, "
+                "FLAGS_enable_pir_api và FLAGS_enable_pir_in_executor, rồi upload lại ảnh."
             )
         if any("paddleocr_unavailable" in reason for reason in reasons):
             return (
