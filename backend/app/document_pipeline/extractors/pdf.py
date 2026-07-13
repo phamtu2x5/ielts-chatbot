@@ -4,6 +4,7 @@ from pathlib import Path
 from PIL import Image
 
 from ..config import DocumentPipelineConfig
+from ..layout import DocLayoutDetector, LayoutResult
 from ..models import DocumentElement, ProcessedDocument, ProcessedPage
 from ..normalization import normalize_inline_text, normalize_text
 from ..ocr import OCRProcessor
@@ -11,9 +12,10 @@ from ..quality import evaluate_native_page_text
 
 
 class PDFExtractor:
-    def __init__(self, config: DocumentPipelineConfig, ocr: OCRProcessor) -> None:
+    def __init__(self, config: DocumentPipelineConfig, ocr: OCRProcessor, layout: DocLayoutDetector) -> None:
         self.config = config
         self.ocr = ocr
+        self.layout = layout
 
     def extract(self, file_path: Path, filename: str, mime_type: str, document_id: str) -> ProcessedDocument:
         try:
@@ -53,8 +55,14 @@ class PDFExtractor:
                     page_quality_score = quality.score
                     ocr_result = None
                     merge_reasons = self._ocr_merge_reasons(native_text)
-                    if merge_reasons:
-                        ocr_result = self._ocr_page(page)
+                    layout_result = self._empty_layout_result()
+                    rendered_page = None
+                    layout_needed = bool(merge_reasons or quality.requires_layout or quality.requires_table_analysis)
+                    if layout_needed:
+                        rendered_page = self._render_page(page)
+                        layout_result = self.layout.detect(rendered_page)
+                    if merge_reasons and rendered_page is not None:
+                        ocr_result = self.ocr.image_to_text(rendered_page)
                         ocr_text = normalize_text(ocr_result.text)
                         if ocr_text and self._adds_new_text(native_text, ocr_text):
                             elements.append(
@@ -92,12 +100,17 @@ class PDFExtractor:
                                 "ocr_engine": ocr_result.engine if ocr_result else None,
                                 "ocr_quality": ocr_result.confidence if ocr_result else None,
                                 "ocr_metadata": ocr_result.metadata if ocr_result else None,
+                                "layout_engine": layout_result.engine,
+                                "layout_regions": layout_result.region_dicts(),
+                                "layout_metadata": layout_result.metadata,
                             },
                         )
                     )
                     continue
 
-                ocr_result = self._ocr_page(page)
+                rendered_page = self._render_page(page)
+                layout_result = self.layout.detect(rendered_page)
+                ocr_result = self.ocr.image_to_text(rendered_page)
                 text = normalize_text(ocr_result.text)
                 elements = []
                 if text:
@@ -127,6 +140,9 @@ class PDFExtractor:
                             "ocr_engine": ocr_result.engine,
                             "ocr_quality": ocr_result.confidence,
                             "ocr_metadata": ocr_result.metadata,
+                            "layout_engine": layout_result.engine,
+                            "layout_regions": layout_result.region_dicts(),
+                            "layout_metadata": layout_result.metadata,
                         },
                     )
                 )
@@ -176,7 +192,7 @@ class PDFExtractor:
             image_area += max(0.0, float(x1 - x0)) * max(0.0, float(y1 - y0))
         return min(1.0, image_area / page_area)
 
-    def _ocr_page(self, page):
+    def _render_page(self, page) -> Image.Image:
         try:
             import fitz
         except ImportError as exc:
@@ -184,8 +200,10 @@ class PDFExtractor:
 
         matrix = fitz.Matrix(self.config.ocr_dpi / 72, self.config.ocr_dpi / 72)
         pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
-        return self.ocr.image_to_text(image)
+        return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+
+    def _empty_layout_result(self) -> LayoutResult:
+        return LayoutResult("layout_not_attempted", [], {"skipped": True})
 
     def _ocr_merge_reasons(self, native_text: str) -> list[str]:
         reasons = []

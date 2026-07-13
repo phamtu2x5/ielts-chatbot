@@ -18,21 +18,23 @@ class DocumentPipelineConfig:
         default_factory=lambda: float(os.getenv("DOCUMENT_SCANNED_IMAGE_COVERAGE", "0.65"))
     )
     ocr_dpi: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_OCR_DPI", os.getenv("PDF_OCR_DPI", "180"))))
-    ocr_engine: str = field(default_factory=lambda: os.getenv("OCR_ENGINE", "paddle"))
-    paddleocr_device: str = field(default_factory=lambda: os.getenv("PADDLEOCR_DEVICE", "cpu"))
-    paddleocr_lang: str = field(default_factory=lambda: os.getenv("PADDLEOCR_LANG", "latin"))
-    paddleocr_det_model: str = field(default_factory=lambda: os.getenv("PADDLEOCR_DET_MODEL", "PP-OCRv6_medium_det"))
-    paddleocr_rec_model: str = field(default_factory=lambda: os.getenv("PADDLEOCR_REC_MODEL", "PP-OCRv6_medium_rec"))
-    paddleocr_min_confidence: float = field(default_factory=lambda: float(os.getenv("PADDLEOCR_MIN_CONFIDENCE", "0.72")))
-    paddleocr_use_doc_orientation: bool = field(
-        default_factory=lambda: os.getenv("PADDLEOCR_USE_DOC_ORIENTATION", "false").lower() == "true"
+    ocr_engine: str = field(default_factory=lambda: os.getenv("OCR_ENGINE", "rapidocr"))
+    ocr_runtime: str = field(default_factory=lambda: os.getenv("OCR_RUNTIME", "onnxruntime"))
+    ocr_device: str = field(default_factory=lambda: os.getenv("OCR_DEVICE", "cpu"))
+    ocr_lang: str = field(default_factory=lambda: os.getenv("OCR_LANG", "en"))
+    ocr_version: str = field(default_factory=lambda: os.getenv("OCR_VERSION", "PP-OCRv6"))
+    ocr_model_size: str = field(default_factory=lambda: os.getenv("OCR_MODEL_SIZE", "medium"))
+    ocr_min_confidence: float = field(default_factory=lambda: float(os.getenv("OCR_MIN_CONFIDENCE", "0.72")))
+    layout_enabled: bool = field(default_factory=lambda: os.getenv("LAYOUT_ENABLE", "true").lower() == "true")
+    layout_engine: str = field(default_factory=lambda: os.getenv("LAYOUT_ENGINE", "doclayout_yolo"))
+    layout_device: str = field(default_factory=lambda: os.getenv("LAYOUT_DEVICE", "cuda:0"))
+    layout_model_repo: str = field(
+        default_factory=lambda: os.getenv("LAYOUT_MODEL_REPO", "juliozhao/DocLayout-YOLO-DocStructBench")
     )
-    paddleocr_use_doc_unwarping: bool = field(
-        default_factory=lambda: os.getenv("PADDLEOCR_USE_DOC_UNWARPING", "false").lower() == "true"
-    )
-    paddleocr_use_textline_orientation: bool = field(
-        default_factory=lambda: os.getenv("PADDLEOCR_USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
-    )
+    layout_model_path: str = field(default_factory=lambda: os.getenv("LAYOUT_MODEL_PATH", ""))
+    layout_confidence: float = field(default_factory=lambda: float(os.getenv("LAYOUT_CONFIDENCE", "0.25")))
+    layout_image_size: int = field(default_factory=lambda: int(os.getenv("LAYOUT_IMAGE_SIZE", "1024")))
+    warmup_layout: bool = field(default_factory=lambda: os.getenv("WARMUP_LAYOUT", "false").lower() == "true")
     warmup_ocr: bool = field(default_factory=lambda: os.getenv("WARMUP_OCR", "true").lower() == "true")
     chunk_target_tokens: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_CHUNK_TARGET_TOKENS", "600")))
     chunk_max_tokens: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_CHUNK_MAX_TOKENS", "800")))
@@ -61,15 +63,24 @@ class DocumentPipelineConfig:
             self.native_min_readable_ratio,
             self.native_max_repeated_line_ratio,
             self.scanned_image_coverage,
-            self.paddleocr_min_confidence,
+            self.ocr_min_confidence,
+            self.layout_confidence,
             self.ocr_duplicate_similarity_threshold,
             self.ocr_duplicate_token_overlap_threshold,
             self.ocr_min_new_token_ratio,
         )
         if any(value < 0 or value > 1 for value in thresholds):
             raise ValueError("Document quality and OCR thresholds must be between 0 and 1.")
-        if self.ocr_engine.lower() != "paddle":
-            raise ValueError("OCR_ENGINE must be paddle.")
+        if self.ocr_engine.lower() != "rapidocr":
+            raise ValueError("OCR_ENGINE must be rapidocr.")
+        if self.ocr_runtime.lower() != "onnxruntime":
+            raise ValueError("OCR_RUNTIME must be onnxruntime.")
+        if self.ocr_device.lower() != "cpu":
+            raise ValueError("OCR_DEVICE must be cpu.")
+        if self.layout_enabled and self.layout_engine.lower() != "doclayout_yolo":
+            raise ValueError("LAYOUT_ENGINE must be doclayout_yolo.")
+        if self.layout_image_size <= 0:
+            raise ValueError("LAYOUT_IMAGE_SIZE must be positive.")
 
 
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".text"}

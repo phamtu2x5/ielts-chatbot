@@ -146,6 +146,10 @@ def document_extraction_failure_detail(document: Any) -> str:
     ocr_engine = metadata.get("ocr_engine")
     ocr_metadata = metadata.get("ocr_metadata") or {}
     attempts = ocr_metadata.get("cascade_attempts") or []
+    if not attempts and isinstance(ocr_metadata.get("attempt"), dict):
+        attempts = [ocr_metadata["attempt"]]
+    if not attempts and ocr_metadata.get("error"):
+        attempts = [ocr_metadata]
     errors = [
         str(attempt.get("error"))
         for attempt in attempts
@@ -157,20 +161,14 @@ def document_extraction_failure_detail(document: Any) -> str:
         if isinstance(attempt, dict) and (attempt.get("engine") or attempt.get("reason"))
     ]
 
-    if ocr_engine == "paddleocr_failed":
-        if any("ConvertPirAttribute2RuntimeAttribute" in error or "onednn_instruction" in error for error in errors):
+    if ocr_engine == "rapidocr_failed":
+        if any("rapidocr_unavailable" in reason for reason in reasons):
             return (
-                "PaddleOCR đã được gọi nhưng lỗi ở runtime Paddle oneDNN/PIR, nên ảnh chưa được OCR. "
-                "Hãy restart backend sau khi tắt FLAGS_use_mkldnn, FLAGS_use_onednn, "
-                "FLAGS_enable_pir_api và FLAGS_enable_pir_in_executor, rồi upload lại ảnh."
-            )
-        if any("paddleocr_unavailable" in reason for reason in reasons):
-            return (
-                "PaddleOCR chưa khả dụng trong môi trường backend hiện tại, nên ảnh chưa được OCR. "
-                "Hãy cài đúng paddlepaddle/paddleocr rồi restart backend."
+                "RapidOCR chưa khả dụng trong môi trường backend hiện tại, nên ảnh chưa được OCR. "
+                "Hãy cài đúng rapidocr/onnxruntime rồi restart backend."
             )
         if errors:
-            return f"PaddleOCR không trích xuất được ảnh. Lỗi OCR đầu tiên: {errors[0][:300]}"
+            return f"RapidOCR không trích xuất được ảnh. Lỗi OCR đầu tiên: {errors[0][:300]}"
 
     return "Không trích xuất được văn bản từ tài liệu. File có thể quá mờ, không có chữ, hoặc OCR chưa phù hợp."
 
@@ -602,6 +600,17 @@ async def warmup() -> dict:
             results["embedding"] = {"ok": False, "error": str(exc)}
     else:
         results["embedding"] = {"skipped": True}
+
+    layout_started = time.perf_counter()
+    try:
+        layout_result = await run_in_threadpool(DOCUMENT_PROCESSOR.warmup_layout)
+        results["layout"] = {
+            "ok": bool(layout_result.get("skipped") or layout_result.get("ok", False)),
+            "duration_seconds": round(time.perf_counter() - layout_started, 2),
+            **layout_result,
+        }
+    except Exception as exc:
+        results["layout"] = {"ok": False, "error": str(exc)}
 
     ocr_started = time.perf_counter()
     try:

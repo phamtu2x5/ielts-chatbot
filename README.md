@@ -77,9 +77,9 @@ Warm up large models before opening the UI:
 curl -s -X POST http://127.0.0.1:2222/warmup
 ```
 
-This loads the Ollama LLM, embedding model, and PaddleOCR model up front so the first real user request is smoother.
+This loads the Ollama LLM, embedding model, and RapidOCR model up front so the first real user request is smoother.
 
-The Colab runtime is configured for GPU OCR with `paddlepaddle-gpu==3.2.2`. The notebook installs this Paddle GPU runtime with `--no-deps` before installing backend requirements so Colab's working Torch/CUDA stack is not replaced by pip dependency resolution.
+The Colab runtime is configured for OCR with RapidOCR and ONNX Runtime CPU. DocLayout-YOLO can detect table/figure/layout regions before OCR/table parsing. PaddleOCR, PaddlePaddle, Tesseract, and PP-StructureV3 are not part of the streamlined runtime.
 
 ## Run On Colab
 
@@ -130,26 +130,31 @@ DOCUMENT_OCR_DUPLICATE_SIMILARITY=0.88
 DOCUMENT_OCR_DUPLICATE_TOKEN_OVERLAP=0.92
 DOCUMENT_OCR_MIN_NEW_TOKEN_RATIO=0.08
 DOCUMENT_OCR_DPI=180
-OCR_ENGINE=paddle
-PADDLEOCR_DEVICE=gpu:0
-PADDLEOCR_LANG=latin
-PADDLEOCR_DET_MODEL=PP-OCRv6_medium_det
-PADDLEOCR_REC_MODEL=PP-OCRv6_medium_rec
-PADDLEOCR_DISABLE_ONEDNN=1
-FLAGS_use_mkldnn=0
-FLAGS_use_onednn=0
-FLAGS_enable_pir_api=0
-FLAGS_enable_pir_in_executor=0
+OCR_ENGINE=rapidocr
+OCR_RUNTIME=onnxruntime
+OCR_DEVICE=cpu
+OCR_LANG=en
+OCR_VERSION=PP-OCRv6
+OCR_MODEL_SIZE=medium
+OCR_MIN_CONFIDENCE=0.72
+LAYOUT_ENABLE=true
+LAYOUT_ENGINE=doclayout_yolo
+LAYOUT_DEVICE=cuda:0
+LAYOUT_MODEL_REPO=juliozhao/DocLayout-YOLO-DocStructBench
+LAYOUT_MODEL_PATH=
+LAYOUT_CONFIDENCE=0.25
+LAYOUT_IMAGE_SIZE=1024
 WARMUP_LLM=true
 WARMUP_EMBEDDING=true
 WARMUP_OCR=true
+WARMUP_LAYOUT=false
 ```
 
 Runtime paths are resolved relative to `backend/` unless an absolute path is configured. Uploaded source files are temporary; persistent chunks and embeddings are stored under `backend/data/rag/` by default.
 
-The backend expects a CUDA-capable Paddle runtime. `/warmup` must report `ocr.ok=true` before uploading images or scanned PDFs.
+The backend expects RapidOCR, ONNX Runtime, and DocLayout-YOLO to be importable. `/warmup` must report `ocr.ok=true` before uploading images or scanned PDFs. DocLayout-YOLO uses `LAYOUT_DEVICE=cuda:0` by default; set `LAYOUT_DEVICE=cpu` only when GPU is unavailable. Layout warmup is skipped by default because it may download the DocLayout-YOLO checkpoint.
 
-The document pipeline uses one OCR model by default: PP-OCRv6 medium. PP-OCRv6 small and PP-StructureV3 are not loaded in the streamlined Colab pipeline.
+The document pipeline uses one OCR model by default: PP-OCRv6 medium through RapidOCR. DocLayout-YOLO is used only for visual region detection; it does not OCR text or parse table cells by itself. PP-OCRv6 small, PP-StructureV3, PaddleOCR, and Tesseract are not loaded in the streamlined Colab pipeline.
 
 ## Tests
 

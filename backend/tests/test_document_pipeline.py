@@ -16,6 +16,7 @@ from app.document_pipeline.config import DocumentPipelineConfig
 from app.document_pipeline.chunking import SemanticChunker
 from app.document_pipeline.ielts import IELTSStructureParser, StructuredChunker
 from app.document_pipeline.extractors.text import TextExtractor
+from app.document_pipeline.layout import DocLayoutDetector
 from app.document_pipeline.models import DocumentElement, ProcessedDocument, ProcessedPage
 from app.document_pipeline.ocr import OCRProcessor, OCRResult
 from app.document_pipeline.reconciliation import NativeOCRReconciler
@@ -108,21 +109,56 @@ class FileRoutingTests(unittest.TestCase):
 
 
 class OCRProcessorTests(unittest.TestCase):
-    def test_ocr_engine_must_be_paddle(self) -> None:
+    def test_ocr_engine_must_be_rapidocr(self) -> None:
         with patch.dict(os.environ, {"OCR_ENGINE": "easyocr"}):
-            with self.assertRaisesRegex(ValueError, "OCR_ENGINE must be paddle"):
+            with self.assertRaisesRegex(ValueError, "OCR_ENGINE must be rapidocr"):
                 DocumentPipelineConfig()
 
-    def test_paddle_failure_returns_diagnostics_without_external_fallback(self) -> None:
+    def test_rapidocr_failure_returns_diagnostics_without_external_fallback(self) -> None:
         processor = OCRProcessor(DocumentPipelineConfig())
-        failure = OCRResult("", 0.0, "paddleocr_error", {"error": "ocr failed"})
+        failure = OCRResult("", 0.0, "rapidocr_error", {"error": "ocr failed"})
 
-        with patch.object(processor, "_image_to_text_with_paddle", return_value=failure):
+        with patch.object(processor, "_image_to_text_with_rapidocr", return_value=failure):
             result = processor.image_to_text(Image.new("RGB", (20, 20), "white"))
 
-        self.assertEqual(result.engine, "paddleocr_failed")
+        self.assertEqual(result.engine, "rapidocr_failed")
         self.assertFalse(result.text)
         self.assertEqual(result.metadata["attempt"]["error"], "ocr failed")
+
+    def test_rapidocr_output_schema_is_normalized(self) -> None:
+        class RapidOCRLikeResult:
+            txts = ("Hello", "IELTS")
+            scores = (0.9, 0.8)
+            boxes = [[[0, 0], [10, 0], [10, 10], [0, 10]]]
+
+        processor = OCRProcessor(DocumentPipelineConfig())
+
+        texts, scores, boxes = processor._extract_rapidocr_result(RapidOCRLikeResult())
+
+        self.assertEqual(texts, ["Hello", "IELTS"])
+        self.assertEqual(scores, [0.9, 0.8])
+        self.assertEqual(boxes, [[[0, 0], [10, 0], [10, 10], [0, 10]]])
+
+
+class DocLayoutDetectorTests(unittest.TestCase):
+    def test_doclayout_yolo_output_schema_is_normalized(self) -> None:
+        class Boxes:
+            xyxy = [[0, 0, 100, 50]]
+            conf = [0.91]
+            cls = [2]
+
+        class Result:
+            names = {2: "table"}
+            boxes = Boxes()
+
+        detector = DocLayoutDetector(DocumentPipelineConfig())
+
+        regions = detector._extract_regions([Result()])
+
+        self.assertEqual(len(regions), 1)
+        self.assertEqual(regions[0].type, "table")
+        self.assertEqual(regions[0].confidence, 0.91)
+        self.assertEqual(regions[0].bbox, [0.0, 0.0, 100.0, 50.0])
 
 
 class WritingVisualParserTests(unittest.TestCase):

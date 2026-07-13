@@ -5,19 +5,22 @@ from PIL import Image
 from ..config import DocumentPipelineConfig
 from ..models import DocumentElement, ProcessedDocument, ProcessedPage
 from ..normalization import normalize_text
+from ..layout import DocLayoutDetector
 from ..ocr import OCRProcessor
 from ..visual import WritingTaskTableParser
 
 
 class ImageExtractor:
-    def __init__(self, config: DocumentPipelineConfig, ocr: OCRProcessor) -> None:
+    def __init__(self, config: DocumentPipelineConfig, ocr: OCRProcessor, layout: DocLayoutDetector) -> None:
         self.config = config
         self.ocr = ocr
+        self.layout = layout
         self.visual_parser = WritingTaskTableParser()
 
     def extract(self, file_path: Path, filename: str, mime_type: str, document_id: str) -> ProcessedDocument:
         with Image.open(file_path) as image:
             image = image.convert("RGB")
+            layout_result = self.layout.detect(image)
             ocr_result = self.ocr.image_to_text(image)
 
         text = normalize_text(ocr_result.text)
@@ -42,6 +45,9 @@ class ImageExtractor:
             "ocr_engine": ocr_result.engine,
             "ocr_quality": ocr_result.confidence,
             "ocr_metadata": ocr_result.metadata,
+            "layout_engine": layout_result.engine,
+            "layout_regions": layout_result.region_dicts(),
+            "layout_metadata": layout_result.metadata,
         }
         if parsed_visual:
             metadata.update(

@@ -7,6 +7,7 @@ from .chunking import SemanticChunker
 from .config import DocumentPipelineConfig
 from .extractors import DOCXExtractor, ImageExtractor, PDFExtractor, TextExtractor
 from .ielts import IELTSStructureParser, StructuredChunker
+from .layout import DocLayoutDetector
 from .models import DocumentChunk, ProcessedDocument
 from .ocr import OCRProcessor
 from .reconciliation import NativeOCRReconciler
@@ -21,15 +22,16 @@ class DocumentProcessor:
         self.config = config or DocumentPipelineConfig()
         self.router = FileRouter(self.config)
         self.ocr = OCRProcessor(self.config)
+        self.layout = DocLayoutDetector(self.config)
         self.reconciler = NativeOCRReconciler(self.config)
         self.structure_parser = IELTSStructureParser(self.config)
         self.structured_chunker = StructuredChunker(self.config)
         self.chunker = SemanticChunker(self.config)
         self.extractors = {
             "text": TextExtractor(self.config),
-            "pdf": PDFExtractor(self.config, self.ocr),
+            "pdf": PDFExtractor(self.config, self.ocr, self.layout),
             "docx": DOCXExtractor(self.config, self.ocr),
-            "image": ImageExtractor(self.config, self.ocr),
+            "image": ImageExtractor(self.config, self.ocr, self.layout),
         }
 
     def process_file(
@@ -64,6 +66,9 @@ class DocumentProcessor:
         if not self.config.warmup_ocr:
             return {"skipped": True}
         return self.ocr.warmup()
+
+    def warmup_layout(self) -> dict:
+        return self.layout.warmup()
 
     def _sha256(self, file_path: Path) -> str:
         digest = hashlib.sha256()
