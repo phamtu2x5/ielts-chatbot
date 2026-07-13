@@ -141,6 +141,39 @@ NO_RAG_MATCH_RESPONSE = (
 )
 
 
+def document_extraction_failure_detail(document: Any) -> str:
+    metadata = document.metadata or {}
+    ocr_engine = metadata.get("ocr_engine")
+    ocr_metadata = metadata.get("ocr_metadata") or {}
+    attempts = ocr_metadata.get("cascade_attempts") or []
+    errors = [
+        str(attempt.get("error"))
+        for attempt in attempts
+        if isinstance(attempt, dict) and attempt.get("error")
+    ]
+    reasons = [
+        str(attempt.get("engine") or attempt.get("reason"))
+        for attempt in attempts
+        if isinstance(attempt, dict) and (attempt.get("engine") or attempt.get("reason"))
+    ]
+
+    if ocr_engine == "paddleocr_failed":
+        if any("ConvertPirAttribute2RuntimeAttribute" in error or "onednn_instruction" in error for error in errors):
+            return (
+                "PaddleOCR đã được gọi nhưng lỗi ở runtime Paddle oneDNN/PIR, nên ảnh chưa được OCR. "
+                "Hãy restart backend sau khi tắt FLAGS_use_mkldnn và FLAGS_enable_pir_api, rồi upload lại ảnh."
+            )
+        if any("paddleocr_unavailable" in reason for reason in reasons):
+            return (
+                "PaddleOCR chưa khả dụng trong môi trường backend hiện tại, nên ảnh chưa được OCR. "
+                "Hãy cài đúng paddlepaddle/paddleocr rồi restart backend."
+            )
+        if errors:
+            return f"PaddleOCR không trích xuất được ảnh. Lỗi OCR đầu tiên: {errors[0][:300]}"
+
+    return "Không trích xuất được văn bản từ tài liệu. File có thể quá mờ, không có chữ, hoặc OCR chưa phù hợp."
+
+
 def generation_fallback(prepared: "ChatPreparation") -> str:
     if prepared.route_used.startswith("vector_rag"):
         return NO_RAG_MATCH_RESPONSE
@@ -694,7 +727,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         if not chunks:
             raise HTTPException(
                 status_code=400,
-                detail="Không trích xuất được văn bản từ tài liệu. File có thể quá mờ, không có chữ, hoặc OCR chưa phù hợp.",
+                detail=document_extraction_failure_detail(document),
             )
 
         inserted = await run_in_threadpool(

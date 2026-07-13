@@ -1,3 +1,4 @@
+import os
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -8,6 +9,13 @@ from PIL import Image
 
 from .config import DocumentPipelineConfig
 from .normalization import normalize_text
+
+
+# PaddleOCR on Colab CPU can hit a Paddle oneDNN/PIR runtime error before
+# inference starts. Set these before the first Paddle import; users can still
+# override them from the environment when they intentionally want those paths.
+os.environ.setdefault("FLAGS_use_mkldnn", "0")
+os.environ.setdefault("FLAGS_enable_pir_api", "0")
 
 
 @dataclass
@@ -111,7 +119,14 @@ class OCRProcessor:
                 image_path.unlink(missing_ok=True)
             texts, scores = self._extract_paddle_text_scores(raw_result)
         except Exception as exc:
-            return OCRResult("", 0.0, "paddleocr_error", {"error": str(exc), "tier": "medium" if use_medium else "small"})
+            error = str(exc)
+            metadata = {"error": error, "tier": "medium" if use_medium else "small"}
+            if "ConvertPirAttribute2RuntimeAttribute" in error or "onednn_instruction" in error:
+                metadata["hint"] = (
+                    "PaddleOCR failed inside Paddle oneDNN/PIR runtime. "
+                    "Restart the backend after disabling FLAGS_use_mkldnn and FLAGS_enable_pir_api."
+                )
+            return OCRResult("", 0.0, "paddleocr_error", metadata)
 
         text = normalize_text("\n".join(texts))
         confidence = sum(scores) / len(scores) if scores else (0.6 if text else 0.0)
