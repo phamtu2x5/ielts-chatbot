@@ -147,13 +147,18 @@ class PPStructureProcessor:
                 "table_structures_found": sum(1 for structure in structures if structure.get("type") == "table"),
             }
         except Exception as exc:
+            error = str(exc)
+            hint = None
+            if "dependency error" in error.lower() or "required dependencies" in error.lower():
+                hint = "Install PaddleOCR with document parser extras: paddleocr[doc-parser]."
             return {
                 "ok": False,
                 "engine": "pp_structure_v3",
                 "runtime": self._runtime_diagnostics(),
                 "model_loaded": self._model is not None,
                 "inference_ok": False,
-                "error": str(exc),
+                "error": error,
+                "hint": hint,
             }
 
     def _visual_groups(self, structured: IELTSDocument) -> list[IELTSQuestionGroup]:

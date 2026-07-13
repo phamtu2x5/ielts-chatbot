@@ -156,6 +156,8 @@ Runtime paths are resolved relative to `backend/` unless an absolute path is con
 
 On Colab CPU, PaddleOCR may fail inside Paddle's oneDNN/PIR runtime. Keep the `FLAGS_*` variables above in the backend process environment before importing Paddle/PaddleOCR. `/warmup` must report `ocr.ok=true` before uploading images or scanned PDFs.
 
+PP-StructureV3 requires PaddleOCR's document parser extras. Install dependencies from `backend/requirements.txt`, which uses `paddleocr[doc-parser]`, before enabling `WARMUP_PP_STRUCTURE=true`.
+
 ## Tests
 
 ```bash
