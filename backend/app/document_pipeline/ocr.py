@@ -97,7 +97,10 @@ class OCRProcessor:
         return OCRResult(
             text=text,
             confidence=max(0.0, min(1.0, confidence)),
-            engine=f"rapidocr_{self.config.ocr_version.lower()}_{self.config.ocr_model_size.lower()}_onnxruntime",
+            engine=(
+                f"rapidocr_{self.config.ocr_version.lower()}_"
+                f"{self.config.ocr_model_size.lower()}_{self.config.ocr_runtime.lower()}"
+            ),
             metadata={
                 "word_count": len(texts),
                 "lang": self.config.ocr_lang,
@@ -116,6 +119,7 @@ class OCRProcessor:
 
         from rapidocr import RapidOCR
 
+        self._validate_cuda_runtime()
         params = self._rapidocr_params()
         self._rapid_ocr = RapidOCR(params=params)
         return self._rapid_ocr
@@ -124,15 +128,36 @@ class OCRProcessor:
         from rapidocr.utils.typings import EngineType, LangDet, LangRec, ModelType, OCRVersion
 
         return {
-            "Det.engine_type": EngineType.ONNXRUNTIME,
+            "Global.use_cls": False,
+            "EngineConfig.torch.use_cuda": True,
+            "EngineConfig.torch.cuda_ep_cfg.device_id": self._cuda_device_id(),
+            "Det.engine_type": EngineType.TORCH,
             "Det.lang_type": LangDet(self.config.ocr_det_lang),
             "Det.model_type": ModelType(self.config.ocr_model_size),
             "Det.ocr_version": OCRVersion(self.config.ocr_version),
-            "Rec.engine_type": EngineType.ONNXRUNTIME,
+            "Rec.engine_type": EngineType.TORCH,
             "Rec.lang_type": LangRec(self.config.ocr_lang),
             "Rec.model_type": ModelType(self.config.ocr_model_size),
             "Rec.ocr_version": OCRVersion(self.config.ocr_version),
         }
+
+    def _cuda_device_id(self) -> int:
+        _, _, device_id = self.config.ocr_device.partition(":")
+        return int(device_id) if device_id else 0
+
+    def _validate_cuda_runtime(self) -> None:
+        if util.find_spec("torch") is None:
+            raise RuntimeError("PyTorch is required for RapidOCR GPU inference.")
+
+        import torch
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available for RapidOCR.")
+        device_id = self._cuda_device_id()
+        if device_id >= torch.cuda.device_count():
+            raise RuntimeError(
+                f"OCR_DEVICE requests cuda:{device_id}, but only {torch.cuda.device_count()} CUDA device(s) are available."
+            )
 
     def _save_temp_image(self, image: Image.Image) -> Path:
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:

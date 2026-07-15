@@ -167,7 +167,7 @@ def document_extraction_failure_detail(document: Any) -> str:
         if any("rapidocr_unavailable" in reason for reason in reasons):
             return (
                 "RapidOCR chưa khả dụng trong môi trường backend hiện tại, nên ảnh chưa được OCR. "
-                "Hãy cài đúng rapidocr/onnxruntime rồi restart backend."
+                "Hãy cài đúng rapidocr/torch CUDA rồi restart backend."
             )
         if errors:
             return f"RapidOCR không trích xuất được ảnh. Lỗi OCR đầu tiên: {errors[0][:300]}"

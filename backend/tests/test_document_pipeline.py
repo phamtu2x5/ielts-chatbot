@@ -114,6 +114,21 @@ class OCRProcessorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "OCR_ENGINE must be rapidocr"):
                 DocumentPipelineConfig()
 
+    def test_ocr_runtime_must_be_torch(self) -> None:
+        with patch.dict(os.environ, {"OCR_RUNTIME": "onnxruntime"}):
+            with self.assertRaisesRegex(ValueError, "OCR_RUNTIME must be torch"):
+                DocumentPipelineConfig()
+
+    def test_ocr_device_must_be_cuda(self) -> None:
+        with patch.dict(os.environ, {"OCR_DEVICE": "cpu"}):
+            with self.assertRaisesRegex(ValueError, "OCR_DEVICE must be cuda"):
+                DocumentPipelineConfig()
+
+    def test_cuda_device_id_is_parsed_from_config(self) -> None:
+        processor = OCRProcessor(DocumentPipelineConfig(ocr_device="cuda:2"))
+
+        self.assertEqual(processor._cuda_device_id(), 2)
+
     def test_rapidocr_failure_returns_diagnostics_without_external_fallback(self) -> None:
         processor = OCRProcessor(DocumentPipelineConfig())
         failure = OCRResult("", 0.0, "rapidocr_error", {"error": "ocr failed"})

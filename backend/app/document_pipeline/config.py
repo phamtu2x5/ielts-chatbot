@@ -19,8 +19,8 @@ class DocumentPipelineConfig:
     )
     ocr_dpi: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_OCR_DPI", os.getenv("PDF_OCR_DPI", "180"))))
     ocr_engine: str = field(default_factory=lambda: os.getenv("OCR_ENGINE", "rapidocr"))
-    ocr_runtime: str = field(default_factory=lambda: os.getenv("OCR_RUNTIME", "onnxruntime"))
-    ocr_device: str = field(default_factory=lambda: os.getenv("OCR_DEVICE", "cpu"))
+    ocr_runtime: str = field(default_factory=lambda: os.getenv("OCR_RUNTIME", "torch"))
+    ocr_device: str = field(default_factory=lambda: os.getenv("OCR_DEVICE", "cuda:0"))
     ocr_lang: str = field(default_factory=lambda: os.getenv("OCR_LANG", "en"))
     ocr_det_lang: str = field(default_factory=lambda: os.getenv("OCR_DET_LANG", "ch"))
     ocr_version: str = field(default_factory=lambda: os.getenv("OCR_VERSION", "PP-OCRv6"))
@@ -77,10 +77,13 @@ class DocumentPipelineConfig:
             raise ValueError("Document quality and OCR thresholds must be between 0 and 1.")
         if self.ocr_engine.lower() != "rapidocr":
             raise ValueError("OCR_ENGINE must be rapidocr.")
-        if self.ocr_runtime.lower() != "onnxruntime":
-            raise ValueError("OCR_RUNTIME must be onnxruntime.")
-        if self.ocr_device.lower() != "cpu":
-            raise ValueError("OCR_DEVICE must be cpu.")
+        if self.ocr_runtime.lower() != "torch":
+            raise ValueError("OCR_RUNTIME must be torch.")
+        ocr_device = self.ocr_device.lower()
+        if ocr_device != "cuda" and not (
+            ocr_device.startswith("cuda:") and ocr_device.removeprefix("cuda:").isdigit()
+        ):
+            raise ValueError("OCR_DEVICE must be cuda or cuda:<device_id>.")
         if self.ocr_version not in {"PP-OCRv4", "PP-OCRv5", "PP-OCRv6"}:
             raise ValueError("OCR_VERSION must be PP-OCRv4, PP-OCRv5, or PP-OCRv6 for RapidOCR.")
         if self.ocr_model_size.lower() not in {"mobile", "server", "tiny", "small", "medium"}:

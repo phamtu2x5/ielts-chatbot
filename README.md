@@ -79,7 +79,7 @@ curl -s -X POST http://127.0.0.1:2222/warmup
 
 This loads the Ollama LLM, embedding model, and RapidOCR model up front so the first real user request is smoother.
 
-The Colab runtime is configured for OCR with RapidOCR and ONNX Runtime CPU. DocLayout-YOLO can detect table/figure/layout regions before OCR/table parsing. PaddleOCR, PaddlePaddle, Tesseract, and PP-StructureV3 are not part of the streamlined runtime.
+The Colab runtime is configured for OCR with RapidOCR and PyTorch CUDA. DocLayout-YOLO can detect table/figure/layout regions before OCR/table parsing. PaddleOCR, PaddlePaddle, Tesseract, PP-StructureV3, and ONNX Runtime are not part of the streamlined runtime.
 
 ## Run On Colab
 
@@ -131,8 +131,8 @@ DOCUMENT_OCR_DUPLICATE_TOKEN_OVERLAP=0.92
 DOCUMENT_OCR_MIN_NEW_TOKEN_RATIO=0.08
 DOCUMENT_OCR_DPI=180
 OCR_ENGINE=rapidocr
-OCR_RUNTIME=onnxruntime
-OCR_DEVICE=cpu
+OCR_RUNTIME=torch
+OCR_DEVICE=cuda:0
 OCR_LANG=en
 OCR_DET_LANG=ch
 OCR_VERSION=PP-OCRv6
@@ -154,9 +154,9 @@ WARMUP_LAYOUT=true
 
 Runtime paths are resolved relative to `backend/` unless an absolute path is configured. Uploaded source files are temporary; persistent chunks and embeddings are stored under `backend/data/rag/` by default.
 
-The backend expects RapidOCR, ONNX Runtime, and DocLayout-YOLO to be importable. `/warmup` must report `ocr.ok=true` before uploading images or scanned PDFs. DocLayout-YOLO uses `LAYOUT_DEVICE=cuda:0` by default; set `LAYOUT_DEVICE=cpu` only when GPU is unavailable. Layout warmup is enabled by default so the first document upload does not pay the DocLayout model load cost.
+The backend expects RapidOCR, CUDA-enabled PyTorch, and DocLayout-YOLO to be importable. `/warmup` must report `ocr.ok=true` before uploading images or scanned PDFs. OCR and DocLayout-YOLO use `cuda:0` by default. Layout warmup is enabled by default so the first document upload does not pay the DocLayout model load cost.
 
-The document pipeline uses one OCR path by default: RapidOCR with ONNX Runtime using PP-OCRv6 medium. DocLayout-YOLO is used only for visual region detection; it does not OCR text or parse table cells by itself. PP-StructureV3, PaddleOCR, and Tesseract are not loaded in the streamlined Colab pipeline.
+The document pipeline uses one OCR path by default: RapidOCR with PyTorch CUDA using PP-OCRv6 medium. DocLayout-YOLO is used only for visual region detection; it does not OCR text or parse table cells by itself. PP-StructureV3, PaddleOCR, Tesseract, and ONNX Runtime are not loaded in the streamlined Colab pipeline.
 
 ## Tests
 

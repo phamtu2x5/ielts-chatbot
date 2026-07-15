@@ -36,7 +36,7 @@ Backend:
 - FastAPI + Uvicorn.
 - PyMuPDF for PDF native extraction and rendering.
 - `python-docx` for DOCX extraction.
-- RapidOCR 3.9.x with ONNX Runtime for OCR.
+- RapidOCR 3.9.1+ with PyTorch CUDA for OCR.
 - PP-OCRv6 medium through RapidOCR as the single OCR model path.
 - DocLayout-YOLO for visual region detection.
 - Sentence Transformers with `BAAI/bge-m3` for embeddings.
@@ -55,8 +55,8 @@ Runtime model/config defaults:
 OLLAMA_MODEL=hf.co/Zkare/Chatbot_Ielts_Assistant_v2:Q4_K_M
 EMBEDDING_MODEL_NAME=BAAI/bge-m3
 OCR_ENGINE=rapidocr
-OCR_RUNTIME=onnxruntime
-OCR_DEVICE=cpu
+OCR_RUNTIME=torch
+OCR_DEVICE=cuda:0
 OCR_LANG=en
 OCR_DET_LANG=ch
 OCR_VERSION=PP-OCRv6
@@ -77,7 +77,7 @@ Important current runtime decision:
 - Do not reintroduce PaddleOCR/PaddlePaddle, Tesseract, PP-StructureV3, or
   multi-model OCR fallback unless the user explicitly asks and there is a clear
   measured reason.
-- The streamlined OCR path is RapidOCR + ONNX Runtime + PP-OCRv6 medium.
+- The streamlined OCR path is RapidOCR + PyTorch CUDA + PP-OCRv6 medium.
 - DocLayout-YOLO detects visual regions. It does not OCR text and does not parse
   table cells by itself.
 
