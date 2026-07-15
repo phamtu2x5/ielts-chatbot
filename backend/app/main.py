@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 
 from .config import settings
 from .document_pipeline import DocumentProcessor
+from .ingestion_debug import IngestionDebugStore
 from .intent import dedupe_sources, detect_query_intent, filter_sources_for_intent
 from .llm import OLLAMA_MODEL, OLLAMA_NUM_PREDICT, classify_route, direct_prompt, query_ollama, rag_prompt, stream_ollama
 from .rag import get_store
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = settings.upload_dir
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DOCUMENT_PROCESSOR = DocumentProcessor()
+INGESTION_DEBUG_STORE = IngestionDebugStore(settings.rag_data_dir / "ingestion_debug.json")
 
 app = FastAPI(title="Standalone IELTS Chatbot", version="1.1.0")
 
@@ -701,12 +703,43 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     upload_started = time.perf_counter()
     upload_timing: dict[str, Any] = {}
+    timing_debug: dict[str, Any] = {"upload": {}}
+
+    def timing_snapshot() -> dict[str, Any]:
+        return {**timing_debug, "upload": dict(upload_timing)}
+
     if not file.filename:
         raise HTTPException(status_code=400, detail="Tên tệp không hợp lệ")
 
     safe_name = Path(file.filename).name
-    file_path = UPLOAD_DIR / f"{uuid4().hex}-{safe_name}"
+    request_id = uuid4().hex
+    file_path = UPLOAD_DIR / f"{request_id}-{safe_name}"
     max_bytes = DOCUMENT_PROCESSOR.config.max_upload_mb * 1024 * 1024
+    current_stage = "save_file"
+    pipeline_config = DOCUMENT_PROCESSOR.config
+    INGESTION_DEBUG_STORE.start(
+        request_id,
+        safe_name,
+        pipeline={
+            "parser_version": pipeline_config.parser_version,
+            "ocr": {
+                "engine": pipeline_config.ocr_engine,
+                "runtime": pipeline_config.ocr_runtime,
+                "device": pipeline_config.ocr_device,
+                "version": pipeline_config.ocr_version,
+                "model_size": pipeline_config.ocr_model_size,
+                "dpi": pipeline_config.ocr_dpi,
+            },
+            "layout": {
+                "enabled": pipeline_config.layout_enabled,
+                "engine": pipeline_config.layout_engine,
+                "device": pipeline_config.layout_device,
+                "image_size": pipeline_config.layout_image_size,
+            },
+            "embedding_model": settings.embedding_model_name,
+            "ielts_structure_enabled": pipeline_config.enable_ielts_structure_parser,
+        },
+    )
     try:
         save_started = time.perf_counter()
         total_bytes = 0
@@ -720,6 +753,14 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
                     )
                 await out.write(chunk)
         upload_timing["save_file_seconds"] = round(time.perf_counter() - save_started, 3)
+        current_stage = "process_file"
+        INGESTION_DEBUG_STORE.update(
+            request_id,
+            status="processing",
+            stage=current_stage,
+            timing=timing_snapshot(),
+            bytes=total_bytes,
+        )
 
         process_started = time.perf_counter()
         document, chunks = await run_in_threadpool(
@@ -729,6 +770,14 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
             file.content_type,
         )
         upload_timing["process_file_seconds"] = round(time.perf_counter() - process_started, 3)
+        document_timing = document.metadata.get("timing", {})
+        timing_debug = {
+            "upload": dict(upload_timing),
+            "extraction": document_timing.get("extraction", {}),
+            "process_file": document_timing.get("process_file", {}),
+            "chunking": document_timing.get("chunking", {}),
+            "embedding": {},
+        }
         if not chunks:
             raise HTTPException(
                 status_code=400,
@@ -736,6 +785,15 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
             )
 
         store = get_store()
+        current_stage = "upsert"
+        INGESTION_DEBUG_STORE.update(
+            request_id,
+            status="processing",
+            stage=current_stage,
+            timing=timing_debug,
+            document_id=document.document_id,
+            chunks=len(chunks),
+        )
         upsert_started = time.perf_counter()
         inserted = await run_in_threadpool(
             store.upsert,
@@ -744,14 +802,16 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         )
         upload_timing["upsert_seconds"] = round(time.perf_counter() - upsert_started, 3)
         upload_timing["total_seconds"] = round(time.perf_counter() - upload_started, 3)
-        document_timing = document.metadata.get("timing", {})
-        timing_debug = {
-            "upload": upload_timing,
-            "extraction": document_timing.get("extraction", {}),
-            "process_file": document_timing.get("process_file", {}),
-            "chunking": document_timing.get("chunking", {}),
-            "embedding": store.last_upsert_timing,
-        }
+        timing_debug["upload"] = dict(upload_timing)
+        timing_debug["embedding"] = dict(store.last_upsert_timing)
+        INGESTION_DEBUG_STORE.update(
+            request_id,
+            status="completed",
+            stage="completed",
+            timing=timing_debug,
+            document_id=document.document_id,
+            chunks=inserted,
+        )
         logger.info(
             "Document indexed",
             extra={
@@ -775,15 +835,43 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
                 "outline": document.metadata.get("ielts_structure", {}).get("outline", {}),
             },
         )
-    except HTTPException:
+    except HTTPException as exc:
+        INGESTION_DEBUG_STORE.update(
+            request_id,
+            status="failed",
+            stage=current_stage,
+            timing=timing_snapshot(),
+            error=str(exc.detail),
+        )
         raise
     except ValueError as exc:
+        INGESTION_DEBUG_STORE.update(
+            request_id,
+            status="failed",
+            stage=current_stage,
+            timing=timing_snapshot(),
+            error=str(exc),
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         logger.exception("Document processing failed for %s", safe_name)
+        INGESTION_DEBUG_STORE.update(
+            request_id,
+            status="failed",
+            stage=current_stage,
+            timing=timing_snapshot(),
+            error=str(exc),
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Unexpected document processing failure for %s", safe_name)
+        INGESTION_DEBUG_STORE.update(
+            request_id,
+            status="failed",
+            stage=current_stage,
+            timing=timing_snapshot(),
+            error=str(exc),
+        )
         raise HTTPException(status_code=500, detail="Không thể xử lý tài liệu này.") from exc
     finally:
         file_path.unlink(missing_ok=True)
