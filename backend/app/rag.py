@@ -96,7 +96,12 @@ class LocalVectorStore:
         embedding = self._embed(["IELTS document retrieval warmup"])[0]
         return {"embedding_model": self.model_name, "embedding_dimensions": int(embedding.shape[0])}
 
-    def upsert(self, chunks: List[Dict], source_file: str) -> int:
+    def upsert(
+        self,
+        chunks: List[Dict],
+        source_file: str,
+        progress: Callable[[str, Dict], None] | None = None,
+    ) -> int:
         started = time.perf_counter()
         if not chunks:
             self.last_upsert_timing = {"chunks": 0, "total_seconds": 0.0}
@@ -106,10 +111,19 @@ class LocalVectorStore:
 
         texts = [chunk.get("retrieval_text") or chunk["text"] for chunk in chunks]
         embedding_started = time.perf_counter()
+        self._emit(progress, "embedding_started", chunks=len(chunks))
         new_embeddings = self._embed(texts)
         embedding_seconds = self._elapsed(embedding_started)
+        self._emit(
+            progress,
+            "embedding_finished",
+            chunks=len(chunks),
+            dimensions=int(new_embeddings.shape[1]),
+            duration_seconds=embedding_seconds,
+        )
         with self._lock:
             merge_started = time.perf_counter()
+            self._emit(progress, "index_merge_started", existing_chunks=len(self._docs))
             keep_indices = [idx for idx, doc in enumerate(self._docs) if doc.get("source_file") != source_file]
             kept_docs = [self._docs[idx] for idx in keep_indices]
             kept_embeddings = (
@@ -129,9 +143,22 @@ class LocalVectorStore:
 
             combined_docs = kept_docs + chunks
             merge_seconds = self._elapsed(merge_started)
+            self._emit(
+                progress,
+                "index_merge_finished",
+                chunks=len(combined_docs),
+                duration_seconds=merge_seconds,
+            )
             save_started = time.perf_counter()
+            self._emit(progress, "index_save_started", chunks=len(combined_docs))
             self._save_state(combined_docs, combined_embeddings)
             save_seconds = self._elapsed(save_started)
+            self._emit(
+                progress,
+                "index_save_finished",
+                chunks=len(combined_docs),
+                duration_seconds=save_seconds,
+            )
             self._docs = combined_docs
             self._embeddings = combined_embeddings
             self.last_upsert_timing = {
@@ -141,7 +168,12 @@ class LocalVectorStore:
                 "chunks": len(chunks),
                 "total_seconds": self._elapsed(started),
             }
+        self._emit(progress, "upsert_finished", **self.last_upsert_timing)
         return len(chunks)
+
+    def _emit(self, progress: Callable[[str, Dict], None] | None, event: str, **details) -> None:
+        if progress is not None:
+            progress(event, details)
 
     @synchronized
     def search(self, query: str, top_k: int = 5) -> List[Dict]:

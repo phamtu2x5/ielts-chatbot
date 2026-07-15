@@ -57,6 +57,30 @@ class IngestionDebugStoreTests(unittest.TestCase):
             self.assertEqual(payload["stage"], "process_file")
             self.assertNotIn("finished_at", payload)
 
+    def test_appends_stage_events_and_updates_latest_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "ingestion_debug.json"
+            store = IngestionDebugStore(path)
+            store.start("request-1", "sample.pdf", {})
+
+            event = store.event(
+                "request-1",
+                "ocr_finished",
+                page=2,
+                duration_seconds=3.4,
+            )
+
+            events = [
+                json.loads(line)
+                for line in store.events_path.read_text(encoding="utf-8").splitlines()
+            ]
+            summary = store.read()
+            self.assertEqual([item["event"] for item in events], ["ingestion_started", "ocr_finished"])
+            self.assertEqual(event["page"], 2)
+            self.assertEqual(summary["stage"], "ocr_finished")
+            self.assertEqual(summary["events_recorded"], 2)
+            self.assertTrue(summary["temporary_diagnostics"])
+
     def test_ignores_updates_from_an_older_request(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = IngestionDebugStore(Path(temp_dir) / "ingestion_debug.json")

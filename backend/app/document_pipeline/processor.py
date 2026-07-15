@@ -2,6 +2,7 @@ import hashlib
 import logging
 import time
 from pathlib import Path
+from typing import Any, Callable
 
 from .chunking import SemanticChunker
 from .config import DocumentPipelineConfig
@@ -15,6 +16,7 @@ from .routing import FileRouter
 
 
 logger = logging.getLogger(__name__)
+ProgressCallback = Callable[[str, dict[str, Any]], None]
 
 
 class DocumentProcessor:
@@ -39,25 +41,61 @@ class DocumentProcessor:
         file_path: Path,
         filename: str,
         content_type: str | None = None,
+        progress: ProgressCallback | None = None,
     ) -> tuple[ProcessedDocument, list[DocumentChunk]]:
         started = time.perf_counter()
+        self._emit(progress, "document_hash_started")
         document_id = self._sha256(file_path)
         timing = {"document_id_hash_seconds": self._elapsed(started)}
+        self._emit(
+            progress,
+            "document_hash_finished",
+            document_id=document_id,
+            duration_seconds=timing["document_id_hash_seconds"],
+        )
         route_started = time.perf_counter()
         route = self.router.route(file_path, filename, content_type)
         timing["route_seconds"] = self._elapsed(route_started)
+        self._emit(progress, "file_routed", route=route, duration_seconds=timing["route_seconds"])
         mime_type = content_type or self._mime_for_route(route)
         extract_started = time.perf_counter()
-        document = self.extractors[route].extract(file_path, filename, mime_type, document_id)
+        self._emit(progress, "extraction_started", route=route)
+        if route == "pdf":
+            document = self.extractors[route].extract(
+                file_path,
+                filename,
+                mime_type,
+                document_id,
+                progress=progress,
+            )
+        else:
+            document = self.extractors[route].extract(file_path, filename, mime_type, document_id)
         timing["extract_seconds"] = self._elapsed(extract_started)
+        self._emit(
+            progress,
+            "extraction_finished",
+            route=route,
+            pages=len(document.pages),
+            duration_seconds=timing["extract_seconds"],
+        )
         reconcile_started = time.perf_counter()
+        self._emit(progress, "reconciliation_started")
         document = self.reconciler.reconcile(document)
         timing["reconcile_seconds"] = self._elapsed(reconcile_started)
+        self._emit(progress, "reconciliation_finished", duration_seconds=timing["reconcile_seconds"])
         if self.config.enable_ielts_structure_parser:
             structure_started = time.perf_counter()
+            self._emit(progress, "structure_parse_started")
             structured_document = self.structure_parser.parse(document)
             timing["structure_parse_seconds"] = self._elapsed(structure_started)
+            self._emit(
+                progress,
+                "structure_parse_finished",
+                duration_seconds=timing["structure_parse_seconds"],
+                passages=len(structured_document.passages),
+            )
             chunk_started = time.perf_counter()
+            self._emit(progress, "chunking_started", structured=True)
             chunks = self.structured_chunker.chunk(document, structured_document)
             timing["chunk_seconds"] = self._elapsed(chunk_started)
             if not chunks:
@@ -66,9 +104,17 @@ class DocumentProcessor:
                 timing["fallback_chunk_seconds"] = self._elapsed(fallback_chunk_started)
         else:
             chunk_started = time.perf_counter()
+            self._emit(progress, "chunking_started", structured=False)
             chunks = self.chunker.chunk(document)
             timing["chunk_seconds"] = self._elapsed(chunk_started)
         timing["chunks"] = len(chunks)
+        self._emit(
+            progress,
+            "chunking_finished",
+            chunks=len(chunks),
+            duration_seconds=timing.get("chunk_seconds", 0.0),
+            fallback_duration_seconds=timing.get("fallback_chunk_seconds", 0.0),
+        )
         timing["total_seconds"] = self._elapsed(started)
         document.metadata.setdefault("timing", {})
         document.metadata["timing"].update(
@@ -91,6 +137,13 @@ class DocumentProcessor:
             len(document.pages),
             len(chunks),
             time.perf_counter() - started,
+        )
+        self._emit(
+            progress,
+            "process_file_finished",
+            document_id=document_id,
+            chunks=len(chunks),
+            duration_seconds=timing["total_seconds"],
         )
         return document, chunks
 
@@ -119,3 +172,7 @@ class DocumentProcessor:
 
     def _elapsed(self, started: float) -> float:
         return round(time.perf_counter() - started, 3)
+
+    def _emit(self, progress: ProgressCallback | None, event: str, **details: Any) -> None:
+        if progress is not None:
+            progress(event, details)

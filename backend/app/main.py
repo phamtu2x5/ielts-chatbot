@@ -740,6 +740,13 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
             "ielts_structure_enabled": pipeline_config.enable_ielts_structure_parser,
         },
     )
+
+    def trace_event(event: str, details: dict[str, Any]) -> None:
+        try:
+            INGESTION_DEBUG_STORE.event(request_id, event, **details)
+        except Exception:
+            logger.exception("Temporary ingestion diagnostics failed event=%s", event)
+
     try:
         save_started = time.perf_counter()
         total_bytes = 0
@@ -753,6 +760,13 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
                     )
                 await out.write(chunk)
         upload_timing["save_file_seconds"] = round(time.perf_counter() - save_started, 3)
+        trace_event(
+            "file_saved",
+            {
+                "bytes": total_bytes,
+                "duration_seconds": upload_timing["save_file_seconds"],
+            },
+        )
         current_stage = "process_file"
         INGESTION_DEBUG_STORE.update(
             request_id,
@@ -768,6 +782,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
             file_path,
             safe_name,
             file.content_type,
+            trace_event,
         )
         upload_timing["process_file_seconds"] = round(time.perf_counter() - process_started, 3)
         document_timing = document.metadata.get("timing", {})
@@ -799,6 +814,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
             store.upsert,
             [chunk.to_dict() for chunk in chunks],
             safe_name,
+            trace_event,
         )
         upload_timing["upsert_seconds"] = round(time.perf_counter() - upsert_started, 3)
         upload_timing["total_seconds"] = round(time.perf_counter() - upload_started, 3)

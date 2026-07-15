@@ -1,6 +1,7 @@
 import re
 import time
 from pathlib import Path
+from typing import Any, Callable
 
 from PIL import Image
 
@@ -12,13 +13,23 @@ from ..ocr import OCRProcessor
 from ..quality import evaluate_native_page_text
 
 
+ProgressCallback = Callable[[str, dict[str, Any]], None]
+
+
 class PDFExtractor:
     def __init__(self, config: DocumentPipelineConfig, ocr: OCRProcessor, layout: DocLayoutDetector) -> None:
         self.config = config
         self.ocr = ocr
         self.layout = layout
 
-    def extract(self, file_path: Path, filename: str, mime_type: str, document_id: str) -> ProcessedDocument:
+    def extract(
+        self,
+        file_path: Path,
+        filename: str,
+        mime_type: str,
+        document_id: str,
+        progress: ProgressCallback | None = None,
+    ) -> ProcessedDocument:
         try:
             import fitz
         except ImportError as exc:
@@ -29,19 +40,45 @@ class PDFExtractor:
         with fitz.open(file_path) as document:
             pdf_open_seconds = self._elapsed(pdf_started)
             page_count = len(document)
+            self._emit(
+                progress,
+                "pdf_opened",
+                pages=page_count,
+                duration_seconds=pdf_open_seconds,
+            )
             if page_count > self.config.max_pdf_pages:
                 raise ValueError(f"PDF có {page_count} trang, vượt giới hạn {self.config.max_pdf_pages} trang.")
 
             for page_index, page in enumerate(document, 1):
+                self._emit(progress, "page_started", page=page_index)
                 page_timing = {"page": page_index}
                 native_started = time.perf_counter()
                 blocks = self._native_text_blocks(page)
                 native_text = "\n".join(block["normalized_text"] for block in blocks)
                 image_coverage = self._image_coverage(page)
                 page_timing["native_extract_seconds"] = self._elapsed(native_started)
+                self._emit(
+                    progress,
+                    "native_extract_finished",
+                    page=page_index,
+                    duration_seconds=page_timing["native_extract_seconds"],
+                    text_blocks=len(blocks),
+                    characters=len(native_text),
+                    image_coverage=round(image_coverage, 4),
+                )
                 quality_started = time.perf_counter()
                 quality = evaluate_native_page_text(native_text, len(blocks), image_coverage, self.config)
                 page_timing["quality_eval_seconds"] = self._elapsed(quality_started)
+                self._emit(
+                    progress,
+                    "quality_evaluation_finished",
+                    page=page_index,
+                    duration_seconds=page_timing["quality_eval_seconds"],
+                    score=quality.score,
+                    native_text_is_usable=quality.native_text_is_usable,
+                    requires_layout=quality.requires_layout,
+                    requires_table_analysis=quality.requires_table_analysis,
+                )
                 page_timing["render_seconds"] = 0.0
                 page_timing["layout_seconds"] = 0.0
                 page_timing["ocr_seconds"] = 0.0
@@ -71,15 +108,43 @@ class PDFExtractor:
                     layout_needed = bool(merge_reasons)
                     if layout_needed:
                         render_started = time.perf_counter()
+                        self._emit(progress, "page_render_started", page=page_index)
                         rendered_page = self._render_page(page)
                         page_timing["render_seconds"] = self._elapsed(render_started)
+                        self._emit(
+                            progress,
+                            "page_render_finished",
+                            page=page_index,
+                            duration_seconds=page_timing["render_seconds"],
+                            width=rendered_page.width,
+                            height=rendered_page.height,
+                        )
                         layout_started = time.perf_counter()
+                        self._emit(progress, "layout_started", page=page_index)
                         layout_result = self.layout.detect(rendered_page)
                         page_timing["layout_seconds"] = self._elapsed(layout_started)
+                        self._emit(
+                            progress,
+                            "layout_finished",
+                            page=page_index,
+                            duration_seconds=page_timing["layout_seconds"],
+                            engine=layout_result.engine,
+                            regions=len(layout_result.regions),
+                        )
                     if merge_reasons and rendered_page is not None:
                         ocr_started = time.perf_counter()
+                        self._emit(progress, "ocr_started", page=page_index)
                         ocr_result = self.ocr.image_to_text(rendered_page)
                         page_timing["ocr_seconds"] = self._elapsed(ocr_started)
+                        self._emit(
+                            progress,
+                            "ocr_finished",
+                            page=page_index,
+                            duration_seconds=page_timing["ocr_seconds"],
+                            engine=ocr_result.engine,
+                            confidence=ocr_result.confidence,
+                            characters=len(ocr_result.text),
+                        )
                         ocr_text = normalize_text(ocr_result.text)
                         if ocr_text and self._adds_new_text(native_text, ocr_text):
                             elements.append(
@@ -124,17 +189,52 @@ class PDFExtractor:
                             },
                         )
                     )
+                    self._emit(
+                        progress,
+                        "page_finished",
+                        page=page_index,
+                        route=processing_route,
+                        timing=page_timing,
+                    )
                     continue
 
                 render_started = time.perf_counter()
+                self._emit(progress, "page_render_started", page=page_index)
                 rendered_page = self._render_page(page)
                 page_timing["render_seconds"] = self._elapsed(render_started)
+                self._emit(
+                    progress,
+                    "page_render_finished",
+                    page=page_index,
+                    duration_seconds=page_timing["render_seconds"],
+                    width=rendered_page.width,
+                    height=rendered_page.height,
+                )
                 layout_started = time.perf_counter()
+                self._emit(progress, "layout_started", page=page_index)
                 layout_result = self.layout.detect(rendered_page)
                 page_timing["layout_seconds"] = self._elapsed(layout_started)
+                self._emit(
+                    progress,
+                    "layout_finished",
+                    page=page_index,
+                    duration_seconds=page_timing["layout_seconds"],
+                    engine=layout_result.engine,
+                    regions=len(layout_result.regions),
+                )
                 ocr_started = time.perf_counter()
+                self._emit(progress, "ocr_started", page=page_index)
                 ocr_result = self.ocr.image_to_text(rendered_page)
                 page_timing["ocr_seconds"] = self._elapsed(ocr_started)
+                self._emit(
+                    progress,
+                    "ocr_finished",
+                    page=page_index,
+                    duration_seconds=page_timing["ocr_seconds"],
+                    engine=ocr_result.engine,
+                    confidence=ocr_result.confidence,
+                    characters=len(ocr_result.text),
+                )
                 text = normalize_text(ocr_result.text)
                 elements = []
                 if text:
@@ -170,6 +270,13 @@ class PDFExtractor:
                             "timing": {**page_timing, "route": "pdf_page_ocr"},
                         },
                     )
+                )
+                self._emit(
+                    progress,
+                    "page_finished",
+                    page=page_index,
+                    route="pdf_page_ocr",
+                    timing=page_timing,
                 )
 
         return ProcessedDocument(
@@ -238,6 +345,10 @@ class PDFExtractor:
 
     def _elapsed(self, started: float) -> float:
         return round(time.perf_counter() - started, 3)
+
+    def _emit(self, progress: ProgressCallback | None, event: str, **details: Any) -> None:
+        if progress is not None:
+            progress(event, details)
 
     def _empty_layout_result(self) -> LayoutResult:
         return LayoutResult("layout_not_attempted", [], {"skipped": True})
