@@ -60,7 +60,7 @@ class DocumentProcessor:
         mime_type = content_type or self._mime_for_route(route)
         extract_started = time.perf_counter()
         self._emit(progress, "extraction_started", route=route)
-        if route == "pdf":
+        if route in {"pdf", "image"}:
             document = self.extractors[route].extract(
                 file_path,
                 filename,
