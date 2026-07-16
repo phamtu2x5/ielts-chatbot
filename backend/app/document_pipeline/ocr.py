@@ -85,7 +85,7 @@ class OCRProcessor:
             ocr = self._get_rapidocr()
             image_path = self._save_temp_image(image)
             try:
-                raw_result = ocr(str(image_path))
+                raw_result = ocr(str(image_path), use_cls=False)
             finally:
                 image_path.unlink(missing_ok=True)
             texts, scores, boxes = self._extract_rapidocr_result(raw_result)
@@ -143,6 +143,7 @@ class OCRProcessor:
             "Det.lang_type": LangDet(self.config.ocr_det_lang),
             "Det.model_type": ModelType(self.config.ocr_model_size),
             "Det.ocr_version": OCRVersion(self.config.ocr_version),
+            "Cls.engine_type": EngineType.TORCH,
             "Rec.engine_type": EngineType.TORCH,
             "Rec.lang_type": LangRec(self.config.ocr_lang),
             "Rec.model_type": ModelType(self.config.ocr_model_size),

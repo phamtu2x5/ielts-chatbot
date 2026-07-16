@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 from PIL import Image
@@ -128,6 +129,52 @@ class OCRProcessorTests(unittest.TestCase):
         processor = OCRProcessor(DocumentPipelineConfig(ocr_device="cuda:2"))
 
         self.assertEqual(processor._cuda_device_id(), 2)
+
+    def test_all_rapidocr_components_use_torch(self) -> None:
+        typings = ModuleType("rapidocr.utils.typings")
+
+        class FakeEnum:
+            TORCH = "torch"
+
+            def __new__(cls, value):
+                return value
+
+        typings.EngineType = FakeEnum
+        typings.LangDet = FakeEnum
+        typings.LangRec = FakeEnum
+        typings.ModelType = FakeEnum
+        typings.OCRVersion = FakeEnum
+
+        processor = OCRProcessor(DocumentPipelineConfig())
+        with patch.dict(sys.modules, {"rapidocr.utils.typings": typings}):
+            params = processor._rapidocr_params()
+
+        self.assertEqual(params["Det.engine_type"], "torch")
+        self.assertEqual(params["Cls.engine_type"], "torch")
+        self.assertEqual(params["Rec.engine_type"], "torch")
+        self.assertFalse(params["Global.use_cls"])
+
+    def test_rapidocr_call_disables_line_classification(self) -> None:
+        class RapidOCRLikeResult:
+            txts = ("IELTS",)
+            scores = (0.9,)
+            boxes = ()
+
+        calls = []
+
+        def fake_ocr(path: str, **kwargs):
+            calls.append((path, kwargs))
+            return RapidOCRLikeResult()
+
+        processor = OCRProcessor(DocumentPipelineConfig())
+        with (
+            patch.object(processor, "_rapidocr_is_available", return_value=True),
+            patch.object(processor, "_get_rapidocr", return_value=fake_ocr),
+        ):
+            result = processor._image_to_text_with_rapidocr(Image.new("RGB", (20, 20), "white"))
+
+        self.assertEqual(result.text, "IELTS")
+        self.assertEqual(calls[0][1], {"use_cls": False})
 
     def test_rapidocr_failure_returns_diagnostics_without_external_fallback(self) -> None:
         processor = OCRProcessor(DocumentPipelineConfig())
