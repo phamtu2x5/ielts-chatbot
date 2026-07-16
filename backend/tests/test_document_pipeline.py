@@ -665,6 +665,108 @@ class IELTSStructureTests(unittest.TestCase):
         self.assertEqual(len(structured.passages), 2)
         self.assertEqual(structured.passages[1].title, "Destination Mars")
 
+    def test_passage_titles_use_block_boundaries_instead_of_proper_nouns(self) -> None:
+        first = (
+            "A Broad Environmental Topic\n"
+            "The opening section discusses field research in several regions.\n"
+            "Researchers from North Valley University worked near Costa Rica.\n"
+            "They described the results and their wider significance."
+        )
+        first_questions = (
+            "Questions 1-2\n"
+            "Answer the questions.\n"
+            "1. What was studied?\n"
+            "2. Where was the work conducted?\n\n"
+            "A Different Social Topic\n"
+            "The next passage considers how organisations make decisions.\n"
+            "Professor Jane Example is quoted in the discussion."
+        )
+        second_questions = (
+            "Questions 3-4\n"
+            "Answer the questions.\n"
+            "3. What do organisations consider?\n"
+            "4. Who is quoted?"
+        )
+        document = make_document(
+            [
+                ProcessedPage(
+                    1,
+                    "native_pdf",
+                    0.95,
+                    [
+                        make_element("p1-e1", 1, first),
+                        make_element("p1-e2", 1, first_questions),
+                        make_element("p1-e3", 1, second_questions),
+                    ],
+                )
+            ]
+        )
+
+        structured = IELTSStructureParser(self.config).parse(document)
+
+        self.assertEqual(
+            [passage.title for passage in structured.passages],
+            ["A Broad Environmental Topic", "A Different Social Topic"],
+        )
+        self.assertNotIn("Costa Rica", [passage.title for passage in structured.passages])
+        self.assertNotIn("Professor Jane Example", [passage.title for passage in structured.passages])
+
+    def test_single_question_header_is_kept_as_its_own_group(self) -> None:
+        text = (
+            "A Passage Without a Fixed Question Count\n"
+            "This passage contains enough background for several tasks. " * 20
+            + "\nQuestions 35-39\n"
+            "Do the following statements agree with the writer?\n"
+            "35. First statement. 36. Second statement. 37. Third statement. "
+            "38. Fourth statement. 39. Fifth statement.\n"
+            "Question 40\n"
+            "40. Choose the most suitable title. A First B Second C Third D Fourth"
+        )
+        document = make_document(
+            [ProcessedPage(1, "native_pdf", 0.95, [make_element("p1-e1", 1, text)])]
+        )
+
+        structured = IELTSStructureParser(self.config).parse(document)
+
+        self.assertEqual(
+            [
+                (group.question_start, group.question_end)
+                for group in structured.passages[0].question_groups
+            ],
+            [(35, 39), (40, 40)],
+        )
+        self.assertEqual(structured.diagnostics["questions_found"], 6)
+
+    def test_passage_marker_without_explicit_title_does_not_invent_one(self) -> None:
+        first = "First Passage\n" + "This is the first passage body. " * 30
+        transition = (
+            "Questions 1-1\n1. First question?\n\n"
+            "Reading Passage 2\n"
+            "What do we mean by exceptional ability? "
+            + "The discussion compares several definitions of ability. " * 20
+        )
+        second_questions = "Questions 2-2\n2. Second question?"
+        document = make_document(
+            [
+                ProcessedPage(
+                    1,
+                    "native_pdf",
+                    0.95,
+                    [
+                        make_element("p1-e1", 1, first),
+                        make_element("p1-e2", 1, transition),
+                        make_element("p1-e3", 1, second_questions),
+                    ],
+                )
+            ]
+        )
+
+        structured = IELTSStructureParser(self.config).parse(document)
+
+        self.assertEqual(len(structured.passages), 2)
+        self.assertIsNone(structured.passages[1].title)
+        self.assertIn("exceptional ability", structured.passages[1].text)
+
     def test_passage_chunks_do_not_keep_previous_question_sections(self) -> None:
         text = (
             "Make That Wine! Australia is a nation of wine drinkers. "

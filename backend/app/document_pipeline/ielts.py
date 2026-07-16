@@ -8,14 +8,21 @@ from .models import DocumentChunk, DocumentElement, ProcessedDocument
 from .visual import IELTSQuestionVisualParser
 
 
-QUESTION_HEADER_RE = re.compile(r"Questions?\s+(\d{1,2})\s*(?:-|–|to)\s*(\d{1,2})", re.IGNORECASE)
+QUESTION_HEADER_RE = re.compile(
+    r"Questions?\s+(\d{1,2})(?:\s*(?:-|–|to)\s*(\d{1,2}))?",
+    re.IGNORECASE,
+)
 NUMBERED_QUESTION_RE = re.compile(
-    r"(?<!\d)(\d{1,2})\.\s*(.*?)(?=(?<!\d)\d{1,2}\.\s|Questions?\s+\d{1,2}\s*(?:-|–|to)\s*\d{1,2}|$)",
+    r"(?<!\d)(\d{1,2})\.\s*(.*?)(?=(?<!\d)\d{1,2}\.\s|Questions?\s+\d{1,2}(?:\s*(?:-|–|to)\s*\d{1,2})?|$)",
     re.IGNORECASE | re.DOTALL,
 )
 PAGE_MARKER_RE = re.compile(r"\n{1,3}\[Page\s+\d+\]", re.IGNORECASE)
 FOOTER_RE = re.compile(r"https?://\S+|Page\s+\d+", re.IGNORECASE)
 TITLE_WORD_RE = re.compile(r"[A-Z][A-Za-z'’.-]+")
+PASSAGE_MARKER_LINE_RE = re.compile(
+    r"^[ \t]*(?:reading\s+)?passage\s+(?:\d{1,2}|one|two|three)[ \t]*:?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
 INSTRUCTION_RE = re.compile(
     r"\b("
     r"questions?\s+\d{1,2}\s*(?:-|–|to)\s*\d{1,2}|"
@@ -186,7 +193,7 @@ class IELTSStructureParser:
         offset = 0
         current_page = None
         for element in document.elements:
-            text = element.normalized_text.strip()
+            text = self._structure_text(element)
             if not text or self._is_footer_only(text):
                 continue
             if element.page != current_page:
@@ -194,16 +201,27 @@ class IELTSStructureParser:
                 parts.append(marker)
                 offset += len(marker)
                 current_page = element.page
-            if parts and not parts[-1].endswith("\n"):
-                parts.append("\n")
-                offset += 1
+            if parts and not parts[-1].endswith("\n\n"):
+                separator = "\n" if parts[-1].endswith("\n") else "\n\n"
+                parts.append(separator)
+                offset += len(separator)
             start = offset
             parts.append(text)
             offset += len(text)
             spans.append(_Span(start=start, end=offset, element=element))
-            parts.append("\n")
-            offset += 1
-        return "".join(parts).strip(), spans
+            parts.append("\n\n")
+            offset += 2
+        return "".join(parts), spans
+
+    def _structure_text(self, element: DocumentElement) -> str:
+        text = element.raw_text or element.normalized_text
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+        compact: list[str] = []
+        for line in lines:
+            if line or (compact and compact[-1]):
+                compact.append(line)
+        return "\n".join(compact).strip()
 
     def _parse_question_groups(
         self,
@@ -214,10 +232,7 @@ class IELTSStructureParser:
         headers = list(QUESTION_HEADER_RE.finditer(full_text))
         groups: list[_ParsedGroup] = []
         for index, header in enumerate(headers):
-            start = int(header.group(1))
-            end = int(header.group(2))
-            if start > end:
-                start, end = end, start
+            start, end = self._header_range(header)
             next_start = headers[index + 1].start() if index + 1 < len(headers) else len(full_text)
             logical_end = self._logical_group_end(full_text, header.start(), next_start, start, end)
             raw_section = full_text[header.start() : logical_end]
@@ -384,12 +399,19 @@ class IELTSStructureParser:
         start_at: int = 20,
         require_line_boundary: bool = False,
     ) -> int | None:
+        window = text[:2000]
         candidate = self._best_title_candidate(
-            text[:2000],
+            window,
             min_start=max(20, start_at),
             require_line_boundary=require_line_boundary,
         )
-        return candidate.start if candidate else None
+        marker_offsets = [
+            match.start()
+            for match in PASSAGE_MARKER_LINE_RE.finditer(window)
+            if match.start() >= max(20, start_at)
+        ]
+        offsets = marker_offsets + ([candidate.start] if candidate else [])
+        return min(offsets) if offsets else None
 
     def _multiple_choice_group_end(self, section: str, last_question_start: int) -> int | None:
         tail = section[last_question_start:]
@@ -506,8 +528,8 @@ class IELTSStructureParser:
         start: int,
         end: int,
     ) -> IELTSPassage:
+        title = self._infer_title(text)
         cleaned = self._clean_passage_text(text)
-        title = self._infer_title(cleaned)
         cleaned = self._strip_leading_title(cleaned, title)
         element_ids, pages = self._span_metadata(spans, start, end)
         group_pages = {page for group in groups for page in group.page_numbers}
@@ -662,7 +684,7 @@ class IELTSStructureParser:
             return "empty"
         if self._is_instruction_like_text(cleaned):
             return "instruction"
-        if self._is_passage_boundary_candidate(cleaned):
+        if self._is_passage_boundary_candidate(text):
             return "new_passage"
         return "passage_body"
 
@@ -674,15 +696,23 @@ class IELTSStructureParser:
         cleaned = self._clean_passage_text(text)
         if not cleaned or self._is_instruction_like_text(cleaned):
             return False
-        title = self._infer_title(cleaned)
+        if PASSAGE_MARKER_LINE_RE.search(text):
+            return True
+        title = self._infer_title(text)
         if title and not self._is_instruction_like_text(title):
             return True
         return estimate_tokens(cleaned) >= 120
 
     def _infer_title(self, text: str) -> str | None:
-        cleaned = self._clean_passage_text(text)
-        cleaned = re.sub(r"^IELTS\s+READING\s+TEST\s+\d+\s+", "", cleaned, flags=re.IGNORECASE)
-        candidate = self._best_title_candidate(cleaned[:1200])
+        marker = PASSAGE_MARKER_LINE_RE.search(text)
+        if marker:
+            tail = text[marker.end() :]
+            candidate = self._best_title_candidate(tail[:2000])
+            first_content = self._first_content_line_offset(tail)
+            if candidate and first_content is not None and candidate.start == first_content:
+                return candidate.title
+            return None
+        candidate = self._best_title_candidate(text[:2000])
         return candidate.title if candidate else None
 
     def _best_title_candidate(
@@ -692,48 +722,145 @@ class IELTSStructureParser:
         require_line_boundary: bool = False,
     ) -> _TitleCandidate | None:
         candidates: list[_TitleCandidate] = []
-        words = list(TITLE_WORD_RE.finditer(text))
-        for index, first_word in enumerate(words):
-            if first_word.start() < min_start:
+        substantive_lines = [
+            line
+            for line in text.splitlines()
+            if line.strip() and not self._is_footer_only(line)
+        ]
+        for line_match in re.finditer(r"(?m)^[^\n]*\S[^\n]*$", text):
+            raw_line = line_match.group(0)
+            if re.search(r"https?://", raw_line, flags=re.IGNORECASE):
                 continue
-            for end_index in range(index, min(index + 6, len(words))):
+            leading = len(raw_line) - len(raw_line.lstrip())
+            start = line_match.start() + leading
+            if start < min_start:
+                continue
+            title = self._clean_title_line(raw_line)
+            if not title or PASSAGE_MARKER_LINE_RE.fullmatch(title):
+                continue
+            block_boundary = self._has_block_boundary_before(text, start)
+            if not block_boundary and len(substantive_lines) > 3:
+                continue
+            if not self._is_title_line(title, block_boundary=block_boundary):
+                continue
+            if self._is_list_sequence_line(raw_line, text[line_match.end() :]):
+                continue
+            if require_line_boundary and not self._has_line_boundary_before(text, start):
+                continue
+            after_title = text[line_match.end() : line_match.end() + 320]
+            body_score = self._body_likeness(after_title)
+            if body_score <= 0 or len(re.findall(r"[A-Za-z]+", after_title)) < 8:
+                continue
+            title_len = len(title.split())
+            candidates.append(
+                _TitleCandidate(
+                    title=title,
+                    start=start,
+                    end=line_match.end(),
+                    score=(
+                        1 if block_boundary else 0,
+                        -start,
+                        body_score,
+                        -abs(title_len - 4),
+                    ),
+                )
+            )
+
+            if block_boundary:
+                inline = self._inline_title_candidate(raw_line, start, scan=False)
+                if inline:
+                    candidates.append(inline)
+
+        if not PASSAGE_MARKER_LINE_RE.search(text) and len(substantive_lines) <= 3:
+            inline = self._inline_title_candidate(text[min_start:], min_start, scan=True)
+            if inline:
+                candidates.append(inline)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item.score)
+
+    def _inline_title_candidate(self, text: str, base_offset: int, scan: bool) -> _TitleCandidate | None:
+        words = list(TITLE_WORD_RE.finditer(text))
+        if not words:
+            return None
+        candidates: list[_TitleCandidate] = []
+        for index, first_word in enumerate(words):
+            if not scan and first_word.start() != len(text) - len(text.lstrip()):
+                break
+            if scan:
+                prefix = text[: first_word.start()]
+                if (
+                    prefix.strip()
+                    and not re.search(r"[.!?]\s*$", prefix)
+                    and not self._has_block_boundary_before(text, first_word.start())
+                ):
+                    continue
+            for end_index in range(index + 1, min(index + 6, len(words))):
                 sequence = words[index : end_index + 1]
                 if any(sequence[pos].end() + 1 < sequence[pos + 1].start() for pos in range(len(sequence) - 1)):
                     break
-                if require_line_boundary and not self._has_line_boundary_before(text, first_word.start()):
-                    continue
                 title_end = sequence[-1].end()
                 if title_end < len(text) and text[title_end] in "!?":
                     title_end += 1
                 title = text[first_word.start() : title_end].strip()
-                line_start = text.rfind("\n", 0, first_word.start()) + 1
-                line_end = text.find("\n", title_end)
-                line = text[line_start : line_end if line_end != -1 else len(text)]
-                if "|" in line:
-                    continue
                 if not self._is_plausible_title(title):
                     continue
-                after_title = text[title_end : title_end + 180]
+                after_title = text[title_end : title_end + 240]
                 body_score = self._body_likeness(after_title)
                 if body_score <= 0:
                     continue
-                title_len = len(title.split())
+                start = base_offset + first_word.start()
                 candidates.append(
                     _TitleCandidate(
                         title=title,
-                        start=first_word.start(),
-                        end=title_end,
-                        score=(
-                            body_score,
-                            1 if 2 <= title_len <= 4 else 0,
-                            -abs(title_len - 3),
-                            -first_word.start(),
-                        ),
+                        start=start,
+                        end=base_offset + title_end,
+                        score=(0, body_score, -start, -abs(len(title.split()) - 4)),
                     )
                 )
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: item.score)
+        return max(candidates, key=lambda item: item.score) if candidates else None
+
+    def _clean_title_line(self, line: str) -> str:
+        line = FOOTER_RE.sub(" ", line)
+        return re.sub(r"\s+", " ", line).strip()
+
+    def _first_content_line_offset(self, text: str) -> int | None:
+        for match in re.finditer(r"(?m)^[^\n]*\S[^\n]*$", text):
+            raw_line = match.group(0)
+            if re.search(r"https?://", raw_line, flags=re.IGNORECASE):
+                continue
+            line = self._clean_title_line(raw_line)
+            if not line or re.fullmatch(r"IELTS\s+READING\s+TEST\s+\d+", line, flags=re.IGNORECASE):
+                continue
+            return match.start() + len(raw_line) - len(raw_line.lstrip())
+        return None
+
+    def _is_list_sequence_line(self, line: str, following_text: str) -> bool:
+        label = re.match(r"^\s*([A-H]|[ivxlcdm]+)[.)]?\s+", line, flags=re.IGNORECASE)
+        if not label:
+            return False
+        next_line = next((item.strip() for item in following_text.splitlines() if item.strip()), "")
+        return bool(re.match(r"^(?:[A-H]|[ivxlcdm]+)[.)]?\s+", next_line, flags=re.IGNORECASE))
+
+    def _is_title_line(self, title: str, block_boundary: bool) -> bool:
+        if len(title) > 160 or not 1 <= len(title.split()) <= 12:
+            return False
+        if len(re.findall(r"[A-Za-z]", title)) < 2:
+            return False
+        if "|" in title:
+            return False
+        if not block_boundary and re.match(r"^(?:[A-H]|[ivxlcdm]+)[.)]?\s+", title, flags=re.IGNORECASE):
+            return False
+        normalized = title.lower().strip(" {}[]()")
+        if re.fullmatch(r"ielts\s+reading\s+test\s+\d+", normalized):
+            return False
+        if normalized in {"list of headings", "notes", "list of people", "list of statements"}:
+            return False
+        return self._is_plausible_title(title)
+
+    def _has_block_boundary_before(self, text: str, offset: int) -> bool:
+        prefix = text[:offset]
+        return not prefix.strip() or bool(re.search(r"\n[ \t]*\n[ \t]*$", prefix))
 
     def _visual_tail_is_passage_body(self, text: str) -> bool:
         snippet = self._clean_section_text(text[:240])
@@ -774,6 +901,8 @@ class IELTSStructureParser:
         text = FOOTER_RE.sub(" ", text)
         text = self._trim_to_passage_title(text)
         text = self._remove_question_sections(text)
+        text = PASSAGE_MARKER_LINE_RE.sub(" ", text)
+        text = re.sub(r"(?im)^\s*IELTS\s+READING\s+TEST\s+\d+\s*$", " ", text)
         return self._clean_section_text(text)
 
     def _trim_to_passage_title(self, text: str) -> str:
@@ -794,7 +923,8 @@ class IELTSStructureParser:
         for index, header in enumerate(headers):
             cleaned_parts.append(text[cursor : header.start()])
             next_header_start = headers[index + 1].start() if index + 1 < len(headers) else len(text)
-            logical_end = self._logical_group_end(text, header.start(), next_header_start, int(header.group(1)), int(header.group(2)))
+            start, end = self._header_range(header)
+            logical_end = self._logical_group_end(text, header.start(), next_header_start, start, end)
             cursor = max(cursor, logical_end)
         cleaned_parts.append(text[cursor:])
         return " ".join(part for part in cleaned_parts if part.strip())
@@ -858,6 +988,11 @@ class IELTSStructureParser:
     def _is_footer_only(self, text: str) -> bool:
         without_footer = FOOTER_RE.sub("", text).strip()
         return not without_footer
+
+    def _header_range(self, header: re.Match[str]) -> tuple[int, int]:
+        start = int(header.group(1))
+        end = int(header.group(2) or start)
+        return (end, start) if start > end else (start, end)
 
 
 class StructuredChunker:
