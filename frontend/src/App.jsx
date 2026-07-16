@@ -1,5 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Bug, CheckCircle2, Download, FileText, FileUp, Send, Sparkles, UserRound, XCircle } from "lucide-react";
+import {
+  Bot,
+  Bug,
+  CheckCircle2,
+  Download,
+  FileText,
+  Paperclip,
+  Send,
+  Sparkles,
+  UserRound,
+  X,
+  XCircle,
+} from "lucide-react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -55,10 +67,17 @@ function MessageContent({ message }) {
   const content = message.content || "";
 
   if (message.role === "user") {
+    const attachments = message.attachments || (message.attachment ? [message.attachment] : []);
     return (
       <>
         {content && <div className="messageText plainText">{content}</div>}
-        {message.attachment && <AttachmentCard attachment={message.attachment} />}
+        {attachments.length > 0 && (
+          <div className="messageAttachments">
+            {attachments.map((attachment) => (
+              <AttachmentCard key={attachment.id || attachment.name} attachment={attachment} />
+            ))}
+          </div>
+        )}
       </>
     );
   }
@@ -97,8 +116,9 @@ function MessageContent({ message }) {
   );
 }
 
-function AttachmentCard({ attachment }) {
+function AttachmentCard({ attachment, onRemove }) {
   const statusText = {
+    queued: "Sẵn sàng gửi",
     uploading: "Đang tải lên...",
     ready: `${attachment.chunks || 0} đoạn đã được lập chỉ mục`,
     error: attachment.error || "Không thể tải tệp",
@@ -115,6 +135,17 @@ function AttachmentCard({ attachment }) {
       </div>
       {attachment.status === "ready" && <CheckCircle2 className="attachmentState" size={18} />}
       {attachment.status === "error" && <XCircle className="attachmentState" size={18} />}
+      {onRemove && (
+        <button
+          className="attachmentRemoveButton"
+          type="button"
+          title={`Bỏ ${attachment.name}`}
+          aria-label={`Bỏ ${attachment.name}`}
+          onClick={onRemove}
+        >
+          <X size={16} />
+        </button>
+      )}
     </div>
   );
 }
@@ -191,6 +222,7 @@ function App() {
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState([]);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
   const hasStreamingAssistant = messages.some((message) => message.streaming);
@@ -244,27 +276,172 @@ function App() {
     downloadJson(`ielts-chatbot-debug-${suffix}-${Date.now()}.json`, payload);
   }
 
+  function selectFiles(event) {
+    const selectedFiles = Array.from(event.target.files || []);
+    if (!selectedFiles.length) return;
+
+    setPendingFiles((current) => {
+      const existing = new Set(current.map((item) => item.id));
+      const additions = selectedFiles
+        .map((file) => ({
+          id: `${file.name}-${file.size}-${file.lastModified}`,
+          file,
+          name: file.name,
+          status: "queued",
+        }))
+        .filter((item) => !existing.has(item.id));
+      return [...current, ...additions];
+    });
+    event.target.value = "";
+  }
+
+  function updateAttachment(messageId, attachmentId, changes) {
+    setMessages((current) =>
+      current.map((message) =>
+        message.id === messageId
+          ? {
+              ...message,
+              attachments: (message.attachments || []).map((attachment) =>
+                attachment.id === attachmentId ? { ...attachment, ...changes } : attachment
+              ),
+            }
+          : message
+      )
+    );
+  }
+
+  async function uploadFile(file) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(`${API_BASE}/documents/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || "Tải tài liệu không thành công");
+    }
+    return response.json();
+  }
+
   async function sendMessage(event) {
     event?.preventDefault();
     const text = input.trim();
-    if (!text || isSending || isUploading) return;
+    const queuedFiles = pendingFiles;
+    if ((!text && !queuedFiles.length) || isSending || isUploading) return;
 
-    const assistantId = `assistant-${Date.now()}`;
+    const submissionId = Date.now();
+    const userId = `user-${submissionId}`;
+    const assistantId = `assistant-${submissionId}`;
     setInput("");
+    setPendingFiles([]);
     setIsSending(true);
     setMessages((current) => [
       ...current,
-      { role: "user", content: text },
+      {
+        id: userId,
+        role: "user",
+        content: text,
+        attachments: queuedFiles.map(({ id, name }) => ({ id, name, status: "queued" })),
+      },
       {
         id: assistantId,
         role: "assistant",
         content: "",
         streaming: true,
-        streamingStatus: "Đang gửi câu hỏi...",
+        streamingStatus: queuedFiles.length ? "Đang chuẩn bị tài liệu..." : "Đang gửi câu hỏi...",
       },
     ]);
 
     try {
+      const uploadedFiles = [];
+      const failedFiles = [];
+
+      if (queuedFiles.length) {
+        setIsUploading(true);
+        for (const [index, item] of queuedFiles.entries()) {
+          updateAttachment(userId, item.id, { status: "uploading" });
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantId
+                ? {
+                    ...message,
+                    streamingStatus: `Đang xử lý tài liệu ${index + 1}/${queuedFiles.length}: ${item.name}`,
+                  }
+                : message
+            )
+          );
+          try {
+            const data = await uploadFile(item.file);
+            uploadedFiles.push(data);
+            updateAttachment(userId, item.id, {
+              name: data.file_name,
+              status: "ready",
+              chunks: data.chunks_processed,
+            });
+          } catch (error) {
+            failedFiles.push({ name: item.name, error: error.message });
+            updateAttachment(userId, item.id, {
+              status: "error",
+              error: error.message,
+            });
+          }
+        }
+        setIsUploading(false);
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  debug: {
+                    ...(message.debug || {}),
+                    uploads: {
+                      succeeded: uploadedFiles.map((data) => ({
+                        file_name: data.file_name,
+                        document_id: data.document_id,
+                        chunks_processed: data.chunks_processed,
+                        debug: data.debug,
+                      })),
+                      failed: failedFiles,
+                    },
+                  },
+                }
+              : message
+          )
+        );
+      }
+
+      if (!text) {
+        const readyNames = uploadedFiles.map((data) => `**${data.file_name}**`).join(", ");
+        const failedNames = failedFiles.map((item) => `**${item.name}**`).join(", ");
+        const parts = [];
+        if (readyNames) parts.push(`Đã xử lý xong ${uploadedFiles.length} tài liệu: ${readyNames}.`);
+        if (failedNames) parts.push(`Không thể xử lý ${failedFiles.length} tài liệu: ${failedNames}.`);
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  content: parts.join("\n\n"),
+                  route_used: uploadedFiles.length ? "upload" : "error",
+                  streaming: false,
+                  streamingStatus: "",
+                }
+              : message
+          )
+        );
+        return;
+      }
+
+      if (failedFiles.length) {
+        throw new Error("Chưa gửi câu hỏi vì chưa xử lý thành công toàn bộ tài liệu đính kèm.");
+      }
+
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId ? { ...message, streamingStatus: "Đang gửi câu hỏi..." } : message
+        )
+      );
       const response = await fetch(`${API_BASE}/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -311,7 +488,7 @@ function App() {
                       ...message,
                       route_used: eventData.route_used,
                       sources: eventData.sources || [],
-                      debug: eventData.debug,
+                      debug: { ...(message.debug || {}), ...(eventData.debug || {}) },
                     }
                   : message
               )
@@ -367,90 +544,7 @@ function App() {
         )
       );
       setIsSending(false);
-    }
-  }
-
-  async function uploadDocument(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const uploadId = `upload-${Date.now()}-${file.name}`;
-    setIsUploading(true);
-    setMessages((current) => [
-      ...current,
-      {
-        id: uploadId,
-        role: "user",
-        content: "",
-        attachment: {
-          name: file.name,
-          status: "uploading",
-        },
-      },
-    ]);
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    try {
-      const response = await fetch(`${API_BASE}/documents/upload`, {
-        method: "POST",
-        body: formData,
-      });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(error.detail || "Tải tài liệu không thành công");
-      }
-      const data = await response.json();
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === uploadId
-            ? {
-                ...message,
-                attachment: {
-                  name: data.file_name,
-                  status: "ready",
-                  chunks: data.chunks_processed,
-                },
-              }
-            : message
-        )
-      );
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content: `Mình đã đọc xong **${data.file_name}**. Bạn có thể hỏi nội dung trong tài liệu này, mình sẽ ưu tiên dùng nguồn đã tải lên để trả lời.`,
-          route_used: "upload",
-          debug: data.debug,
-        },
-      ]);
-    } catch (error) {
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === uploadId
-            ? {
-                ...message,
-                attachment: {
-                  name: file.name,
-                  status: "error",
-                  error: error.message,
-                },
-              }
-            : message
-        )
-      );
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content: error.message,
-          route_used: "error",
-        },
-      ]);
-    } finally {
       setIsUploading(false);
-      event.target.value = "";
     }
   }
 
@@ -517,39 +611,58 @@ function App() {
         </div>
 
         <form className="composer" onSubmit={sendMessage}>
-          <button
-            className="composerIconButton"
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading || isSending}
-            title="Tải tài liệu"
-          >
-            <FileUp size={19} />
-            <span>{isUploading ? "Đang tải" : "Tệp"}</span>
-          </button>
-          <input
-            ref={fileInputRef}
-            className="hiddenInput"
-            type="file"
-            accept=".txt,.md,.pdf,.docx,image/png,image/jpeg,image/webp"
-            onChange={uploadDocument}
-          />
-          <textarea
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                sendMessage(event);
-              }
-            }}
-            placeholder="Nhập câu hỏi IELTS..."
-            rows={1}
-          />
-          <button className="sendButton" type="submit" disabled={isSending || isUploading || !input.trim()}>
-            <Send size={18} />
-            {isSending ? "Đang gửi" : "Gửi"}
-          </button>
+          {pendingFiles.length > 0 && (
+            <div className="pendingAttachments" aria-label="Tệp đính kèm đang chờ gửi">
+              {pendingFiles.map((item) => (
+                <AttachmentCard
+                  key={item.id}
+                  attachment={item}
+                  onRemove={() => setPendingFiles((current) => current.filter((file) => file.id !== item.id))}
+                />
+              ))}
+            </div>
+          )}
+          <div className="composerControls">
+            <button
+              className="composerIconButton"
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={isUploading || isSending}
+              title="Đính kèm tệp"
+              aria-label="Đính kèm tệp"
+            >
+              <Paperclip size={19} />
+            </button>
+            <input
+              ref={fileInputRef}
+              className="hiddenInput"
+              type="file"
+              multiple
+              accept=".txt,.md,.pdf,.docx,image/png,image/jpeg,image/webp"
+              onChange={selectFiles}
+            />
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  sendMessage(event);
+                }
+              }}
+              placeholder="Nhập câu hỏi IELTS..."
+              rows={1}
+            />
+            <button
+              className="sendButton"
+              type="submit"
+              disabled={isSending || isUploading || (!input.trim() && !pendingFiles.length)}
+              title={isSending || isUploading ? "Đang xử lý" : "Gửi"}
+              aria-label={isSending || isUploading ? "Đang xử lý" : "Gửi"}
+            >
+              <Send size={18} />
+            </button>
+          </div>
         </form>
       </section>
     </main>

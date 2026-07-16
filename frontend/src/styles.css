@@ -336,6 +336,10 @@ p {
   background: #ffffff;
 }
 
+.attachmentCard.queued {
+  background: #f8fafc;
+}
+
 .attachmentCard.uploading {
   border-color: #99d6cd;
   background: #f0fdfa;
@@ -396,6 +400,31 @@ p {
 
 .attachmentCard.error .attachmentState {
   color: #d92d20;
+}
+
+.attachmentRemoveButton {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: #667085;
+  background: transparent;
+  cursor: pointer;
+}
+
+.attachmentRemoveButton:hover {
+  color: #172033;
+  background: #e4e8ef;
+}
+
+.messageAttachments {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 @keyframes typingPulse {
@@ -511,22 +540,45 @@ details p {
 
 .composer {
   display: flex;
-  align-items: flex-end;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   padding: 16px;
   border-top: 1px solid #e4e8ef;
   background: #fbfcfe;
 }
 
-.composer .composerIconButton,
-.composer .sendButton {
+.pendingAttachments {
+  width: 100%;
+  display: flex;
+  gap: 8px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+}
+
+.pendingAttachments .attachmentCard {
+  width: 290px;
+  min-width: 240px;
+  flex: 0 0 auto;
+}
+
+.composerControls {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  width: 100%;
+}
+
+.composerControls .composerIconButton,
+.composerControls .sendButton {
   height: 46px;
   min-height: 46px;
+  width: 46px;
+  min-width: 46px;
+  padding: 0;
 }
 
 .composerIconButton {
   flex: 0 0 auto;
-  min-width: 74px;
   color: #0f766e;
   background: #dff7f3;
   border: 1px solid #b9ebe4;
@@ -566,15 +618,21 @@ textarea:focus {
     flex-direction: column;
   }
 
-  .actions,
-  .sendButton {
+  .actions {
     width: 100%;
   }
 
-  .iconButton,
-  .composerIconButton,
-  .sendButton {
+  .iconButton {
     width: 100%;
+  }
+
+  .composerControls {
+    align-items: flex-end;
+  }
+
+  .composerControls .composerIconButton,
+  .composerControls .sendButton {
+    width: 46px;
   }
 
   .bubble {
