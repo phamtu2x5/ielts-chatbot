@@ -7,6 +7,8 @@ dist/
 .vite/
 backend/uploads/
 backend/data/
+extraction_regression_output/
+extraction-regression-debug-*.zip
 *.log
 .DS_Store
 PROJECT_HANDOFF.md

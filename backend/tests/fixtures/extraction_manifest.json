@@ -1,0 +1,230 @@
+{
+  "schema_version": "1.0.0",
+  "description": "Temporary ground truth for the Colab extraction regression corpus.",
+  "documents": [
+    {
+      "filename": "IZONE _ IELTS READING TEST 2.pdf",
+      "sha256": "06a2f8135f42060acb25871011164b6da9353cae0f13f42636e7b63c0017806f",
+      "mime_type": "application/pdf",
+      "kind": "ielts_reading",
+      "expected": {
+        "page_count": 6,
+        "reading": {
+          "passages": [
+            {
+              "number": 1,
+              "title": "Make That Wine!",
+              "question_groups": [[1, 4], [5, 10], [11, 13]]
+            },
+            {
+              "number": 2,
+              "title": "That Vision Thing",
+              "question_groups": [[14, 17], [18, 23], [24, 26]]
+            },
+            {
+              "number": 3,
+              "title": "Destination Mars",
+              "question_groups": [[27, 30], [31, 35], [36, 40]]
+            }
+          ],
+          "covered_question_numbers": {"start": 1, "end": 40},
+          "forbidden_titles": ["Cheers!", "Choose NO MORE", "Questions"],
+          "visuals": [
+            {"type": "table", "question_range": [5, 10], "min_columns": 2, "min_rows": 2},
+            {"type": "flowchart", "question_range": [18, 23], "min_nodes": 6, "min_edges": 5},
+            {"type": "table", "question_range": [31, 35], "min_columns": 2, "min_rows": 2}
+          ]
+        }
+      }
+    },
+    {
+      "filename": "IZONE _ IELTS READING TEST 4.pdf",
+      "sha256": "ffcacec17d45320ac5e63cc0c33138bf6b9dc1f98fd15467603759ad32cde901",
+      "mime_type": "application/pdf",
+      "kind": "ielts_reading",
+      "expected": {
+        "page_count": 8,
+        "reading": {
+          "passages": [
+            {
+              "number": 1,
+              "title": "Tackling Obesity in the Western World",
+              "question_groups": [[1, 8], [9, 13]]
+            },
+            {
+              "number": 2,
+              "title": "Wheel of Fortune",
+              "question_groups": [[14, 21], [22, 25], [26, 27]]
+            },
+            {
+              "number": 3,
+              "title": null,
+              "question_groups": [[28, 29], [30, 32], [33, 34], [35, 39], [40, 40]]
+            }
+          ],
+          "covered_question_numbers": {"start": 1, "end": 40},
+          "forbidden_titles": ["Western World", "Fortune", "Professor Hans Eysenck", "ONE OR TWO"]
+        }
+      }
+    },
+    {
+      "filename": "IZONE _ IELTS READING TEST 6.pdf",
+      "sha256": "8b183cb6b6424cb105f1b507c7bdcabd31a7e69d7fd6cbf0b87295d9ba8b8bec",
+      "mime_type": "application/pdf",
+      "kind": "ielts_reading",
+      "expected": {
+        "page_count": 8,
+        "reading": {
+          "passages": [
+            {
+              "number": 1,
+              "title": "The Great Australian Fence",
+              "question_groups": [[1, 4], [5, 11], [12, 13]]
+            },
+            {
+              "number": 2,
+              "title": "IT’S ECO-LOGICAL",
+              "question_groups": [[14, 19], [20, 22], [23, 24], [25, 27]]
+            },
+            {
+              "number": 3,
+              "title": "Striking the right note",
+              "question_groups": [[28, 35], [36, 40]]
+            }
+          ],
+          "covered_question_numbers": {"start": 1, "end": 40},
+          "forbidden_titles": ["Ecotourism Society", "Amanda", "San", "NOTES"]
+        }
+      }
+    },
+    {
+      "filename": "IZONE _ IELTS READING TEST 8.pdf",
+      "sha256": "3d0e576098abdd80a09b7d857d9eee16c1d12411881898d62cb4aee504f51216",
+      "mime_type": "application/pdf",
+      "kind": "ielts_reading",
+      "expected": {
+        "page_count": 6,
+        "reading": {
+          "passages": [
+            {
+              "number": 1,
+              "title": "{Snow-makers}",
+              "question_groups": [[1, 5], [6, 8], [9, 13]]
+            },
+            {
+              "number": 2,
+              "title": "Why are so few tigers man-eaters?",
+              "question_groups": [[14, 18], [19, 23], [24, 26]]
+            },
+            {
+              "number": 3,
+              "title": "Keep taking the tablets",
+              "question_groups": [[27, 32], [33, 37], [38, 40]]
+            }
+          ],
+          "covered_question_numbers": {"start": 1, "end": 40},
+          "forbidden_titles": ["READING TEST", "Bandhavgarh National Park", "Ancient Egyptian"],
+          "visuals": [
+            {
+              "type": "diagram",
+              "question_range": [6, 8],
+              "expected_status": "unsupported",
+              "reason": "Diagram labels are retained for later visual-structure implementation."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "filename": "IZONE_ IELTS READING TEST 11.pdf",
+      "sha256": "e51f3bb2059ca832b6108d5c100ded9f69a3beb89b03f568e12bb91daaa6ffef",
+      "mime_type": "application/pdf",
+      "kind": "ielts_reading",
+      "expected": {
+        "page_count": 6,
+        "reading": {
+          "passages": [
+            {
+              "number": 1,
+              "title": "Green virtues of green sand",
+              "question_groups": [[1, 10], [11, 14]]
+            },
+            {
+              "number": 2,
+              "title": "NATURAL CHOICE Coffee and chocolate",
+              "question_groups": [[15, 19], [20, 23], [24, 27]]
+            },
+            {
+              "number": 3,
+              "title": "Painters of time",
+              "question_groups": [[28, 33], [34, 37], [38, 40]]
+            }
+          ],
+          "covered_question_numbers": {"start": 1, "end": 40},
+          "forbidden_titles": ["Leighton Buzzard", "Costa Rica.", "Australia.", "New"],
+          "visuals": [
+            {"type": "flowchart", "question_range": [34, 37], "min_nodes": 4, "min_edges": 3}
+          ]
+        }
+      }
+    },
+    {
+      "filename": "IELTS Task 1 Essay.pdf",
+      "sha256": "082cf306bc1fc340bbdf4854d803570e378603c3d4d25be0204c31394a725b7d",
+      "mime_type": "application/pdf",
+      "kind": "ielts_writing_collection",
+      "expected": {
+        "page_count": 7,
+        "writing_collection": {
+          "task_count": 7,
+          "sample_answer_count": 7,
+          "task_titles": [
+            "IELTS Task 1 Essay: The World’s Forests",
+            "IELTS Essay Task 1: Age Groups and Cinema Attendance",
+            "Map of a Park",
+            "IELTS Task 1 Essay: Internet Use",
+            "IELTS Task 1 Essay: International Students in Canada and the USA",
+            null,
+            "IELTS Task 1 Essay: British Emigration"
+          ],
+          "visual_types": [
+            "pie_chart",
+            "line_chart",
+            "map",
+            "combined_bar_pie_chart",
+            "table",
+            "line_chart",
+            "bar_chart"
+          ]
+        }
+      }
+    },
+    {
+      "filename": "Screenshot 2026-07-11 at 15.26.21.png",
+      "sha256": "c94d416636fa4f5a4689f6acfe8c43bcb6c0c561f9abcd8bea4704b2e815577f",
+      "mime_type": "image/png",
+      "kind": "ielts_writing_task_1_image",
+      "expected": {
+        "page_count": 1,
+        "writing_task_1": {
+          "document_type": "ielts_writing_task_1",
+          "task_type": "academic_task_1_table",
+          "table": {
+            "columns": [
+              "Country",
+              "Internet Access 2019 (%)",
+              "Internet Access 2024 (%)",
+              "Smartphone Ownership 2019 (%)",
+              "Smartphone Ownership 2024 (%)"
+            ],
+            "rows": [
+              ["A", 78, 96, 82, 99],
+              ["B", 61, 89, 67, 94],
+              ["C", 42, 75, 48, 83]
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
