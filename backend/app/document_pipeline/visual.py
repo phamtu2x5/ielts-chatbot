@@ -68,6 +68,53 @@ class _SpatialOCRLine:
         return max(1.0, self.bbox[3] - self.bbox[1])
 
 
+def _flat_bbox(value: Any) -> list[float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    if all(isinstance(item, (int, float)) for item in value[:4]) and len(value) >= 4:
+        x1, y1, x2, y2 = (float(item) for item in value[:4])
+        return [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+    points = [point for point in value if isinstance(point, (list, tuple)) and len(point) >= 2]
+    if not points:
+        return None
+    xs = [float(point[0]) for point in points]
+    ys = [float(point[1]) for point in points]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _spatial_line(item: dict[str, Any]) -> _SpatialOCRLine | None:
+    text = normalize_text(str(item.get("text") or ""))
+    bbox = _flat_bbox(item.get("bbox"))
+    if not text or bbox is None:
+        return None
+    return _SpatialOCRLine(
+        text=text,
+        confidence=max(0.0, min(1.0, float(item.get("confidence") or 0.0))),
+        bbox=bbox,
+    )
+
+
+def _center_inside(line: _SpatialOCRLine, bbox: list[float]) -> bool:
+    return bbox[0] <= line.center_x <= bbox[2] and bbox[1] <= line.center_y <= bbox[3]
+
+
+def _cluster_spatial_rows(lines: list[_SpatialOCRLine]) -> list[list[_SpatialOCRLine]]:
+    if not lines:
+        return []
+    tolerance = max(4.0, median(line.height for line in lines) * 0.65)
+    rows: list[list[_SpatialOCRLine]] = []
+    for line in sorted(lines, key=lambda item: (item.center_y, item.center_x)):
+        if not rows:
+            rows.append([line])
+            continue
+        row_center = sum(item.center_y for item in rows[-1]) / len(rows[-1])
+        if abs(line.center_y - row_center) <= tolerance:
+            rows[-1].append(line)
+        else:
+            rows.append([line])
+    return rows
+
+
 class WritingTaskTableParser:
     """Lightweight parser for OCR text from IELTS Academic Task 1 table prompts."""
 
@@ -197,47 +244,16 @@ class WritingTaskTableParser:
         return {"columns": columns, "rows": rows}
 
     def _cluster_rows(self, lines: list[_SpatialOCRLine]) -> list[list[_SpatialOCRLine]]:
-        if not lines:
-            return []
-        tolerance = max(4.0, median(line.height for line in lines) * 0.65)
-        rows: list[list[_SpatialOCRLine]] = []
-        for line in sorted(lines, key=lambda item: (item.center_y, item.center_x)):
-            if not rows:
-                rows.append([line])
-                continue
-            row_center = sum(item.center_y for item in rows[-1]) / len(rows[-1])
-            if abs(line.center_y - row_center) <= tolerance:
-                rows[-1].append(line)
-            else:
-                rows.append([line])
-        return rows
+        return _cluster_spatial_rows(lines)
 
     def _spatial_line(self, item: dict[str, Any]) -> _SpatialOCRLine | None:
-        text = normalize_text(str(item.get("text") or ""))
-        bbox = self._flat_bbox(item.get("bbox"))
-        if not text or bbox is None:
-            return None
-        return _SpatialOCRLine(
-            text=text,
-            confidence=max(0.0, min(1.0, float(item.get("confidence") or 0.0))),
-            bbox=bbox,
-        )
+        return _spatial_line(item)
 
     def _flat_bbox(self, value: Any) -> list[float] | None:
-        if not isinstance(value, (list, tuple)) or len(value) < 2:
-            return None
-        if all(isinstance(item, (int, float)) for item in value[:4]) and len(value) >= 4:
-            x1, y1, x2, y2 = (float(item) for item in value[:4])
-            return [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
-        points = [point for point in value if isinstance(point, (list, tuple)) and len(point) >= 2]
-        if not points:
-            return None
-        xs = [float(point[0]) for point in points]
-        ys = [float(point[1]) for point in points]
-        return [min(xs), min(ys), max(xs), max(ys)]
+        return _flat_bbox(value)
 
     def _center_inside(self, line: _SpatialOCRLine, bbox: list[float]) -> bool:
-        return bbox[0] <= line.center_x <= bbox[2] and bbox[1] <= line.center_y <= bbox[3]
+        return _center_inside(line, bbox)
 
     def _join_header_parts(self, parts: list[tuple[float, str]]) -> str:
         values = []
@@ -358,7 +374,7 @@ class WritingTaskTableParser:
 
 
 class IELTSQuestionVisualParser:
-    """Extracts structured visual placeholders from IELTS question-group text.
+    """Extracts structured visuals from spatial OCR, with a text-only fallback.
 
     This parser is intentionally conservative. When table/flowchart structure
     cannot be inferred from text order, it records the known range, blanks and
@@ -373,12 +389,273 @@ class IELTSQuestionVisualParser:
         question_type: str | None,
         page_numbers: list[int],
         source_element_ids: list[str],
+        spatial_pages: list[dict[str, Any]] | None = None,
     ) -> ParsedQuestionVisual | None:
+        spatial = self._parse_spatial_visual(
+            text,
+            question_start,
+            question_end,
+            question_type,
+            source_element_ids,
+            spatial_pages or [],
+        )
+        if spatial:
+            return spatial
         if question_type == "table_completion":
             return self._parse_table(text, question_start, question_end, page_numbers, source_element_ids)
         if question_type == "flowchart_completion":
             return self._parse_flowchart(text, question_start, question_end, page_numbers, source_element_ids)
         return None
+
+    def _parse_spatial_visual(
+        self,
+        text: str,
+        question_start: int,
+        question_end: int,
+        question_type: str | None,
+        source_element_ids: list[str],
+        spatial_pages: list[dict[str, Any]],
+    ) -> ParsedQuestionVisual | None:
+        if question_type != "flowchart_completion":
+            table_candidate = self._best_region_candidate(
+                spatial_pages,
+                "table",
+                question_start,
+                question_end,
+            )
+            if table_candidate:
+                table = self._reconstruct_spatial_table(
+                    table_candidate,
+                    text,
+                    question_start,
+                    question_end,
+                    source_element_ids,
+                )
+                if table:
+                    return ParsedQuestionVisual(
+                        visual_type="table",
+                        element_id=f"visual-table-{question_start}-{question_end}",
+                        payload=table,
+                        display_text=self._table_markdown(table),
+                        confidence=float(table["confidence"]),
+                    )
+
+        if question_type == "flowchart_completion":
+            figure_candidate = self._best_region_candidate(
+                spatial_pages,
+                "figure",
+                question_start,
+                question_end,
+            )
+            if figure_candidate:
+                flowchart = self._reconstruct_spatial_flowchart(
+                    figure_candidate,
+                    text,
+                    question_start,
+                    question_end,
+                    source_element_ids,
+                )
+                if flowchart:
+                    return ParsedQuestionVisual(
+                        visual_type="flowchart",
+                        element_id=f"visual-flowchart-{question_start}-{question_end}",
+                        payload=flowchart,
+                        display_text=self._flowchart_text(flowchart),
+                        confidence=float(flowchart["confidence"]),
+                    )
+        return None
+
+    def _best_region_candidate(
+        self,
+        spatial_pages: list[dict[str, Any]],
+        region_type: str,
+        question_start: int,
+        question_end: int,
+    ) -> dict[str, Any] | None:
+        expected = set(range(question_start, question_end + 1))
+        candidates = []
+        for page in spatial_pages:
+            lines = [line for line in (_spatial_line(item) for item in page.get("ocr_lines") or []) if line]
+            for region in page.get("layout_regions") or []:
+                normalized_type = str(region.get("type") or "").strip().lower().replace(" ", "_")
+                if normalized_type != region_type:
+                    continue
+                bbox = _flat_bbox(region.get("bbox"))
+                if bbox is None:
+                    continue
+                region_lines = [line for line in lines if _center_inside(line, bbox)]
+                matched = self._question_numbers(" ".join(line.text for line in region_lines), expected)
+                if not matched:
+                    continue
+                candidates.append(
+                    {
+                        "page": int(page.get("page") or 0),
+                        "bbox": bbox,
+                        "lines": region_lines,
+                        "matched_questions": matched,
+                        "layout_confidence": float(region.get("confidence") or 0.0),
+                    }
+                )
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda item: (
+                len(item["matched_questions"]) / max(1, len(expected)),
+                len(item["matched_questions"]),
+                item["layout_confidence"],
+                len(item["lines"]),
+            ),
+        )
+
+    def _reconstruct_spatial_table(
+        self,
+        candidate: dict[str, Any],
+        raw_text: str,
+        question_start: int,
+        question_end: int,
+        source_element_ids: list[str],
+    ) -> dict[str, Any] | None:
+        blank_numbers = list(range(question_start, question_end + 1))
+        expected = set(blank_numbers)
+        clustered_rows = _cluster_spatial_rows(candidate["lines"])
+        usable_rows = [row for row in clustered_rows if 2 <= len(row) <= 8]
+        if len(usable_rows) < 2:
+            return None
+
+        width_counts = Counter(len(row) for row in usable_rows)
+        column_count = max(width_counts, key=lambda width: (width_counts[width], width))
+        anchor_rows = [sorted(row, key=lambda line: line.center_x) for row in usable_rows if len(row) == column_count]
+        if not anchor_rows:
+            return None
+        column_centers = [median(row[index].center_x for row in anchor_rows) for index in range(column_count)]
+
+        spatial_rows: list[list[str]] = []
+        row_numbers: list[set[int]] = []
+        for row in clustered_rows:
+            cells: list[list[_SpatialOCRLine]] = [[] for _ in column_centers]
+            for line in sorted(row, key=lambda item: item.center_x):
+                column_index = min(
+                    range(len(column_centers)),
+                    key=lambda index: abs(line.center_x - column_centers[index]),
+                )
+                cells[column_index].append(line)
+            values = [normalize_text(" ".join(line.text for line in cell)) for cell in cells]
+            if sum(bool(value) for value in values) < 2:
+                continue
+            spatial_rows.append(values)
+            row_numbers.append(self._question_numbers(" ".join(values), expected))
+
+        first_data_row = next((index for index, numbers in enumerate(row_numbers) if numbers), None)
+        if first_data_row is None or len(spatial_rows) - first_data_row < 2:
+            return None
+
+        header_rows = spatial_rows[:first_data_row]
+        columns = []
+        for column_index in range(column_count):
+            parts = [row[column_index] for row in header_rows if row[column_index]]
+            columns.append(normalize_text(" ".join(dict.fromkeys(parts))) or f"Column {column_index + 1}")
+        rows = spatial_rows[first_data_row:]
+        matched = set().union(*row_numbers[first_data_row:])
+        coverage = len(matched) / max(1, len(expected))
+        ocr_confidence = sum(line.confidence for line in candidate["lines"]) / max(1, len(candidate["lines"]))
+        confidence = min(candidate["layout_confidence"], ocr_confidence) * (0.75 + 0.25 * coverage)
+        return {
+            "type": "table",
+            "question_range": [question_start, question_end],
+            "columns": columns,
+            "rows": rows,
+            "blank_question_numbers": blank_numbers,
+            "bbox": candidate["bbox"],
+            "source": "doclayout_yolo+rapidocr_boxes",
+            "confidence": round(confidence, 4),
+            "raw_text": raw_text,
+            "page_numbers": [candidate["page"]],
+            "source_element_ids": source_element_ids,
+        }
+
+    def _reconstruct_spatial_flowchart(
+        self,
+        candidate: dict[str, Any],
+        raw_text: str,
+        question_start: int,
+        question_end: int,
+        source_element_ids: list[str],
+    ) -> dict[str, Any] | None:
+        blank_numbers = list(range(question_start, question_end + 1))
+        expected = set(blank_numbers)
+        groups = self._cluster_flow_nodes(candidate["lines"])
+        nodes = []
+        matched = set()
+        for index, group in enumerate(groups, 1):
+            ordered = sorted(group, key=lambda line: (line.center_y, line.center_x))
+            text = normalize_text(" ".join(line.text for line in ordered))
+            numbers = sorted(self._question_numbers(text, expected))
+            matched.update(numbers)
+            nodes.append(
+                {
+                    "id": f"node-{index}",
+                    "text": text,
+                    "question_number": numbers[0] if len(numbers) == 1 else None,
+                    "question_numbers": numbers,
+                    "bbox": self._union_bbox([line.bbox for line in ordered]),
+                }
+            )
+        if len(nodes) < 2 or not matched:
+            return None
+        ocr_confidence = sum(line.confidence for line in candidate["lines"]) / max(1, len(candidate["lines"]))
+        confidence = min(candidate["layout_confidence"], ocr_confidence) * 0.6
+        return {
+            "type": "flowchart",
+            "question_range": [question_start, question_end],
+            "nodes": nodes,
+            "edges": [],
+            "blank_question_numbers": blank_numbers,
+            "bbox": candidate["bbox"],
+            "source": "doclayout_yolo+rapidocr_boxes",
+            "confidence": round(confidence, 4),
+            "edge_detection": "not_available",
+            "raw_text": raw_text,
+            "page_numbers": [candidate["page"]],
+            "source_element_ids": source_element_ids,
+        }
+
+    def _cluster_flow_nodes(self, lines: list[_SpatialOCRLine]) -> list[list[_SpatialOCRLine]]:
+        if not lines:
+            return []
+        max_gap = median(line.height for line in lines) * 0.9
+        groups: list[list[_SpatialOCRLine]] = []
+        for line in sorted(lines, key=lambda item: (item.bbox[1], item.bbox[0])):
+            target = None
+            target_gap = None
+            for group in groups:
+                bbox = self._union_bbox([item.bbox for item in group])
+                horizontal_overlap = max(0.0, min(line.bbox[2], bbox[2]) - max(line.bbox[0], bbox[0]))
+                overlap_ratio = horizontal_overlap / max(1.0, min(line.bbox[2] - line.bbox[0], bbox[2] - bbox[0]))
+                vertical_gap = max(0.0, line.bbox[1] - bbox[3], bbox[1] - line.bbox[3])
+                if overlap_ratio >= 0.25 and vertical_gap <= max_gap and (target_gap is None or vertical_gap < target_gap):
+                    target = group
+                    target_gap = vertical_gap
+            if target is None:
+                groups.append([line])
+            else:
+                target.append(line)
+        return sorted(groups, key=lambda group: (min(line.bbox[1] for line in group), min(line.bbox[0] for line in group)))
+
+    def _question_numbers(self, text: str, expected: set[int]) -> set[int]:
+        return {
+            number
+            for number in expected
+            if re.search(rf"(?<!\d){number}(?!\d)", text)
+        }
+
+    def _union_bbox(self, boxes: list[list[float]]) -> list[float]:
+        return [
+            min(box[0] for box in boxes),
+            min(box[1] for box in boxes),
+            max(box[2] for box in boxes),
+            max(box[3] for box in boxes),
+        ]
 
     def _parse_table(
         self,
@@ -521,7 +798,12 @@ class IELTSQuestionVisualParser:
     def _flowchart_text(self, flowchart: dict[str, Any]) -> str:
         lines = [f"Flowchart Questions {flowchart['question_range'][0]}-{flowchart['question_range'][1]}"]
         for node in flowchart.get("nodes") or []:
-            label = f"Question {node['question_number']} blank" if node.get("question_number") else node.get("text", "")
+            label = node.get("text", "")
+            numbers = node.get("question_numbers") or (
+                [node["question_number"]] if node.get("question_number") else []
+            )
+            if numbers:
+                label = f"{label} [blanks: {', '.join(str(number) for number in numbers)}]".strip()
             lines.append(f"- {node['id']}: {label}")
         for edge in flowchart.get("edges") or []:
             lines.append(f"- edge: {edge['from']} -> {edge['to']}")

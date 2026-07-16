@@ -166,7 +166,7 @@ class IELTSStructureParser:
             return structured
 
         full_text, spans = self._linearize(document)
-        parsed_groups = self._dedupe_groups(self._parse_question_groups(full_text, spans))
+        parsed_groups = self._dedupe_groups(self._parse_question_groups(document, full_text, spans))
         passages = self._assign_passages(document, full_text, spans, parsed_groups)
         outline = self._build_outline(document, passages)
         diagnostics = self._diagnostics(passages)
@@ -205,7 +205,12 @@ class IELTSStructureParser:
             offset += 1
         return "".join(parts).strip(), spans
 
-    def _parse_question_groups(self, full_text: str, spans: list[_Span]) -> list[_ParsedGroup]:
+    def _parse_question_groups(
+        self,
+        document: ProcessedDocument,
+        full_text: str,
+        spans: list[_Span],
+    ) -> list[_ParsedGroup]:
         headers = list(QUESTION_HEADER_RE.finditer(full_text))
         groups: list[_ParsedGroup] = []
         for index, header in enumerate(headers):
@@ -222,7 +227,15 @@ class IELTSStructureParser:
             element_ids, pages = self._span_metadata(spans, header.start(), logical_end)
             questions = self._parse_questions(raw_text, start, end, question_type, element_ids, pages)
             text = self._group_display_text(raw_text, instructions, questions)
-            visual = self.visual_parser.parse(raw_section, start, end, question_type, pages, element_ids)
+            visual = self.visual_parser.parse(
+                raw_section,
+                start,
+                end,
+                question_type,
+                pages,
+                element_ids,
+                spatial_pages=self._spatial_pages(document, pages),
+            )
             groups.append(
                 _ParsedGroup(
                     start_offset=header.start(),
@@ -242,6 +255,18 @@ class IELTSStructureParser:
                 )
             )
         return groups
+
+    def _spatial_pages(self, document: ProcessedDocument, page_numbers: list[int]) -> list[dict[str, Any]]:
+        selected = set(page_numbers)
+        return [
+            {
+                "page": page.page_number,
+                "layout_regions": page.metadata.get("layout_regions") or [],
+                "ocr_lines": (page.metadata.get("ocr_metadata") or {}).get("lines") or [],
+            }
+            for page in document.pages
+            if page.page_number in selected
+        ]
 
     def _dedupe_groups(self, groups: list[_ParsedGroup]) -> list[_ParsedGroup]:
         selected: dict[tuple[int, int], _ParsedGroup] = {}
@@ -1060,7 +1085,12 @@ class StructuredChunker:
                     f"Flowchart Questions {visual['question_range'][0]}-{visual['question_range'][1]}"
                 ]
                 for node in nodes:
-                    label = f"Question {node['question_number']} blank" if node.get("question_number") else node.get("text", "")
+                    label = node.get("text", "")
+                    numbers = node.get("question_numbers") or (
+                        [node["question_number"]] if node.get("question_number") else []
+                    )
+                    if numbers:
+                        label = f"{label} [blanks: {', '.join(str(number) for number in numbers)}]".strip()
                     lines.append(f"- {node['id']}: {label}")
                 for edge in edges:
                     lines.append(f"- edge: {edge['from']} -> {edge['to']}")

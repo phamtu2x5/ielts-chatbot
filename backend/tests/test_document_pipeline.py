@@ -22,7 +22,7 @@ from app.document_pipeline.models import DocumentElement, ProcessedDocument, Pro
 from app.document_pipeline.ocr import OCRProcessor, OCRResult
 from app.document_pipeline.reconciliation import NativeOCRReconciler
 from app.document_pipeline.routing import FileRouter
-from app.document_pipeline.visual import WritingTaskTableParser
+from app.document_pipeline.visual import IELTSQuestionVisualParser, WritingTaskTableParser
 
 
 def make_element(element_id: str, page: int, text: str, source: str = "native_pdf") -> DocumentElement:
@@ -287,6 +287,128 @@ class WritingVisualParserTests(unittest.TestCase):
         self.assertEqual(parsed.table["source"], "doclayout_yolo+rapidocr_boxes")
         self.assertIn("percentage of households", parsed.prompt["description"])
         self.assertIn("main features", parsed.prompt["instruction"])
+
+
+class PDFSpatialVisualParserTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parser = IELTSQuestionVisualParser()
+
+    def _line(self, text: str, x: int, y: int, width: int = 150) -> dict:
+        return {
+            "text": text,
+            "confidence": 0.96,
+            "bbox": [[x, y], [x + width, y], [x + width, y + 20], [x, y + 20]],
+        }
+
+    def test_pdf_table_uses_layout_region_and_ocr_line_boxes(self) -> None:
+        lines = [
+            self._line("Classification based on", 20, 20),
+            self._line("Associated fact", 220, 20),
+            self._line("Related example", 420, 20),
+            self._line("Colour", 20, 80),
+            self._line("Red wines use (5) in fermentation", 220, 80),
+            self._line("(6)", 420, 80),
+            self._line("grape species", 20, 140),
+            self._line("can be (7) or blended", 220, 140),
+            self._line("Cote Rotie wines", 420, 140),
+        ]
+        visual = self.parser.parse(
+            "Questions 5-10 Complete the table.",
+            5,
+            10,
+            "table_completion",
+            [2],
+            ["p2-e4"],
+            spatial_pages=[
+                {
+                    "page": 2,
+                    "ocr_lines": lines,
+                    "layout_regions": [
+                        {"type": "table", "confidence": 0.93, "bbox": [0, 0, 600, 220]},
+                    ],
+                }
+            ],
+        )
+
+        self.assertIsNotNone(visual)
+        self.assertEqual(visual.visual_type, "table")
+        self.assertEqual(
+            visual.payload["columns"],
+            ["Classification based on", "Associated fact", "Related example"],
+        )
+        self.assertEqual(len(visual.payload["rows"]), 2)
+        self.assertEqual(visual.payload["source"], "doclayout_yolo+rapidocr_boxes")
+        self.assertEqual(visual.payload["bbox"], [0.0, 0.0, 600.0, 220.0])
+
+    def test_spatial_table_can_override_non_table_instruction_type(self) -> None:
+        lines = [
+            self._line("Category", 20, 20, 250),
+            self._line("Example", 350, 20),
+            self._line("human attributes", 20, 80, 250),
+            self._line("Physical strength and (36)", 350, 80),
+            self._line("medical conditions", 20, 140, 250),
+            self._line("(37) and fungal attack", 350, 140),
+        ]
+        visual = self.parser.parse(
+            "Questions 36-40 Give TWO examples.",
+            36,
+            40,
+            "short_answer_examples",
+            [6],
+            ["p6-e6"],
+            spatial_pages=[
+                {
+                    "page": 6,
+                    "ocr_lines": lines,
+                    "layout_regions": [
+                        {"type": "table", "confidence": 0.91, "bbox": [0, 0, 600, 220]},
+                    ],
+                }
+            ],
+        )
+
+        self.assertIsNotNone(visual)
+        self.assertEqual(visual.visual_type, "table")
+        self.assertEqual(visual.payload["question_range"], [36, 40])
+
+    def test_pdf_flowchart_keeps_spatial_nodes_without_inventing_edges(self) -> None:
+        lines = [
+            self._line("manager having", 20, 20),
+            self._line("obtained (18)", 20, 50),
+            self._line("people greatly varied (19)", 20, 140),
+            self._line("playing with language", 250, 50),
+            self._line("(20) set of words", 470, 50),
+            self._line("obeyed only at (21)", 700, 80),
+            self._line("can cause lack of (22)", 700, 110),
+            self._line("want (23) payback", 300, 170),
+        ]
+        visual = self.parser.parse(
+            "Questions 18-23 Complete the flow chart.",
+            18,
+            23,
+            "flowchart_completion",
+            [4],
+            ["p4-e5"],
+            spatial_pages=[
+                {
+                    "page": 4,
+                    "ocr_lines": lines,
+                    "layout_regions": [
+                        {"type": "figure", "confidence": 0.92, "bbox": [0, 0, 900, 240]},
+                    ],
+                }
+            ],
+        )
+
+        self.assertIsNotNone(visual)
+        self.assertEqual(visual.visual_type, "flowchart")
+        self.assertTrue(any(node["question_numbers"] for node in visual.payload["nodes"]))
+        self.assertTrue(all(node["bbox"] for node in visual.payload["nodes"]))
+        self.assertEqual(visual.payload["edges"], [])
+        self.assertEqual(visual.payload["edge_detection"], "not_available")
+
+
+class WritingVisualParserAdditionalTests(unittest.TestCase):
 
     def test_writing_task_table_parser_extracts_rows_and_columns(self) -> None:
         text = (
@@ -636,6 +758,51 @@ class IELTSStructureTests(unittest.TestCase):
         self.assertEqual(table_chunk.metadata["table"]["columns"], ["Category", "Answer"])
         self.assertEqual(flowchart_chunk.metadata["flowchart"]["blank_question_numbers"], [3, 4])
         self.assertGreater(len(flowchart_chunk.metadata["flowchart"]["edges"]), 0)
+
+    def test_structure_parser_passes_pdf_spatial_context_to_visual_parser(self) -> None:
+        def line(text: str, x: int, y: int) -> dict:
+            return {
+                "text": text,
+                "confidence": 0.96,
+                "bbox": [[x, y], [x + 140, y], [x + 140, y + 20], [x, y + 20]],
+            }
+
+        text = (
+            "A Practice Passage\n"
+            "This passage explains several classifications and examples.\n"
+            "Questions 5-10 Complete the table. Choose NO MORE THAN TWO WORDS from the passage.\n"
+        )
+        page = ProcessedPage(
+            1,
+            "native_pdf_plus_ocr_reconciled",
+            0.95,
+            [make_element("p1-e1", 1, text)],
+            metadata={
+                "layout_regions": [{"type": "table", "confidence": 0.93, "bbox": [0, 0, 600, 220]}],
+                "ocr_metadata": {
+                    "lines": [
+                        line("Category", 20, 20),
+                        line("Fact", 220, 20),
+                        line("Example", 420, 20),
+                        line("Colour", 20, 80),
+                        line("uses (5)", 220, 80),
+                        line("(6)", 420, 80),
+                        line("Species", 20, 140),
+                        line("can be (7)", 220, 140),
+                        line("Example wine", 420, 140),
+                    ]
+                },
+            },
+        )
+        document = make_document([page])
+
+        structured = IELTSStructureParser(self.config).parse(document)
+        visual = structured.passages[0].question_groups[0].visual_element
+
+        self.assertIsNotNone(visual)
+        self.assertEqual(visual["source"], "doclayout_yolo+rapidocr_boxes")
+        self.assertEqual(visual["columns"], ["Category", "Fact", "Example"])
+        self.assertEqual(len(visual["rows"]), 2)
 
     def test_visual_question_group_keeps_low_confidence_fallback_when_layout_is_flat(self) -> None:
         text = (
