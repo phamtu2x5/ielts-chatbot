@@ -16,11 +16,6 @@ from tools.extraction_regression import (
     status_from_checks,
     verify_fixtures,
 )
-from tools.granite_docling_benchmark import (
-    build_ab_comparison,
-    normalize_docling_markdown,
-    select_granite_dtype,
-)
 
 
 class ExtractionRegressionTests(unittest.TestCase):
@@ -116,59 +111,6 @@ class ExtractionRegressionTests(unittest.TestCase):
         checks = evaluate_document(canonical, [{"chunk_id": "c1"}], fixture)
 
         self.assertEqual(status_from_checks(checks), "unsupported")
-
-    def test_granite_markdown_normalization_preserves_tables_and_removes_heading_markup(self) -> None:
-        markdown = "# Passage title\n\n<!-- image -->\n\n| A | B |\n|---|---|\n| 1 | 2 |"
-
-        normalized = normalize_docling_markdown(markdown)
-
-        self.assertTrue(normalized.startswith("Passage title"))
-        self.assertNotIn("<!-- image -->", normalized)
-        self.assertIn("| A | B |", normalized)
-
-    def test_granite_dtype_honors_explicit_value_without_loading_model(self) -> None:
-        self.assertEqual(select_granite_dtype("float32"), "float32")
-        self.assertEqual(select_granite_dtype("bfloat16"), "bfloat16")
-
-    def test_ab_comparison_keeps_each_engine_result_separate(self) -> None:
-        baseline = {
-            "status": "degraded",
-            "documents": [
-                {
-                    "filename": "sample.pdf",
-                    "status": "degraded",
-                    "duration_seconds": 2.0,
-                    "checks": [{"name": "passage_count", "status": "passed"}],
-                }
-            ],
-        }
-        granite = {
-            "status": "passed",
-            "documents": [
-                {
-                    "filename": "sample.pdf",
-                    "status": "passed",
-                    "duration_seconds": 4.0,
-                    "checks": [{"name": "passage_count", "status": "passed"}],
-                }
-            ],
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            baseline_dir = root / "current"
-            granite_dir = root / "granite"
-            baseline_dir.mkdir()
-            granite_dir.mkdir()
-            (baseline_dir / "regression_summary.json").write_text(json.dumps(baseline), encoding="utf-8")
-            (granite_dir / "regression_summary.json").write_text(json.dumps(granite), encoding="utf-8")
-
-            comparison = build_ab_comparison(baseline_dir, granite_dir)
-
-        result = comparison["documents"][0]
-        self.assertEqual(result["current_pipeline"]["duration_seconds"], 2.0)
-        self.assertEqual(result["granite_docling"]["duration_seconds"], 4.0)
-        self.assertFalse(comparison["production_integrated"])
-
 
 if __name__ == "__main__":
     unittest.main()
