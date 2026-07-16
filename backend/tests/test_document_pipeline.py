@@ -177,6 +177,70 @@ class DocLayoutDetectorTests(unittest.TestCase):
 
 
 class WritingVisualParserTests(unittest.TestCase):
+    def test_spatial_table_parser_uses_layout_region_and_ocr_boxes(self) -> None:
+        def line(text: str, x: int, y: int, width: int = 120) -> dict:
+            return {
+                "text": text,
+                "confidence": 0.98,
+                "bbox": [[x, y], [x + width, y], [x + width, y + 24], [x, y + 24]],
+            }
+
+        text = (
+            "You should spend about 20 minutes on this task.\n"
+            "The table below shows the percentage of households with internet access and smartphone ownership.\n"
+            "Summarise the information by selecting and reporting the main features.\n"
+            "Write at least 150 words."
+        )
+        ocr_lines = [
+            line("Country", 20, 320),
+            line("Internet Access", 190, 320, 150),
+            line("Internet Access", 390, 320, 150),
+            line("Smartphone Ownership", 570, 320, 180),
+            line("Smartphone Ownership", 770, 320, 180),
+            line("2019 (%)", 210, 360),
+            line("2024 (%)", 410, 360),
+            line("2019 (%)", 610, 360),
+            line("2024 (%)", 810, 360),
+            line("A", 30, 430, 30),
+            line("78", 220, 430, 40),
+            line("96", 420, 430, 40),
+            line("82", 620, 430, 40),
+            line("99", 820, 430, 40),
+            line("B", 30, 480, 30),
+            line("61", 220, 480, 40),
+            line("89", 420, 480, 40),
+            line("67", 620, 480, 40),
+            line("94", 820, 480, 40),
+            line("C", 30, 530, 30),
+            line("42", 220, 530, 40),
+            line("75", 420, 530, 40),
+            line("48", 620, 530, 40),
+            line("83", 820, 530, 40),
+        ]
+
+        parsed = WritingTaskTableParser().parse(
+            text,
+            ocr_lines=ocr_lines,
+            layout_regions=[{"type": "table", "confidence": 0.93, "bbox": [0, 300, 1000, 600]}],
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(
+            parsed.table["columns"],
+            [
+                "Country",
+                "Internet Access 2019 (%)",
+                "Internet Access 2024 (%)",
+                "Smartphone Ownership 2019 (%)",
+                "Smartphone Ownership 2024 (%)",
+            ],
+        )
+        self.assertEqual(parsed.table["rows"], [["A", 78, 96, 82, 99], ["B", 61, 89, 67, 94], ["C", 42, 75, 48, 83]])
+        self.assertEqual(parsed.table["source"], "doclayout_yolo+rapidocr_boxes")
+        self.assertIn("percentage of households", parsed.prompt["description"])
+        self.assertIn("main features", parsed.prompt["instruction"])
+
     def test_writing_task_table_parser_extracts_rows_and_columns(self) -> None:
         text = (
             "WRITING TASK 1 You should spend about 20 minutes on this task. "
@@ -194,6 +258,34 @@ class WritingVisualParserTests(unittest.TestCase):
         self.assertEqual(parsed.document_type, "ielts_writing_task_1")
         self.assertEqual(parsed.table["columns"][0], "Country")
         self.assertEqual(parsed.table["rows"], [["A", 78, 96, 82, 99], ["B", 61, 89, 67, 94], ["C", 42, 75, 48, 83]])
+
+    def test_spatial_table_supports_numeric_row_labels(self) -> None:
+        def line(text: str, x: int, y: int) -> dict:
+            return {
+                "text": text,
+                "confidence": 0.97,
+                "bbox": [[x, y], [x + 60, y], [x + 60, y + 20], [x, y + 20]],
+            }
+
+        parsed = WritingTaskTableParser().parse(
+            "The table below shows annual values. Summarise the information.",
+            ocr_lines=[
+                line("Year", 20, 100),
+                line("A", 220, 100),
+                line("B", 420, 100),
+                line("2019", 20, 160),
+                line("45", 220, 160),
+                line("60", 420, 160),
+                line("2024", 20, 210),
+                line("55", 220, 210),
+                line("70", 420, 210),
+            ],
+            layout_regions=[{"type": "table", "confidence": 0.9, "bbox": [0, 80, 500, 260]}],
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.table["rows"], [["2019", 45, 60], ["2024", 55, 70]])
 
     def test_writing_task_chunker_emits_prompt_table_and_rows(self) -> None:
         parser = WritingTaskTableParser()
@@ -250,6 +342,32 @@ class WritingVisualParserTests(unittest.TestCase):
         self.assertIn("table_row", [chunk.metadata["unit_type"] for chunk in chunks])
         self.assertEqual(chunks[1].metadata["table"]["rows"][1], ["B", 61, 89, 67, 94])
 
+    def test_writing_document_has_visual_structure_diagnostics(self) -> None:
+        table = {
+            "type": "table",
+            "columns": ["Country", "Value"],
+            "rows": [["A", 10]],
+            "confidence": 0.9,
+        }
+        document = ProcessedDocument(
+            document_id="writing-doc",
+            filename="writing.png",
+            mime_type="image/png",
+            parser_version="test",
+            metadata={
+                "document_type": "ielts_writing_task_1",
+                "task_type": "academic_task_1_table",
+                "visual_structure": {"prompt": {}, "visual_elements": [table]},
+            },
+            pages=[ProcessedPage(1, "image_ocr", 0.9, [])],
+        )
+
+        structured = IELTSStructureParser(DocumentPipelineConfig()).parse(document)
+
+        self.assertEqual(structured.outline["document_type"], "ielts_writing_task_1")
+        self.assertEqual(structured.diagnostics["visual_elements_found"], 1)
+        self.assertEqual(structured.diagnostics["tables_found"], 1)
+
 
 class IELTSStructureTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -297,6 +415,38 @@ class IELTSStructureTests(unittest.TestCase):
         self.assertEqual(structured.diagnostics["questions_found"], 8)
         self.assertEqual(structured.diagnostics["individual_questions_found"], 4)
         self.assertEqual(structured.diagnostics["missing_questions"], [])
+
+    def test_duplicate_question_group_does_not_leak_into_next_passage(self) -> None:
+        passage_one = "Make That Wine!\n" + "Wine production background. " * 30
+        questions = (
+            "Questions 11-13 Choose the correct letter, A, B, C, or D. "
+            "11. First item A one. B two. C three. D four. "
+            "12. Second item A one. B two. C three. D four. "
+            "13. Wine A popular. B discussed. C classified. D rationed."
+        )
+        passage_two = "That Vision Thing\n" + "Management and motivation are discussed here. " * 30
+        document = make_document(
+            [
+                ProcessedPage(
+                    1,
+                    "native_pdf_plus_ocr_reconciled",
+                    0.95,
+                    [
+                        make_element("p1-e1", 1, passage_one),
+                        make_element("p1-e2", 1, questions),
+                        make_element("p1-e3", 1, questions, source="pdf_page_ocr"),
+                        make_element("p1-e4", 1, passage_two),
+                        make_element("p1-e5", 1, "Questions 14-14 Answer the question. 14. What motivates staff?"),
+                    ],
+                )
+            ]
+        )
+
+        structured = IELTSStructureParser(self.config).parse(document)
+
+        self.assertEqual(len(structured.passages), 2)
+        self.assertEqual(structured.passages[1].title, "That Vision Thing")
+        self.assertNotIn("Wine A popular", structured.passages[1].text)
 
     def test_long_unpunctuated_passage_is_split_below_limit(self) -> None:
         passage = "Long Passage " + "word " * 700

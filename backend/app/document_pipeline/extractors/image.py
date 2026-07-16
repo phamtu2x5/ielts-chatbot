@@ -90,7 +90,11 @@ class ImageExtractor:
             )
         visual_parse_started = time.perf_counter()
         self._emit(progress, "visual_parse_started", page=1)
-        parsed_visual = self.visual_parser.parse(text)
+        parsed_visual = self.visual_parser.parse(
+            text,
+            ocr_lines=ocr_result.metadata.get("lines") or [],
+            layout_regions=layout_result.region_dicts(),
+        )
         visual_parse_seconds = self._elapsed(visual_parse_started)
         parsed_table = parsed_visual.table if parsed_visual else {}
         self._emit(
@@ -162,6 +166,7 @@ class ImageExtractor:
                         normalized_text=table_text,
                         source="image_ocr_structured",
                         confidence=ocr_result.confidence,
+                        bbox=parsed_visual.table.get("bbox") or None,
                         metadata={
                             "document_type": parsed_visual.document_type,
                             "task_type": parsed_visual.task_type,

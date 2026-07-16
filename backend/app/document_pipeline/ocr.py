@@ -103,6 +103,14 @@ class OCRProcessor:
             ),
             metadata={
                 "word_count": len(texts),
+                "lines": [
+                    {
+                        "text": text,
+                        "confidence": scores[index] if index < len(scores) else confidence,
+                        "bbox": boxes[index] if index < len(boxes) else None,
+                    }
+                    for index, text in enumerate(texts)
+                ],
                 "lang": self.config.ocr_lang,
                 "det_lang": self.config.ocr_det_lang,
                 "runtime": self.config.ocr_runtime,

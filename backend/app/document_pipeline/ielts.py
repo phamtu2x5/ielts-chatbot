@@ -160,6 +160,11 @@ class IELTSStructureParser:
         self.visual_parser = IELTSQuestionVisualParser()
 
     def parse(self, document: ProcessedDocument) -> IELTSDocument:
+        if document.metadata.get("document_type") == "ielts_writing_task_1":
+            structured = self._writing_structure(document)
+            document.metadata["ielts_structure"] = structured.to_dict()
+            return structured
+
         full_text, spans = self._linearize(document)
         parsed_groups = self._dedupe_groups(self._parse_question_groups(full_text, spans))
         passages = self._assign_passages(document, full_text, spans, parsed_groups)
@@ -248,13 +253,60 @@ class IELTSStructureParser:
                 continue
 
             winner = parsed if self._group_quality(parsed) > self._group_quality(existing) else existing
-            earliest = parsed if parsed.start_offset < existing.start_offset else existing
             selected[key] = _ParsedGroup(
-                start_offset=earliest.start_offset,
-                end_offset=earliest.end_offset,
+                start_offset=min(parsed.start_offset, existing.start_offset),
+                end_offset=max(parsed.end_offset, existing.end_offset),
                 group=winner.group,
             )
         return sorted(selected.values(), key=lambda item: item.start_offset)
+
+    def _writing_structure(self, document: ProcessedDocument) -> IELTSDocument:
+        visual_elements = document.metadata.get("visual_structure", {}).get("visual_elements") or []
+        outline = {
+            "document_type": document.metadata.get("document_type"),
+            "task_type": document.metadata.get("task_type"),
+            "filename": document.filename,
+            "pages": [page.page_number for page in document.pages],
+            "visual_elements": [
+                {
+                    "type": element.get("type"),
+                    "columns": len(element.get("columns") or []),
+                    "rows": len(element.get("rows") or []),
+                    "confidence": element.get("confidence"),
+                }
+                for element in visual_elements
+            ],
+        }
+        diagnostics = {
+            "passages_found": 0,
+            "question_groups_found": 0,
+            "questions_found": 0,
+            "individual_questions_found": 0,
+            "missing_questions": [],
+            "duplicate_questions": [],
+            "unassigned_questions": [],
+            "overlapping_question_groups": [],
+            "instruction_as_title": [],
+            "suspicious_boundaries": [],
+            "visual_elements_found": len(visual_elements),
+            "tables_found": sum(1 for element in visual_elements if element.get("type") == "table"),
+            "flowcharts_found": sum(1 for element in visual_elements if element.get("type") == "flowchart"),
+            "low_confidence_visual_elements": [
+                {
+                    "type": element.get("type"),
+                    "confidence": element.get("confidence"),
+                }
+                for element in visual_elements
+                if float(element.get("confidence") or 0.0) < 0.6
+            ],
+        }
+        return IELTSDocument(
+            document_id=document.document_id,
+            filename=document.filename,
+            passages=[],
+            outline=outline,
+            diagnostics=diagnostics,
+        )
 
     def _group_quality(self, parsed: _ParsedGroup) -> tuple[int, int, int]:
         group = parsed.group

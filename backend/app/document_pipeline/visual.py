@@ -1,5 +1,7 @@
 import re
+from collections import Counter
 from dataclasses import dataclass
+from statistics import median
 from typing import Any
 
 from .normalization import normalize_text
@@ -47,20 +49,49 @@ class ParsedQuestionVisual:
     confidence: float
 
 
+@dataclass
+class _SpatialOCRLine:
+    text: str
+    confidence: float
+    bbox: list[float]
+
+    @property
+    def center_x(self) -> float:
+        return (self.bbox[0] + self.bbox[2]) / 2
+
+    @property
+    def center_y(self) -> float:
+        return (self.bbox[1] + self.bbox[3]) / 2
+
+    @property
+    def height(self) -> float:
+        return max(1.0, self.bbox[3] - self.bbox[1])
+
+
 class WritingTaskTableParser:
     """Lightweight parser for OCR text from IELTS Academic Task 1 table prompts."""
 
-    def parse(self, text: str) -> ParsedWritingTable | None:
+    def parse(
+        self,
+        text: str,
+        ocr_lines: list[dict[str, Any]] | None = None,
+        layout_regions: list[dict[str, Any]] | None = None,
+    ) -> ParsedWritingTable | None:
         normalized = normalize_text(text)
         lowered = normalized.lower()
         if "table" not in lowered or not any(marker in lowered for marker in ["summarise", "summarize"]):
             return None
 
-        rows = self._parse_rows(normalized)
+        spatial_table = self._parse_spatial_table(ocr_lines or [], layout_regions or [])
+        rows = spatial_table.get("rows") if spatial_table else self._parse_rows(normalized)
         if len(rows) < 2:
             return None
 
-        columns = self._parse_columns(normalized, row_width=len(rows[0]) - 1)
+        columns = (
+            spatial_table.get("columns")
+            if spatial_table
+            else self._parse_columns(normalized, row_width=len(rows[0]) - 1)
+        )
         prompt = {
             "time_minutes": self._parse_int(r"spend\s+about\s+(\d+)\s+minutes", normalized),
             "minimum_words": self._parse_int(r"at\s+least\s+(\d+)\s+words", normalized),
@@ -71,9 +102,9 @@ class WritingTaskTableParser:
             "type": "table",
             "columns": columns,
             "rows": rows,
-            "bbox": [],
-            "source": "image_ocr",
-            "confidence": 0.0,
+            "bbox": spatial_table.get("bbox", []) if spatial_table else [],
+            "source": spatial_table.get("source", "image_ocr") if spatial_table else "image_ocr",
+            "confidence": spatial_table.get("confidence", 0.0) if spatial_table else 0.0,
         }
         return ParsedWritingTable(
             document_type="ielts_writing_task_1",
@@ -81,6 +112,140 @@ class WritingTaskTableParser:
             prompt=prompt,
             table=table,
         )
+
+    def _parse_spatial_table(
+        self,
+        raw_lines: list[dict[str, Any]],
+        layout_regions: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        lines = [line for line in (self._spatial_line(item) for item in raw_lines) if line]
+        table_regions = [
+            region
+            for region in layout_regions
+            if "table" in str(region.get("type", "")).lower() and self._flat_bbox(region.get("bbox"))
+        ]
+        candidates = []
+        for region in table_regions:
+            bbox = self._flat_bbox(region.get("bbox"))
+            assert bbox is not None
+            region_lines = [line for line in lines if self._center_inside(line, bbox)]
+            parsed = self._reconstruct_table(region_lines)
+            if not parsed:
+                continue
+            parsed.update(
+                {
+                    "bbox": bbox,
+                    "source": "doclayout_yolo+rapidocr_boxes",
+                    "confidence": min(
+                        float(region.get("confidence") or 0.0),
+                        sum(line.confidence for line in region_lines) / max(1, len(region_lines)),
+                    ),
+                }
+            )
+            candidates.append(parsed)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: len(item["rows"]) * len(item["columns"]))
+
+    def _reconstruct_table(self, lines: list[_SpatialOCRLine]) -> dict[str, Any] | None:
+        clustered_rows = self._cluster_rows(lines)
+        data_rows: list[tuple[int, str, list[tuple[_SpatialOCRLine, int | float]]]] = []
+        for row_index, row in enumerate(clustered_rows):
+            ordered = sorted(row, key=lambda item: item.center_x)
+            for split_index in range(1, len(ordered) - 1):
+                value_lines = ordered[split_index:]
+                if not all(self._is_number_token(line.text.strip()) for line in value_lines):
+                    continue
+                label = normalize_text(" ".join(line.text for line in ordered[:split_index]))
+                values = [(line, self._parse_number(line.text)) for line in value_lines]
+                if label and len(values) >= 2:
+                    data_rows.append((row_index, label, values))
+                    break
+        if len(data_rows) < 2:
+            return None
+
+        width_counts = Counter(len(values) for _, _, values in data_rows)
+        value_width = width_counts.most_common(1)[0][0]
+        data_rows = [row for row in data_rows if len(row[2]) == value_width]
+        if len(data_rows) < 2:
+            return None
+
+        value_centers = [
+            median(row[2][column][0].center_x for row in data_rows)
+            for column in range(value_width)
+        ]
+        label_centers = []
+        for row_index, _, values in data_rows:
+            first_value_x = values[0][0].bbox[0]
+            label_centers.extend(
+                line.center_x for line in clustered_rows[row_index] if line.bbox[2] < first_value_x
+            )
+        column_centers = [median(label_centers), *value_centers]
+
+        header_parts: list[list[tuple[float, str]]] = [[] for _ in column_centers]
+        first_data_row = min(row[0] for row in data_rows)
+        for row in clustered_rows[:first_data_row]:
+            for line in row:
+                column_index = min(
+                    range(len(column_centers)),
+                    key=lambda index: abs(line.center_x - column_centers[index]),
+                )
+                header_parts[column_index].append((line.center_y, line.text))
+        columns = [self._join_header_parts(parts) for parts in header_parts]
+        columns = [column or ("Label" if index == 0 else f"Value {index}") for index, column in enumerate(columns)]
+        rows = [[label, *[value for _, value in values]] for _, label, values in data_rows]
+        return {"columns": columns, "rows": rows}
+
+    def _cluster_rows(self, lines: list[_SpatialOCRLine]) -> list[list[_SpatialOCRLine]]:
+        if not lines:
+            return []
+        tolerance = max(4.0, median(line.height for line in lines) * 0.65)
+        rows: list[list[_SpatialOCRLine]] = []
+        for line in sorted(lines, key=lambda item: (item.center_y, item.center_x)):
+            if not rows:
+                rows.append([line])
+                continue
+            row_center = sum(item.center_y for item in rows[-1]) / len(rows[-1])
+            if abs(line.center_y - row_center) <= tolerance:
+                rows[-1].append(line)
+            else:
+                rows.append([line])
+        return rows
+
+    def _spatial_line(self, item: dict[str, Any]) -> _SpatialOCRLine | None:
+        text = normalize_text(str(item.get("text") or ""))
+        bbox = self._flat_bbox(item.get("bbox"))
+        if not text or bbox is None:
+            return None
+        return _SpatialOCRLine(
+            text=text,
+            confidence=max(0.0, min(1.0, float(item.get("confidence") or 0.0))),
+            bbox=bbox,
+        )
+
+    def _flat_bbox(self, value: Any) -> list[float] | None:
+        if not isinstance(value, (list, tuple)) or len(value) < 2:
+            return None
+        if all(isinstance(item, (int, float)) for item in value[:4]) and len(value) >= 4:
+            x1, y1, x2, y2 = (float(item) for item in value[:4])
+            return [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
+        points = [point for point in value if isinstance(point, (list, tuple)) and len(point) >= 2]
+        if not points:
+            return None
+        xs = [float(point[0]) for point in points]
+        ys = [float(point[1]) for point in points]
+        return [min(xs), min(ys), max(xs), max(ys)]
+
+    def _center_inside(self, line: _SpatialOCRLine, bbox: list[float]) -> bool:
+        return bbox[0] <= line.center_x <= bbox[2] and bbox[1] <= line.center_y <= bbox[3]
+
+    def _join_header_parts(self, parts: list[tuple[float, str]]) -> str:
+        values = []
+        for _, text in sorted(parts):
+            cleaned = normalize_text(text)
+            if cleaned and cleaned not in values:
+                values.append(cleaned)
+        return " ".join(values)
 
     def _parse_rows(self, text: str) -> list[list[Any]]:
         rows: list[list[Any]] = []
@@ -172,7 +337,7 @@ class WritingTaskTableParser:
         match = re.search(
             r"(The\s+table\s+below\s+shows.+?)(?=Summari[sz]e\s+the\s+information|Write\s+at\s+least|$)",
             text,
-            flags=re.IGNORECASE,
+            flags=re.IGNORECASE | re.DOTALL,
         )
         return self._clean_sentence(match.group(1)) if match else None
 
@@ -180,7 +345,7 @@ class WritingTaskTableParser:
         match = re.search(
             r"(Summari[sz]e\s+the\s+information.+?)(?=Write\s+at\s+least|$)",
             text,
-            flags=re.IGNORECASE,
+            flags=re.IGNORECASE | re.DOTALL,
         )
         return self._clean_sentence(match.group(1)) if match else None
 
