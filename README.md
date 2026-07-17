@@ -137,9 +137,6 @@ DOCUMENT_CONNECTOR_MIN_SPAN_RATIO=0.07
 DOCUMENT_CONNECTOR_DIRECTION_MIN_CONFIDENCE=0.55
 DOCUMENT_VISUAL_SPATIAL_ASSOCIATION_DISTANCE_RATIO=0.16
 DOCUMENT_VISUAL_DIRECTION_FORWARD_WEIGHT=0.15
-DOCUMENT_VISUAL_OCR_RETRY_ENABLE=true
-DOCUMENT_VISUAL_OCR_RETRY_SCALE=2.0
-DOCUMENT_VISUAL_OCR_RETRY_MAX_REGIONS=3
 OCR_ENGINE=rapidocr
 OCR_RUNTIME=torch
 OCR_DEVICE=cuda:0
@@ -168,12 +165,33 @@ The backend expects RapidOCR, CUDA-enabled PyTorch, and DocLayout-YOLO to be imp
 
 The document pipeline uses one OCR path by default: RapidOCR with PyTorch CUDA using PP-OCRv6 medium. DocLayout-YOLO is used only for visual region detection; it does not OCR text or parse table cells by itself. PP-StructureV3, PaddleOCR, Tesseract, and ONNX Runtime are not loaded in the streamlined Colab pipeline.
 
+The extraction baseline is frozen at parser version `1.10.0`. The corpus regression reached zero
+failed documents; isolated OCR ambiguity remains preserved as raw text with
+degraded visual-quality metadata instead of being repaired with document-specific
+rules. Reopen extraction work only for a reproducible issue across multiple
+documents or a production-blocking failure.
+
 ## Tests
 
 ```bash
 python -m unittest discover -s backend/tests -v
 cd frontend && npm run build
 ```
+
+To collect end-to-end answers and RAG diagnostics for manual review, start the
+backend with all models warmed up, then run:
+
+```bash
+python backend/tools/chat_evaluation.py --base-url http://127.0.0.1:2222
+```
+
+The runner verifies and uploads all seven files in `docs/`, sends the 56 questions
+from `backend/evaluation/chat_corpus_v2.json`, and writes the raw answers, routes,
+sources and debug metadata under `backend/data/chat_evaluation/`. It does not
+score answer quality; the report is reviewed manually. Use `--skip-upload` when
+the same corpus is already indexed, or repeat `--case CASE_ID` to collect selected
+cases. The previous 19-question set is retired because it does not represent the
+expanded corpus.
 
 ## Notes
 

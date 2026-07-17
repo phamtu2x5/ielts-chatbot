@@ -1,1 +1,1 @@
-"""Temporary engineering tools for extraction regression."""
+"""Command-line tools for repeatable project validation."""

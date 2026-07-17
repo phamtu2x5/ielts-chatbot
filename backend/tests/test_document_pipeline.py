@@ -17,7 +17,6 @@ if str(BACKEND_DIR) not in sys.path:
 from app.document_pipeline.config import DocumentPipelineConfig
 from app.document_pipeline.connectors import RasterConnectorDetector
 from app.document_pipeline.chunking import SemanticChunker
-from app.document_pipeline.extractors.pdf import PDFExtractor
 from app.document_pipeline.extractors.text import TextExtractor
 from app.document_pipeline.ielts import IELTSStructureParser, StructuredChunker
 from app.document_pipeline.layout import DocLayoutDetector
@@ -203,79 +202,6 @@ class OCRProcessorTests(unittest.TestCase):
         self.assertEqual(texts, ["Hello", "IELTS"])
         self.assertEqual(scores, [0.9, 0.8])
         self.assertEqual(boxes, [[[0, 0], [10, 0], [10, 10], [0, 10]]])
-
-
-class PDFVisualOCRRetryTests(unittest.TestCase):
-    def test_visual_region_retry_skips_complete_question_range(self) -> None:
-        class UnexpectedOCR:
-            def image_to_text(self, image: Image.Image) -> OCRResult:
-                raise AssertionError("Complete visual question ranges must not trigger another OCR pass.")
-
-        extractor = PDFExtractor(DocumentPipelineConfig(), UnexpectedOCR(), None)
-        original = OCRResult(
-            "Questions 5-7\nComplete the table.\n(5) first\n(6) second\n(7) third",
-            0.97,
-            "rapidocr_test",
-            {"lines": []},
-        )
-
-        result = extractor._retry_visual_ocr(
-            Image.new("RGB", (120, 80), "white"),
-            [{"type": "table", "bbox": [0, 0, 120, 80]}],
-            original,
-        )
-
-        self.assertIs(result, original)
-
-    def test_visual_region_retry_replaces_overlapping_misread_question_number(self) -> None:
-        retry_result = OCRResult(
-            "can be (7)",
-            0.98,
-            "rapidocr_test",
-            {
-                "lines": [
-                    {
-                        "text": "can be (7)",
-                        "confidence": 0.98,
-                        "bbox": [[40, 40], [120, 40], [120, 60], [40, 60]],
-                    }
-                ]
-            },
-        )
-
-        class RetryOCR:
-            def image_to_text(self, image: Image.Image) -> OCRResult:
-                return retry_result
-
-        extractor = PDFExtractor(DocumentPipelineConfig(), RetryOCR(), None)
-        original = OCRResult(
-            "Questions 5-10\nComplete the table.\ncan be (Z)\n(5) (6) (8) (9) (10)",
-            0.96,
-            "rapidocr_test",
-            {
-                "lines": [
-                    {"text": "Questions 5-10", "confidence": 0.99, "bbox": [0, 0, 80, 10]},
-                    {"text": "Complete the table.", "confidence": 0.99, "bbox": [0, 10, 100, 20]},
-                    {"text": "can be (Z)", "confidence": 0.96, "bbox": [20, 20, 60, 30]},
-                    {"text": "(5) (6) (8) (9) (10)", "confidence": 0.99, "bbox": [0, 35, 100, 45]},
-                ]
-            },
-        )
-
-        result = extractor._retry_visual_ocr(
-            Image.new("RGB", (120, 80), "white"),
-            [{"type": "table", "bbox": [0, 0, 120, 80]}],
-            original,
-        )
-
-        self.assertIn("can be (7)", result.text)
-        self.assertNotIn("can be (Z)", result.text)
-        self.assertEqual(result.metadata["visual_ocr_retry_recovered"], [7])
-        accepted = result.metadata["visual_ocr_retries"][0]["accepted_lines"][0]
-        self.assertEqual(
-            accepted["bbox"],
-            [[20.0, 20.0], [60.0, 20.0], [60.0, 30.0], [20.0, 30.0]],
-        )
 
 
 class DocLayoutDetectorTests(unittest.TestCase):
@@ -938,8 +864,11 @@ class IELTSStructureTests(unittest.TestCase):
         )
 
         structured = IELTSStructureParser(self.config).parse(document)
+        chunks = StructuredChunker(self.config).chunk(document, structured)
 
         self.assertEqual(len(structured.passages), 2)
+        self.assertEqual(document.metadata["document_type"], "ielts_reading")
+        self.assertTrue(all(chunk.metadata["document_type"] == "ielts_reading" for chunk in chunks))
         self.assertEqual(structured.diagnostics["questions_found"], 8)
         self.assertEqual(structured.diagnostics["individual_questions_found"], 4)
         self.assertEqual(structured.diagnostics["missing_questions"], [])

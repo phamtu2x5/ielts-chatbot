@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class DocumentPipelineConfig:
-    parser_version: str = "1.9.0"
+    parser_version: str = "1.10.0"
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_MAX_UPLOAD_MB", "25")))
     max_pdf_pages: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_MAX_PDF_PAGES", "80")))
     native_min_chars: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_NATIVE_MIN_CHARS", "40")))
@@ -85,15 +85,6 @@ class DocumentPipelineConfig:
     visual_direction_forward_weight: float = field(
         default_factory=lambda: float(os.getenv("DOCUMENT_VISUAL_DIRECTION_FORWARD_WEIGHT", "0.15"))
     )
-    visual_ocr_retry_enabled: bool = field(
-        default_factory=lambda: os.getenv("DOCUMENT_VISUAL_OCR_RETRY_ENABLE", "true").lower() == "true"
-    )
-    visual_ocr_retry_scale: float = field(
-        default_factory=lambda: float(os.getenv("DOCUMENT_VISUAL_OCR_RETRY_SCALE", "2.0"))
-    )
-    visual_ocr_retry_max_regions: int = field(
-        default_factory=lambda: int(os.getenv("DOCUMENT_VISUAL_OCR_RETRY_MAX_REGIONS", "3"))
-    )
 
     def __post_init__(self) -> None:
         if self.max_upload_mb <= 0 or self.max_pdf_pages <= 0:
@@ -145,10 +136,6 @@ class DocumentPipelineConfig:
             raise ValueError("DOCUMENT_WRITING_ADJACENT_BLOCK_GAP_FACTOR must be positive.")
         if self.connector_min_component_area_ratio >= self.connector_max_component_area_ratio:
             raise ValueError("Connector component area limits are invalid.")
-        if self.visual_ocr_retry_scale < 1:
-            raise ValueError("DOCUMENT_VISUAL_OCR_RETRY_SCALE must be at least 1.")
-        if self.visual_ocr_retry_max_regions <= 0:
-            raise ValueError("DOCUMENT_VISUAL_OCR_RETRY_MAX_REGIONS must be positive.")
 
 
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".text"}

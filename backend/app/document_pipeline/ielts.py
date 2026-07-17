@@ -229,6 +229,8 @@ class IELTSStructureParser:
             outline=outline,
             diagnostics=diagnostics,
         )
+        if passages:
+            document.metadata["document_type"] = "ielts_reading"
         document.metadata["ielts_structure"] = structured.to_dict()
         return structured
 
@@ -1354,6 +1356,8 @@ class StructuredChunker:
             {
                 "mime_type": document.mime_type,
                 "parser_version": document.parser_version,
+                "document_type": document.metadata.get("document_type"),
+                "task_type": document.metadata.get("task_type"),
                 "structured": True,
             }
         )

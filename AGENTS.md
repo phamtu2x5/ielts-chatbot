@@ -116,6 +116,12 @@ backend/tests/
   test_document_pipeline.py
   test_rag_store.py
 
+backend/evaluation/
+  chat_corpus_v2.json
+
+backend/tools/
+  chat_evaluation.py
+
 frontend/src/App.jsx
 frontend/src/styles.css
 
@@ -216,7 +222,11 @@ Full Colab verification:
 4. Call `/warmup`.
 5. Upload sample PDF/image.
 6. Inspect upload timing/debug metadata.
-7. Run the 19 regression questions when pipeline changes affect RAG behavior.
+7. Use `backend/tools/chat_evaluation.py` to collect answers and RAG debug data
+   for the questions in `backend/evaluation/chat_corpus_v2.json`.
+
+The legacy 19-question set is retired. Do not use it as the acceptance baseline;
+it predates the current seven-document corpus.
 
 ## 6. Architecture Notes
 
@@ -386,25 +396,16 @@ When touching ingestion/RAG behavior, also verify with:
 
 Near-term direction:
 
-1. Stabilize Colab environment and model warmup.
-2. Verify DocLayout-YOLO checkpoint loading on GPU.
-3. Re-test PDF and image upload through the web UI.
-4. Use timing metadata to identify slow stages:
-   - file save
-   - extraction
-   - native text
-   - render
-   - layout
-   - OCR
-   - structure parse
-   - chunking
-   - embedding/upsert
-5. Only optimize the measured bottleneck.
+1. Keep the current extraction baseline frozen unless a failure is reproduced
+   across multiple documents or blocks production.
+2. Rebuild the structured and vector indexes from the current schema.
+3. Strengthen target document and structured-unit resolution for multiple files.
+4. Run `backend/tools/chat_evaluation.py` against the rebuilt seven-document corpus
+   and review its raw answer/debug report manually. Do not auto-score answers.
+5. Fix retrieval, grounding and generation-policy failures before changing prompts.
 
 Longer-term direction:
 
-- Improve table and flowchart structure extraction without overfitting sample
-  documents.
 - Strengthen target document resolution for multiple uploaded files.
 - Add better session isolation.
 - Keep deterministic renderers for show/extract flows.

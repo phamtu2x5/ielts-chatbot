@@ -1,0 +1,492 @@
+{
+  "schema_version": "2.0",
+  "name": "IELTS multi-document manual review question set",
+  "description": "Questions built from the complete seven-document corpus. The runner only collects answers, sources and debug metadata for manual review; it performs no answer scoring.",
+  "documents": [
+    {
+      "filename": "IZONE _ IELTS READING TEST 2.pdf",
+      "kind": "ielts_reading",
+      "sha256": "06a2f8135f42060acb25871011164b6da9353cae0f13f42636e7b63c0017806f"
+    },
+    {
+      "filename": "IZONE _ IELTS READING TEST 4.pdf",
+      "kind": "ielts_reading",
+      "sha256": "ffcacec17d45320ac5e63cc0c33138bf6b9dc1f98fd15467603759ad32cde901"
+    },
+    {
+      "filename": "IZONE _ IELTS READING TEST 6.pdf",
+      "kind": "ielts_reading",
+      "sha256": "8b183cb6b6424cb105f1b507c7bdcabd31a7e69d7fd6cbf0b87295d9ba8b8bec"
+    },
+    {
+      "filename": "IZONE _ IELTS READING TEST 8.pdf",
+      "kind": "ielts_reading",
+      "sha256": "3d0e576098abdd80a09b7d857d9eee16c1d12411881898d62cb4aee504f51216"
+    },
+    {
+      "filename": "IZONE_ IELTS READING TEST 11.pdf",
+      "kind": "ielts_reading",
+      "sha256": "e51f3bb2059ca832b6108d5c100ded9f69a3beb89b03f568e12bb91daaa6ffef"
+    },
+    {
+      "filename": "IELTS Task 1 Essay.pdf",
+      "kind": "ielts_writing_collection",
+      "sha256": "082cf306bc1fc340bbdf4854d803570e378603c3d4d25be0204c31394a725b7d"
+    },
+    {
+      "filename": "Screenshot 2026-07-11 at 15.26.21.png",
+      "kind": "ielts_writing_task_1_table",
+      "sha256": "c94d416636fa4f5a4689f6acfe8c43bcb6c0c561f9abcd8bea4704b2e815577f"
+    }
+  ],
+  "cases": [
+    {
+      "id": "rt2-01-overview",
+      "category": "document_overview",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 2.pdf"
+      ],
+      "query": "Trong IZONE IELTS Reading Test 2, hãy mô tả ba passage và các nhóm câu hỏi của từng passage. Không giải bài."
+    },
+    {
+      "id": "rt2-02-show-questions",
+      "category": "show_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 2.pdf"
+      ],
+      "query": "Trong Reading Test 2, liệt kê nguyên nội dung Questions 11-13 và các lựa chọn, không đưa đáp án."
+    },
+    {
+      "id": "rt2-03-translate",
+      "category": "translate_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 2.pdf"
+      ],
+      "query": "Dịch Questions 14-17 của Reading Test 2 sang tiếng Việt, giữ số câu và chưa trả lời."
+    },
+    {
+      "id": "rt2-04-flowchart",
+      "category": "show_flowchart",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 2.pdf"
+      ],
+      "query": "Hiển thị cấu trúc flowchart Questions 18-23 trong Reading Test 2, mô tả node và hướng nối nhưng giữ nguyên ô trống."
+    },
+    {
+      "id": "rt2-05-solve",
+      "category": "solve_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 2.pdf"
+      ],
+      "query": "Trong Reading Test 2, trả lời Question 11 và dẫn một câu bằng chứng ngắn từ passage."
+    },
+    {
+      "id": "rt2-06-semantic-wine",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 2.pdf"
+      ],
+      "query": "Theo passage Make That Wine trong Reading Test 2, vỏ nho ảnh hưởng đến màu đỏ hoặc trắng của rượu như thế nào?"
+    },
+    {
+      "id": "rt2-07-semantic-vision",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 2.pdf"
+      ],
+      "query": "Trong That Vision Thing của Reading Test 2, nêu ba lý do tác giả cho rằng một tầm nhìn chung trong tổ chức là thiếu thực tế."
+    },
+    {
+      "id": "rt2-08-writing-tail",
+      "category": "mixed_section",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 2.pdf"
+      ],
+      "query": "Task 2 ở cuối Reading Test 2 yêu cầu thảo luận vấn đề gì? Chỉ nêu yêu cầu đề bài."
+    },
+    {
+      "id": "rt4-01-overview",
+      "category": "document_overview",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 4.pdf"
+      ],
+      "query": "Tóm tắt cấu trúc Reading Test 4: chủ đề ba passage và range câu hỏi của từng passage. Không giải."
+    },
+    {
+      "id": "rt4-02-show-notes",
+      "category": "show_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 4.pdf"
+      ],
+      "query": "Liệt kê Questions 28-29 trong Reading Test 4 cùng phần hướng dẫn và các ô trống, chưa điền đáp án."
+    },
+    {
+      "id": "rt4-03-explain-multiple",
+      "category": "explain_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 4.pdf"
+      ],
+      "query": "Giải thích dạng bài và cách làm Questions 30-32 trong Reading Test 4, nhưng không chọn đáp án."
+    },
+    {
+      "id": "rt4-04-solve-title",
+      "category": "solve_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 4.pdf"
+      ],
+      "query": "Trả lời Question 40 của Reading Test 4 và giải thích vì sao tiêu đề đó phù hợp với toàn passage."
+    },
+    {
+      "id": "rt4-05-semantic-leptin",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 4.pdf"
+      ],
+      "query": "Trong Tackling Obesity của Reading Test 4, leptin tác động đến hypothalamus và cảm giác đói như thế nào?"
+    },
+    {
+      "id": "rt4-06-semantic-digital",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 4.pdf"
+      ],
+      "query": "Theo Wheel of Fortune trong Reading Test 4, vì sao các công ty giải trí cũ có thể mất ảnh hưởng khi công nghệ phân phối thay đổi?"
+    },
+    {
+      "id": "rt4-07-translate-claims",
+      "category": "translate_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 4.pdf"
+      ],
+      "query": "Dịch Questions 35-39 của Reading Test 4 sang tiếng Việt, không xác định YES/NO/NOT GIVEN."
+    },
+    {
+      "id": "rt4-08-writing-tail",
+      "category": "mixed_section",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 4.pdf"
+      ],
+      "query": "Đề Task 1 ở cuối Reading Test 4 yêu cầu mô tả hai thay đổi nào trong hộ gia đình? Chưa viết bài."
+    },
+    {
+      "id": "rt6-01-overview",
+      "category": "document_overview",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 6.pdf"
+      ],
+      "query": "Reading Test 6 gồm ba passage về những chủ đề nào và mỗi passage có các nhóm câu hỏi nào?"
+    },
+    {
+      "id": "rt6-02-show-tes",
+      "category": "show_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 6.pdf"
+      ],
+      "query": "Hiển thị Questions 20-22 của Reading Test 6 cùng sáu lựa chọn về TES, không chọn ba đáp án."
+    },
+    {
+      "id": "rt6-03-translate-short-answer",
+      "category": "translate_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 6.pdf"
+      ],
+      "query": "Dịch Questions 25-27 của Reading Test 6, giữ giới hạn NO MORE THAN THREE WORDS và chưa trả lời."
+    },
+    {
+      "id": "rt6-04-explain-matching",
+      "category": "explain_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 6.pdf"
+      ],
+      "query": "Giải thích cách làm Questions 36-40 của Reading Test 6, chú ý đây là dạng ghép ý kiến với nhà khoa học. Không giải."
+    },
+    {
+      "id": "rt6-05-solve-q25",
+      "category": "solve_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 6.pdf"
+      ],
+      "query": "Trả lời Question 25 của Reading Test 6 và dẫn đúng cụm từ trong passage."
+    },
+    {
+      "id": "rt6-06-semantic-fence",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 6.pdf"
+      ],
+      "query": "Trong The Great Australian Fence, hàng rào đã làm thay đổi số lượng kangaroo và cân bằng sinh thái ra sao?"
+    },
+    {
+      "id": "rt6-07-semantic-pitch",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 6.pdf"
+      ],
+      "query": "Passage về absolute pitch trong Reading Test 6 liên hệ khả năng này với ngôn ngữ thanh điệu và tuổi bắt đầu học nhạc như thế nào?"
+    },
+    {
+      "id": "rt6-08-writing-tail",
+      "category": "mixed_section",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 6.pdf"
+      ],
+      "query": "Task 2 ở cuối Reading Test 6 yêu cầu phân tích vấn đề xã hội nào? Chỉ nêu đề và hai hướng cần bàn."
+    },
+    {
+      "id": "rt8-01-overview",
+      "category": "document_overview",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 8.pdf"
+      ],
+      "query": "Tóm tắt ba passage và toàn bộ nhóm câu hỏi trong Reading Test 8, không giải bài."
+    },
+    {
+      "id": "rt8-02-diagram",
+      "category": "show_diagram",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 8.pdf"
+      ],
+      "query": "Hiển thị cấu trúc diagram Questions 6-8 của Reading Test 8 và giữ nguyên các nhãn trống, chưa giải."
+    },
+    {
+      "id": "rt8-03-translate-location",
+      "category": "translate_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 8.pdf"
+      ],
+      "query": "Dịch Questions 14-18 của Reading Test 8 sang tiếng Việt, chưa ghép câu với paragraph."
+    },
+    {
+      "id": "rt8-04-explain-ending",
+      "category": "explain_questions",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 8.pdf"
+      ],
+      "query": "Giải thích yêu cầu và chiến lược làm Questions 27-32 của Reading Test 8, không ghép đáp án A-H."
+    },
+    {
+      "id": "rt8-05-semantic-snow",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 8.pdf"
+      ],
+      "query": "Snow-makers giải thích quá trình tạo tuyết nhân tạo khác tuyết tự nhiên ở điểm nào?"
+    },
+    {
+      "id": "rt8-06-semantic-tiger",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 8.pdf"
+      ],
+      "query": "Theo passage Why are so few tigers man-eaters, vì sao hổ thường không coi người ngồi trong ô tô là con mồi?"
+    },
+    {
+      "id": "rt8-07-semantic-aspirin",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 8.pdf"
+      ],
+      "query": "Passage về aspirin trong Reading Test 8 cho rằng công nghiệp, quảng cáo và quy định đã ảnh hưởng đến sự phát triển thuốc ra sao?"
+    },
+    {
+      "id": "rt8-08-negative",
+      "category": "negative_document_qa",
+      "target_files": [
+        "IZONE _ IELTS READING TEST 8.pdf"
+      ],
+      "query": "Reading Test 8 có passage nào nói về sản xuất rượu vang ở Australia không?"
+    },
+    {
+      "id": "rt11-01-overview",
+      "category": "document_overview",
+      "target_files": [
+        "IZONE_ IELTS READING TEST 11.pdf"
+      ],
+      "query": "Reading Test 11 gồm các passage nào và các range câu hỏi tương ứng là gì? Không giải."
+    },
+    {
+      "id": "rt11-02-show-flowchart",
+      "category": "show_flowchart",
+      "target_files": [
+        "IZONE_ IELTS READING TEST 11.pdf"
+      ],
+      "query": "Hiển thị flowchart Questions 34-37 của Reading Test 11 theo đúng thứ tự thời gian, không điền đáp án."
+    },
+    {
+      "id": "rt11-03-translate-opinions",
+      "category": "translate_questions",
+      "target_files": [
+        "IZONE_ IELTS READING TEST 11.pdf"
+      ],
+      "query": "Dịch Questions 20-23 của Reading Test 11 và danh sách người A-E, chưa ghép đáp án."
+    },
+    {
+      "id": "rt11-04-explain-classify",
+      "category": "explain_questions",
+      "target_files": [
+        "IZONE_ IELTS READING TEST 11.pdf"
+      ],
+      "query": "Giải thích cách phân loại Questions 24-27 của Reading Test 11 giữa shade-grown, full-sun hoặc cả hai. Không chọn đáp án."
+    },
+    {
+      "id": "rt11-05-semantic-afm",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE_ IELTS READING TEST 11.pdf"
+      ],
+      "query": "Green virtues of green sand nêu những lợi ích môi trường và lọc nước nào của AFM?"
+    },
+    {
+      "id": "rt11-06-semantic-shade",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE_ IELTS READING TEST 11.pdf"
+      ],
+      "query": "Trong passage về coffee và chocolate của Reading Test 11, shade-grown hỗ trợ đa dạng sinh học và nông dân như thế nào?"
+    },
+    {
+      "id": "rt11-07-semantic-art",
+      "category": "semantic_qa",
+      "target_files": [
+        "IZONE_ IELTS READING TEST 11.pdf"
+      ],
+      "query": "Painters of time giải thích mối quan hệ giữa Aboriginal art, Dreaming, tổ tiên và lãnh thổ như thế nào?"
+    },
+    {
+      "id": "rt11-08-solve-q38",
+      "category": "solve_questions",
+      "target_files": [
+        "IZONE_ IELTS READING TEST 11.pdf"
+      ],
+      "query": "Trả lời Question 38 của Reading Test 11 và dẫn bằng chứng từ Paragraph G."
+    },
+    {
+      "id": "writing-pdf-01-inventory",
+      "category": "document_overview",
+      "target_files": [
+        "IELTS Task 1 Essay.pdf"
+      ],
+      "query": "IELTS Task 1 Essay.pdf chứa những đề và bài mẫu nào? Liệt kê theo thứ tự trang, không viết thêm bài mới."
+    },
+    {
+      "id": "writing-pdf-02-forests",
+      "category": "semantic_qa",
+      "target_files": [
+        "IELTS Task 1 Essay.pdf"
+      ],
+      "query": "Trong bài mẫu The World’s Forests, so sánh tỷ trọng forest và timber của Africa với North America."
+    },
+    {
+      "id": "writing-pdf-03-cinema",
+      "category": "semantic_qa",
+      "target_files": [
+        "IELTS Task 1 Essay.pdf"
+      ],
+      "query": "Bài Age Groups and Cinema Attendance mô tả xu hướng của nhóm 15-24 tuổi từ 2000 đến 2011 như thế nào?"
+    },
+    {
+      "id": "writing-pdf-04-park",
+      "category": "semantic_qa",
+      "target_files": [
+        "IELTS Task 1 Essay.pdf"
+      ],
+      "query": "Theo bài Map of a Park, công viên hiện tại đã thay đổi những khu vực giải trí và lối đi nào so với năm 1980?"
+    },
+    {
+      "id": "writing-pdf-05-internet",
+      "category": "semantic_qa",
+      "target_files": [
+        "IELTS Task 1 Essay.pdf"
+      ],
+      "query": "Trong bài Internet Use, xếp năm quốc gia theo tỷ lệ người dùng internet từ cao xuống thấp và nêu số liệu."
+    },
+    {
+      "id": "writing-pdf-06-students",
+      "category": "semantic_qa",
+      "target_files": [
+        "IELTS Task 1 Essay.pdf"
+      ],
+      "query": "Bài International Students in Canada and the USA nêu khác biệt nào về tổng số và tốc độ tăng giữa hai nước?"
+    },
+    {
+      "id": "writing-pdf-07-crime",
+      "category": "semantic_qa",
+      "target_files": [
+        "IELTS Task 1 Essay.pdf"
+      ],
+      "query": "Trong bài về New Port city centre, burglary, car theft và robbery thay đổi ra sao từ 2003 đến 2012?"
+    },
+    {
+      "id": "writing-pdf-08-emigration",
+      "category": "semantic_qa",
+      "target_files": [
+        "IELTS Task 1 Essay.pdf"
+      ],
+      "query": "Bài British Emigration cho biết Australia và Spain khác nhau thế nào về xu hướng tiếp nhận người Anh?"
+    },
+    {
+      "id": "writing-image-01-prompt",
+      "category": "show_writing_prompt",
+      "target_files": [
+        "Screenshot 2026-07-11 at 15.26.21.png"
+      ],
+      "query": "Đề Writing Task 1 trong ảnh yêu cầu người học làm gì? Chỉ trình bày yêu cầu, chưa viết bài."
+    },
+    {
+      "id": "writing-image-02-table",
+      "category": "show_table",
+      "target_files": [
+        "Screenshot 2026-07-11 at 15.26.21.png"
+      ],
+      "query": "Trích xuất toàn bộ bảng trong ảnh Writing thành Markdown, giữ đúng 5 cột và 3 hàng dữ liệu. Không phân tích."
+    },
+    {
+      "id": "writing-image-03-cell",
+      "category": "table_cell",
+      "target_files": [
+        "Screenshot 2026-07-11 at 15.26.21.png"
+      ],
+      "query": "Trong bảng Writing, Smartphone Ownership của Country B năm 2024 là bao nhiêu? Chỉ trả lời giá trị và nguồn."
+    },
+    {
+      "id": "writing-image-04-calculation",
+      "category": "table_calculation",
+      "target_files": [
+        "Screenshot 2026-07-11 at 15.26.21.png"
+      ],
+      "query": "Từ bảng Writing, quốc gia nào tăng Internet Access nhiều nhất từ 2019 đến 2024? Trình bày phép tính cho A, B và C."
+    },
+    {
+      "id": "writing-image-05-comparison",
+      "category": "semantic_qa",
+      "target_files": [
+        "Screenshot 2026-07-11 at 15.26.21.png"
+      ],
+      "query": "So sánh Internet Access và Smartphone Ownership của Country A trong cả hai năm từ bảng Writing."
+    },
+    {
+      "id": "writing-image-06-overview",
+      "category": "writing_generation",
+      "target_files": [
+        "Screenshot 2026-07-11 at 15.26.21.png"
+      ],
+      "query": "Viết riêng một đoạn overview cho bảng Writing trong ảnh, không viết introduction hoặc body."
+    },
+    {
+      "id": "writing-image-07-full-answer",
+      "category": "writing_generation",
+      "target_files": [
+        "Screenshot 2026-07-11 at 15.26.21.png"
+      ],
+      "query": "Viết bài IELTS Writing Task 1 dài 170-190 từ dựa hoàn toàn trên bảng trong ảnh."
+    },
+    {
+      "id": "writing-image-08-negative",
+      "category": "negative_document_qa",
+      "target_files": [
+        "Screenshot 2026-07-11 at 15.26.21.png"
+      ],
+      "query": "Ảnh Writing có nêu dữ liệu về cinema attendance hoặc forest and timber không?"
+    }
+  ]
+}
