@@ -11,7 +11,12 @@ REPO_DIR = BACKEND_DIR.parent
 if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
 
-from backend.tools.chat_evaluation import capture_case, select_cases, verify_corpus
+from backend.tools.chat_evaluation import (
+    capture_case,
+    compact_upload_result,
+    select_cases,
+    verify_corpus,
+)
 
 
 MANIFEST_PATH = BACKEND_DIR / "evaluation" / "chat_corpus_v2.json"
@@ -85,16 +90,68 @@ class ChatEvaluationManifestTests(unittest.TestCase):
             "response": {
                 "response": "Nội dung nói về Mars.",
                 "route_used": "rag",
-                "sources": [{"source_file": "sample.pdf"}],
-                "debug": {"query_intent": "semantic_qa"},
+                "sources": [
+                    {
+                        "chunk_id": "sample-c1",
+                        "source_file": "sample.pdf",
+                        "pages": [1],
+                        "display_text": "Mars is potentially habitable.",
+                        "probe_dense_score": 0.75,
+                        "metadata": {"unit_type": "passage"},
+                    }
+                ],
+                "debug": {
+                    "query_intent": "semantic_qa",
+                    "catalog": [{"source_file": "sample.pdf"}],
+                },
             },
         }
-        capture = capture_case(case, result)
+        source_index = {}
+        capture = capture_case(case, result, source_index)
         self.assertEqual(capture["answer"], "Nội dung nói về Mars.")
-        self.assertEqual(capture["sources"], [{"source_file": "sample.pdf"}])
+        self.assertEqual(
+            capture["sources"],
+            [
+                {
+                    "source_ref": "sample-c1",
+                    "source_file": "sample.pdf",
+                    "pages": [1],
+                    "dense_score": 0.75,
+                    "unit_type": "passage",
+                }
+            ],
+        )
         self.assertEqual(capture["debug"], {"query_intent": "semantic_qa"})
+        self.assertEqual(
+            source_index["sample-c1"]["text"],
+            "Mars is potentially habitable.",
+        )
+        self.assertNotIn("raw_response", capture)
         self.assertNotIn("status", capture)
         self.assertNotIn("failures", capture)
+
+    def test_upload_capture_omits_large_extraction_debug(self) -> None:
+        result = {
+            "filename": "sample.pdf",
+            "http_status": 200,
+            "duration_seconds": 1.2,
+            "response": {
+                "message": "Processed 3 chunks",
+                "file_name": "sample.pdf",
+                "document_id": "doc-1",
+                "document_type": "ielts_reading",
+                "chunks_processed": 3,
+                "collection_stats": {"documents": 1, "chunks": 3},
+                "debug": {
+                    "timing": {"upload": {"total_seconds": 1.2}},
+                    "structure": {"passages_found": 1},
+                    "extraction": {"pages": [{"large": "payload"}]},
+                },
+            },
+        }
+        compact = compact_upload_result(result)
+        self.assertEqual(compact["response"]["debug"]["structure"]["passages_found"], 1)
+        self.assertNotIn("extraction", compact["response"]["debug"])
 
     def test_case_selection_rejects_unknown_ids(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown case IDs"):

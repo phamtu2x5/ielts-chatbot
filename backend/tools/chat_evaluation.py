@@ -19,6 +19,16 @@ DEFAULT_MANIFEST = BACKEND_DIR / "evaluation" / "chat_corpus_v2.json"
 DEFAULT_CORPUS_DIR = REPO_DIR / "docs"
 DEFAULT_OUTPUT_DIR = BACKEND_DIR / "data" / "chat_evaluation"
 
+SOURCE_METADATA_FIELDS = (
+    "unit_type",
+    "chunk_reason",
+    "passage_number",
+    "question_range",
+    "parent_id",
+    "document_type",
+    "task_type",
+)
+
 
 def load_manifest(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -109,8 +119,99 @@ def ask_chat(base_url: str, message: str, timeout: float) -> dict[str, Any]:
     }
 
 
-def capture_case(case: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+def source_reference_id(source: dict[str, Any]) -> str:
+    chunk_id = source.get("chunk_id")
+    if chunk_id:
+        return str(chunk_id)
+    identity = {
+        "source_file": source.get("source_file") or source.get("file"),
+        "pages": source.get("pages"),
+        "text": source.get("display_text") or source.get("text") or source.get("preview"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"source-{digest}"
+
+
+def compact_source_reference(source: dict[str, Any]) -> dict[str, Any]:
+    metadata = source.get("metadata") or {}
+    compact = {
+        "source_ref": source_reference_id(source),
+        "source_file": source.get("source_file") or source.get("file"),
+        "pages": source.get("pages"),
+        "retrieval_method": source.get("retrieval_method"),
+        "score": source.get("score"),
+        "dense_score": source.get("probe_dense_score", source.get("dense_score")),
+        "keyword_score": source.get("probe_keyword_score", source.get("keyword_score")),
+        "question_score": source.get("probe_question_score", source.get("question_score")),
+        "overview_score": source.get("probe_overview_score", source.get("overview_score")),
+        **{field: metadata.get(field) for field in SOURCE_METADATA_FIELDS},
+    }
+    return {key: value for key, value in compact.items() if value is not None}
+
+
+def source_index_entry(source: dict[str, Any]) -> dict[str, Any]:
+    metadata = source.get("metadata") or {}
+    entry = {
+        "source_ref": source_reference_id(source),
+        "chunk_id": source.get("chunk_id"),
+        "source_file": source.get("source_file") or source.get("file"),
+        "pages": source.get("pages"),
+        "text": source.get("display_text") or source.get("text") or source.get("preview"),
+        **{field: metadata.get(field) for field in SOURCE_METADATA_FIELDS},
+    }
+    return {key: value for key, value in entry.items() if value is not None}
+
+
+def compact_case_debug(debug: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in debug.items() if key != "catalog"}
+
+
+def compact_upload_result(result: dict[str, Any]) -> dict[str, Any]:
     response = result.get("response") or {}
+    debug = response.get("debug") or {}
+    compact_response = {
+        key: response.get(key)
+        for key in (
+            "message",
+            "detail",
+            "file_name",
+            "document_id",
+            "document_type",
+            "chunks_processed",
+            "collection_stats",
+        )
+        if response.get(key) is not None
+    }
+    compact_debug = {
+        key: debug.get(key)
+        for key in ("timing", "structure")
+        if debug.get(key) is not None
+    }
+    if compact_debug:
+        compact_response["debug"] = compact_debug
+    compact = {
+        "filename": result.get("filename"),
+        "http_status": result.get("http_status"),
+        "duration_seconds": result.get("duration_seconds"),
+        "error": result.get("error"),
+        "response": compact_response,
+    }
+    return {key: value for key, value in compact.items() if value is not None}
+
+
+def capture_case(
+    case: dict[str, Any],
+    result: dict[str, Any],
+    source_index: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    response = result.get("response") or {}
+    raw_sources = response.get("sources") or []
+    if source_index is not None:
+        for source in raw_sources:
+            entry = source_index_entry(source)
+            source_index.setdefault(entry["source_ref"], entry)
     return {
         "id": case["id"],
         "category": case["category"],
@@ -121,9 +222,8 @@ def capture_case(case: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]
         "request_error": result.get("error"),
         "answer": response.get("response"),
         "route_used": response.get("route_used"),
-        "sources": response.get("sources") or [],
-        "debug": response.get("debug") or {},
-        "raw_response": response,
+        "sources": [compact_source_reference(source) for source in raw_sources],
+        "debug": compact_case_debug(response.get("debug") or {}),
     }
 
 
@@ -156,6 +256,8 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     }
 
     case_results: list[dict[str, Any]] = []
+    source_index: dict[str, dict[str, Any]] = {}
+    document_catalog: list[dict[str, Any]] = []
     for case in select_cases(manifest, args.case):
         blocked_files = sorted(set(case.get("target_files", [])) & failed_upload_files)
         if blocked_files:
@@ -168,6 +270,7 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
                         "response": {},
                         "error": f"target upload failed: {', '.join(blocked_files)}",
                     },
+                    source_index,
                 )
             )
             continue
@@ -180,7 +283,10 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
                 "response": {},
                 "error": repr(exc),
             }
-        case_results.append(capture_case(case, raw_result))
+        response_debug = (raw_result.get("response") or {}).get("debug") or {}
+        if not document_catalog and response_debug.get("catalog"):
+            document_catalog = response_debug["catalog"]
+        case_results.append(capture_case(case, raw_result, source_index))
 
     upload_errors = sum(item.get("http_status") != 200 for item in upload_results)
     request_errors = sum(
@@ -188,18 +294,21 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         for item in case_results
     )
     report = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "question_set_name": manifest.get("name"),
         "manifest_schema_version": manifest.get("schema_version"),
         "base_url": base_url,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "uploads": upload_results,
+        "uploads": [compact_upload_result(result) for result in upload_results],
+        "document_catalog": document_catalog,
+        "source_index": list(source_index.values()),
         "summary": {
             "total_questions": len(case_results),
             "responses_collected": len(case_results) - request_errors,
             "request_errors": request_errors,
             "uploads_attempted": len(upload_results),
             "upload_errors": upload_errors,
+            "unique_context_sources": len(source_index),
             "answer_assessment": "not_performed",
         },
         "cases": case_results,
