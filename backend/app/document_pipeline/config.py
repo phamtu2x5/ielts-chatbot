@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class DocumentPipelineConfig:
-    parser_version: str = "1.8.0"
+    parser_version: str = "1.9.0"
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_MAX_UPLOAD_MB", "25")))
     max_pdf_pages: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_MAX_PDF_PAGES", "80")))
     native_min_chars: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_NATIVE_MIN_CHARS", "40")))
@@ -79,6 +79,21 @@ class DocumentPipelineConfig:
     connector_direction_min_confidence: float = field(
         default_factory=lambda: float(os.getenv("DOCUMENT_CONNECTOR_DIRECTION_MIN_CONFIDENCE", "0.55"))
     )
+    visual_spatial_association_distance_ratio: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_VISUAL_SPATIAL_ASSOCIATION_DISTANCE_RATIO", "0.16"))
+    )
+    visual_direction_forward_weight: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_VISUAL_DIRECTION_FORWARD_WEIGHT", "0.15"))
+    )
+    visual_ocr_retry_enabled: bool = field(
+        default_factory=lambda: os.getenv("DOCUMENT_VISUAL_OCR_RETRY_ENABLE", "true").lower() == "true"
+    )
+    visual_ocr_retry_scale: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_VISUAL_OCR_RETRY_SCALE", "2.0"))
+    )
+    visual_ocr_retry_max_regions: int = field(
+        default_factory=lambda: int(os.getenv("DOCUMENT_VISUAL_OCR_RETRY_MAX_REGIONS", "3"))
+    )
 
     def __post_init__(self) -> None:
         if self.max_upload_mb <= 0 or self.max_pdf_pages <= 0:
@@ -100,6 +115,8 @@ class DocumentPipelineConfig:
             self.connector_max_component_area_ratio,
             self.connector_min_span_ratio,
             self.connector_direction_min_confidence,
+            self.visual_spatial_association_distance_ratio,
+            self.visual_direction_forward_weight,
         )
         if any(value < 0 or value > 1 for value in thresholds):
             raise ValueError("Document quality and OCR thresholds must be between 0 and 1.")
@@ -128,6 +145,10 @@ class DocumentPipelineConfig:
             raise ValueError("DOCUMENT_WRITING_ADJACENT_BLOCK_GAP_FACTOR must be positive.")
         if self.connector_min_component_area_ratio >= self.connector_max_component_area_ratio:
             raise ValueError("Connector component area limits are invalid.")
+        if self.visual_ocr_retry_scale < 1:
+            raise ValueError("DOCUMENT_VISUAL_OCR_RETRY_SCALE must be at least 1.")
+        if self.visual_ocr_retry_max_regions <= 0:
+            raise ValueError("DOCUMENT_VISUAL_OCR_RETRY_MAX_REGIONS must be positive.")
 
 
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".text"}

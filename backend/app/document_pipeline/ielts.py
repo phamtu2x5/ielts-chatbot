@@ -167,7 +167,11 @@ class _TitleCandidate:
 class IELTSStructureParser:
     def __init__(self, config: DocumentPipelineConfig) -> None:
         self.config = config
-        self.visual_parser = IELTSQuestionVisualParser(config.connector_direction_min_confidence)
+        self.visual_parser = IELTSQuestionVisualParser(
+            config.connector_direction_min_confidence,
+            config.visual_spatial_association_distance_ratio,
+            config.visual_direction_forward_weight,
+        )
         self.writing_parser = WritingCollectionParser(config)
 
     def parse(self, document: ProcessedDocument) -> IELTSDocument:
@@ -654,15 +658,6 @@ class IELTSStructureParser:
             for passage in passages
             if passage.title and self._is_instruction_like_text(passage.title)
         ]
-        suspicious_boundaries = []
-        for passage in passages:
-            if not passage.title and len(passage.question_groups) > 1:
-                suspicious_boundaries.append(
-                    {
-                        "passage_number": passage.passage_number,
-                        "reason": "missing_title_with_multiple_question_groups",
-                    }
-                )
         visual_elements = [
             group.visual_element
             for passage in passages
@@ -679,7 +674,7 @@ class IELTSStructureParser:
             "unassigned_questions": [],
             "overlapping_question_groups": overlapping_groups,
             "instruction_as_title": instruction_as_title,
-            "suspicious_boundaries": suspicious_boundaries,
+            "suspicious_boundaries": [],
             "visual_elements_found": len(visual_elements),
             "tables_found": sum(1 for element in visual_elements if element.get("type") == "table"),
             "flowcharts_found": sum(1 for element in visual_elements if element.get("type") == "flowchart"),

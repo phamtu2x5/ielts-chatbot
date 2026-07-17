@@ -17,8 +17,9 @@ if str(BACKEND_DIR) not in sys.path:
 from app.document_pipeline.config import DocumentPipelineConfig
 from app.document_pipeline.connectors import RasterConnectorDetector
 from app.document_pipeline.chunking import SemanticChunker
-from app.document_pipeline.ielts import IELTSStructureParser, StructuredChunker
+from app.document_pipeline.extractors.pdf import PDFExtractor
 from app.document_pipeline.extractors.text import TextExtractor
+from app.document_pipeline.ielts import IELTSStructureParser, StructuredChunker
 from app.document_pipeline.layout import DocLayoutDetector
 from app.document_pipeline.models import DocumentElement, ProcessedDocument, ProcessedPage
 from app.document_pipeline.ocr import OCRProcessor, OCRResult
@@ -202,6 +203,79 @@ class OCRProcessorTests(unittest.TestCase):
         self.assertEqual(texts, ["Hello", "IELTS"])
         self.assertEqual(scores, [0.9, 0.8])
         self.assertEqual(boxes, [[[0, 0], [10, 0], [10, 10], [0, 10]]])
+
+
+class PDFVisualOCRRetryTests(unittest.TestCase):
+    def test_visual_region_retry_skips_complete_question_range(self) -> None:
+        class UnexpectedOCR:
+            def image_to_text(self, image: Image.Image) -> OCRResult:
+                raise AssertionError("Complete visual question ranges must not trigger another OCR pass.")
+
+        extractor = PDFExtractor(DocumentPipelineConfig(), UnexpectedOCR(), None)
+        original = OCRResult(
+            "Questions 5-7\nComplete the table.\n(5) first\n(6) second\n(7) third",
+            0.97,
+            "rapidocr_test",
+            {"lines": []},
+        )
+
+        result = extractor._retry_visual_ocr(
+            Image.new("RGB", (120, 80), "white"),
+            [{"type": "table", "bbox": [0, 0, 120, 80]}],
+            original,
+        )
+
+        self.assertIs(result, original)
+
+    def test_visual_region_retry_replaces_overlapping_misread_question_number(self) -> None:
+        retry_result = OCRResult(
+            "can be (7)",
+            0.98,
+            "rapidocr_test",
+            {
+                "lines": [
+                    {
+                        "text": "can be (7)",
+                        "confidence": 0.98,
+                        "bbox": [[40, 40], [120, 40], [120, 60], [40, 60]],
+                    }
+                ]
+            },
+        )
+
+        class RetryOCR:
+            def image_to_text(self, image: Image.Image) -> OCRResult:
+                return retry_result
+
+        extractor = PDFExtractor(DocumentPipelineConfig(), RetryOCR(), None)
+        original = OCRResult(
+            "Questions 5-10\nComplete the table.\ncan be (Z)\n(5) (6) (8) (9) (10)",
+            0.96,
+            "rapidocr_test",
+            {
+                "lines": [
+                    {"text": "Questions 5-10", "confidence": 0.99, "bbox": [0, 0, 80, 10]},
+                    {"text": "Complete the table.", "confidence": 0.99, "bbox": [0, 10, 100, 20]},
+                    {"text": "can be (Z)", "confidence": 0.96, "bbox": [20, 20, 60, 30]},
+                    {"text": "(5) (6) (8) (9) (10)", "confidence": 0.99, "bbox": [0, 35, 100, 45]},
+                ]
+            },
+        )
+
+        result = extractor._retry_visual_ocr(
+            Image.new("RGB", (120, 80), "white"),
+            [{"type": "table", "bbox": [0, 0, 120, 80]}],
+            original,
+        )
+
+        self.assertIn("can be (7)", result.text)
+        self.assertNotIn("can be (Z)", result.text)
+        self.assertEqual(result.metadata["visual_ocr_retry_recovered"], [7])
+        accepted = result.metadata["visual_ocr_retries"][0]["accepted_lines"][0]
+        self.assertEqual(
+            accepted["bbox"],
+            [[20.0, 20.0], [60.0, 20.0], [60.0, 30.0], [20.0, 30.0]],
+        )
 
 
 class DocLayoutDetectorTests(unittest.TestCase):
@@ -528,6 +602,38 @@ class PDFSpatialVisualParserTests(unittest.TestCase):
         )
         self.assertEqual(visual.payload["edge_detection"], "raster_arrowheads")
 
+    def test_duplicate_nearest_pair_uses_connector_axis_for_branch_target(self) -> None:
+        nodes = [
+            {"id": "node-1", "bbox": [120, 20, 220, 100]},
+            {"id": "node-2", "bbox": [20, 140, 100, 200]},
+            {"id": "node-3", "bbox": [320, 130, 400, 190]},
+        ]
+        connectors = [
+            {
+                "id": "connector-1",
+                "bbox": [90, 90, 150, 170],
+                "endpoints": [[100, 160], [145, 100]],
+                "arrowhead_point": [145, 105],
+                "direction_confidence": 0.9,
+            },
+            {
+                "id": "connector-2",
+                "bbox": [90, 150, 230, 185],
+                "endpoints": [[100, 170], [230, 170]],
+                "arrowhead_point": [220, 170],
+                "direction_confidence": 0.8,
+            },
+        ]
+
+        edges, unresolved = self.parser._connector_graph(nodes, connectors, [0, 0, 800, 240])
+
+        self.assertEqual(
+            [(edge["from"], edge["to"]) for edge in edges],
+            [("node-2", "node-1"), ("node-2", "node-3")],
+        )
+        self.assertEqual(edges[1]["evidence"], "raster_arrowhead_directional_remap")
+        self.assertEqual(unresolved, [])
+
     def test_textual_flowchart_preserves_order_without_inventing_edges(self) -> None:
         visual = self.parser.parse(
             """Questions 34-37
@@ -593,7 +699,12 @@ Complete the flow chart below.
         self.assertEqual(visual.visual_type, "diagram")
         self.assertEqual({label["question_number"] for label in visual.payload["labels"]}, {6, 7, 8})
         self.assertEqual(visual.payload["edges"], [])
-        self.assertEqual(visual.payload["quality_status"], "degraded")
+        self.assertEqual(visual.payload["quality_status"], "passed")
+        self.assertEqual(visual.payload["connector_status"], "partial")
+        self.assertEqual(
+            visual.payload["connector_issues"],
+            ["connector_coverage_low", "low_confidence_connectors"],
+        )
 
 
 class RasterConnectorDetectorTests(unittest.TestCase):
@@ -613,6 +724,9 @@ class RasterConnectorDetectorTests(unittest.TestCase):
         self.assertGreaterEqual(result.metadata["connectors_found"], 1)
         connector = result.regions[0]["connectors"][0]
         self.assertEqual(len(connector["endpoints"]), 2)
+        self.assertGreaterEqual(connector["direction_confidence"], 0.55)
+        self.assertIn("head_strength", connector["direction_evidence"])
+        self.assertIn("endpoint_separation", connector["direction_evidence"])
         json.dumps(result.regions)
 
 
@@ -1011,6 +1125,7 @@ class IELTSStructureTests(unittest.TestCase):
         self.assertEqual(len(structured.passages), 2)
         self.assertIsNone(structured.passages[1].title)
         self.assertIn("exceptional ability", structured.passages[1].text)
+        self.assertEqual(structured.diagnostics["suspicious_boundaries"], [])
 
     def test_passage_chunks_do_not_keep_previous_question_sections(self) -> None:
         text = (

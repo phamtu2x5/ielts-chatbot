@@ -381,8 +381,15 @@ class IELTSQuestionVisualParser:
     raw linearized text instead of inventing rows, columns, nodes or edges.
     """
 
-    def __init__(self, direction_min_confidence: float = 0.55) -> None:
+    def __init__(
+        self,
+        direction_min_confidence: float = 0.55,
+        spatial_association_distance_ratio: float = 0.16,
+        direction_forward_weight: float = 0.15,
+    ) -> None:
         self.direction_min_confidence = direction_min_confidence
+        self.spatial_association_distance_ratio = spatial_association_distance_ratio
+        self.direction_forward_weight = direction_forward_weight
 
     def parse(
         self,
@@ -741,7 +748,7 @@ class IELTSQuestionVisualParser:
         context_lines = [line for line in lines if not self._question_numbers(line.text, expected)]
         region_width = max(1.0, candidate["bbox"][2] - candidate["bbox"][0])
         region_height = max(1.0, candidate["bbox"][3] - candidate["bbox"][1])
-        context_limit = max(region_width, region_height) * 0.16
+        context_limit = max(region_width, region_height) * self.spatial_association_distance_ratio
         for index, line in enumerate(numbered, 1):
             numbers = sorted(self._question_numbers(line.text, expected))
             nearby = sorted(
@@ -772,29 +779,39 @@ class IELTSQuestionVisualParser:
         matched = {number for label in labels for number in label["question_numbers"]}
         missing = sorted(expected - matched)
         connectors = candidate.get("connectors") or []
-        quality_issues = []
-        if missing:
-            quality_issues.append("missing_question_numbers")
+        quality_issues = ["missing_question_numbers"] if missing else []
+        connector_issues = []
         if not connectors:
-            quality_issues.append("no_connector_geometry")
+            connector_status = "not_detected"
+            connector_issues.append("no_connector_geometry")
         elif len(connectors) < len(labels):
-            quality_issues.append("connector_coverage_low")
+            connector_status = "partial"
+            connector_issues.append("connector_coverage_low")
+        else:
+            connector_status = "complete"
         if connectors and all(
             float(connector.get("direction_confidence") or 0.0) < self.direction_min_confidence
             for connector in connectors
         ):
-            quality_issues.append("low_confidence_connectors")
+            connector_issues.append("low_confidence_connectors")
         ocr_confidence = sum(line.confidence for line in lines) / max(1, len(lines))
-        confidence = min(candidate["layout_confidence"], ocr_confidence) * (0.7 if connectors else 0.55)
+        label_coverage = len(matched) / max(1, len(expected))
+        confidence = min(candidate["layout_confidence"], ocr_confidence) * label_coverage
         return {
             "type": "diagram",
             "question_range": [question_start, question_end],
             "labels": labels,
             "connectors": connectors,
+            "connector_status": connector_status,
+            "connector_issues": connector_issues,
             "edges": [],
             "blank_question_numbers": list(range(question_start, question_end + 1)),
             "bbox": candidate["bbox"],
-            "source": "doclayout_yolo+rapidocr_boxes+raster_connectors",
+            "source": (
+                "doclayout_yolo+rapidocr_boxes+raster_connectors"
+                if connectors
+                else "doclayout_yolo+rapidocr_boxes"
+            ),
             "confidence": round(confidence, 4),
             "quality_status": "degraded" if quality_issues else "passed",
             "quality_issues": quality_issues,
@@ -831,7 +848,10 @@ class IELTSQuestionVisualParser:
         edges = []
         unresolved = []
         seen: set[tuple[str, str]] = set()
-        max_distance = max(region_bbox[2] - region_bbox[0], region_bbox[3] - region_bbox[1]) * 0.16
+        max_distance = (
+            max(region_bbox[2] - region_bbox[0], region_bbox[3] - region_bbox[1])
+            * self.spatial_association_distance_ratio
+        )
         spatial_nodes = [node for node in nodes if node.get("bbox")]
         for connector in connectors:
             bbox = _flat_bbox(connector.get("bbox"))
@@ -875,8 +895,38 @@ class IELTSQuestionVisualParser:
                 )
                 continue
             key = (source["id"], target["id"])
+            evidence = "raster_arrowhead"
             if key in seen:
-                continue
+                remapped_target = self._directional_target(
+                    connector,
+                    source,
+                    spatial_nodes,
+                    region_bbox,
+                    excluded_ids={source["id"], target["id"]},
+                )
+                if remapped_target is None:
+                    unresolved.append(
+                        {
+                            "connector_id": connector.get("id"),
+                            "node_ids": [source["id"], target["id"]],
+                            "reason": "duplicate_node_pair",
+                            "confidence": round(confidence, 4),
+                        }
+                    )
+                    continue
+                target = remapped_target
+                key = (source["id"], target["id"])
+                evidence = "raster_arrowhead_directional_remap"
+                if key in seen:
+                    unresolved.append(
+                        {
+                            "connector_id": connector.get("id"),
+                            "node_ids": [source["id"], target["id"]],
+                            "reason": "duplicate_node_pair",
+                            "confidence": round(confidence, 4),
+                        }
+                    )
+                    continue
             seen.add(key)
             edges.append(
                 {
@@ -884,10 +934,66 @@ class IELTSQuestionVisualParser:
                     "to": target["id"],
                     "connector_id": connector.get("id"),
                     "confidence": round(confidence, 4),
-                    "evidence": "raster_arrowhead",
+                    "evidence": evidence,
                 }
             )
         return edges, unresolved
+
+    def _directional_target(
+        self,
+        connector: dict[str, Any],
+        source: dict[str, Any],
+        nodes: list[dict[str, Any]],
+        region_bbox: list[float],
+        excluded_ids: set[str],
+    ) -> dict[str, Any] | None:
+        endpoints = connector.get("endpoints") or []
+        if len(endpoints) < 2 or not source.get("bbox"):
+            return None
+        valid_endpoints = [
+            [float(point[0]), float(point[1])]
+            for point in endpoints[:2]
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+        if len(valid_endpoints) < 2:
+            return None
+        source_index = min(
+            range(2),
+            key=lambda index: self._point_bbox_distance(valid_endpoints[index], source["bbox"]),
+        )
+        start = valid_endpoints[source_index]
+        end = valid_endpoints[1 - source_index]
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        length = (dx * dx + dy * dy) ** 0.5
+        if length < 1:
+            return None
+        direction = (dx / length, dy / length)
+        max_distance = (
+            max(region_bbox[2] - region_bbox[0], region_bbox[3] - region_bbox[1])
+            * self.spatial_association_distance_ratio
+        )
+        candidates = []
+        for node in nodes:
+            if node["id"] in excluded_ids or not node.get("bbox"):
+                continue
+            bbox = node["bbox"]
+            center = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]
+            vector = [center[0] - end[0], center[1] - end[1]]
+            along = vector[0] * direction[0] + vector[1] * direction[1]
+            radius = max(bbox[2] - bbox[0], bbox[3] - bbox[1]) / 2
+            if along < -radius:
+                continue
+            perpendicular = abs(vector[0] * direction[1] - vector[1] * direction[0])
+            adjusted_perpendicular = max(0.0, perpendicular - radius)
+            if adjusted_perpendicular > max_distance:
+                continue
+            candidates.append(
+                (
+                    adjusted_perpendicular + self.direction_forward_weight * max(0.0, along),
+                    node,
+                )
+            )
+        return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
     def _region_connectors(
         self,

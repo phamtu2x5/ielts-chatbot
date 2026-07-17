@@ -160,6 +160,7 @@ class RasterConnectorDetector:
                         float(round(float(geometry["arrowhead_point"][1] + y0), 2)),
                     ],
                     "direction_confidence": geometry["direction_confidence"],
+                    "direction_evidence": geometry["direction_evidence"],
                     "area_ratio": round(area_ratio, 6),
                 }
             )
@@ -192,11 +193,16 @@ class RasterConnectorDetector:
             1.0,
             endpoint_distances[0] + endpoint_distances[1],
         )
-        confidence = min(1.0, head_strength) * (0.6 + 0.4 * separation)
+        normalized_head_strength = min(1.0, head_strength)
+        confidence = 0.5 * normalized_head_strength + 0.5 * min(1.0, separation * 2.0)
         return {
             "endpoints": endpoints,
             "arrowhead_point": head_point,
             "direction_confidence": round(confidence, 4),
+            "direction_evidence": {
+                "head_strength": round(normalized_head_strength, 4),
+                "endpoint_separation": round(separation, 4),
+            },
         }
 
     def _mask_text(

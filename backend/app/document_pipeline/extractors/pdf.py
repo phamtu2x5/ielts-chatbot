@@ -3,14 +3,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from ..config import DocumentPipelineConfig
 from ..connectors import ConnectorDetectionResult, RasterConnectorDetector
 from ..layout import DocLayoutDetector, LayoutResult
 from ..models import DocumentElement, ProcessedDocument, ProcessedPage
 from ..normalization import normalize_inline_text, normalize_text
-from ..ocr import OCRProcessor
+from ..ocr import OCRProcessor, OCRResult
 from ..quality import evaluate_native_page_text
 
 
@@ -84,6 +84,7 @@ class PDFExtractor:
                 page_timing["render_seconds"] = 0.0
                 page_timing["layout_seconds"] = 0.0
                 page_timing["ocr_seconds"] = 0.0
+                page_timing["visual_ocr_retry_seconds"] = 0.0
                 page_timing["connector_seconds"] = 0.0
 
                 if quality.native_text_is_usable:
@@ -140,6 +141,13 @@ class PDFExtractor:
                         self._emit(progress, "ocr_started", page=page_index)
                         ocr_result = self.ocr.image_to_text(rendered_page)
                         page_timing["ocr_seconds"] = self._elapsed(ocr_started)
+                        retry_started = time.perf_counter()
+                        ocr_result = self._retry_visual_ocr(
+                            rendered_page,
+                            layout_result.region_dicts(),
+                            ocr_result,
+                        )
+                        page_timing["visual_ocr_retry_seconds"] = self._elapsed(retry_started)
                         self._emit(
                             progress,
                             "ocr_finished",
@@ -240,6 +248,13 @@ class PDFExtractor:
                 self._emit(progress, "ocr_started", page=page_index)
                 ocr_result = self.ocr.image_to_text(rendered_page)
                 page_timing["ocr_seconds"] = self._elapsed(ocr_started)
+                retry_started = time.perf_counter()
+                ocr_result = self._retry_visual_ocr(
+                    rendered_page,
+                    layout_result.region_dicts(),
+                    ocr_result,
+                )
+                page_timing["visual_ocr_retry_seconds"] = self._elapsed(retry_started)
                 self._emit(
                     progress,
                     "ocr_finished",
@@ -365,6 +380,180 @@ class PDFExtractor:
         matrix = fitz.Matrix(self.config.ocr_dpi / 72, self.config.ocr_dpi / 72)
         pixmap = page.get_pixmap(matrix=matrix, alpha=False)
         return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+
+    def _retry_visual_ocr(
+        self,
+        image: Image.Image,
+        layout_regions: list[dict[str, Any]],
+        result: OCRResult,
+    ) -> OCRResult:
+        if not self.config.visual_ocr_retry_enabled or not result.text:
+            return result
+
+        missing_numbers = self._missing_visual_question_numbers(result.text)
+        if not missing_numbers:
+            return result
+
+        visual_regions = [
+            region
+            for region in layout_regions
+            if str(region.get("type") or "").strip().lower().replace(" ", "_") in {"table", "figure"}
+        ][: self.config.visual_ocr_retry_max_regions]
+        if not visual_regions:
+            return result
+
+        metadata = dict(result.metadata)
+        merged_lines = [dict(line) for line in metadata.get("lines") or []]
+        retries = []
+        recovered: set[int] = set()
+        scale = self.config.visual_ocr_retry_scale
+        for region in visual_regions:
+            bbox = self._flat_bbox(region.get("bbox"))
+            if bbox is None:
+                continue
+            x0, y0, x1, y1 = self._clip_image_bbox(bbox, image.width, image.height)
+            crop = ImageOps.autocontrast(image.crop((x0, y0, x1, y1)).convert("L")).convert("RGB")
+            if scale > 1:
+                crop = crop.resize(
+                    (max(1, round(crop.width * scale)), max(1, round(crop.height * scale))),
+                    Image.Resampling.LANCZOS,
+                )
+            retry = self.ocr.image_to_text(crop)
+            retry_lines = []
+            retry_recovered: set[int] = set()
+            for line in retry.metadata.get("lines") or []:
+                line_numbers = self._question_numbers_in_text(str(line.get("text") or ""))
+                matched = line_numbers & (missing_numbers - recovered)
+                translated_bbox = self._translate_bbox(line.get("bbox"), x0, y0, scale)
+                if not matched or translated_bbox is None:
+                    continue
+                translated = {**line, "bbox": translated_bbox, "source": "visual_region_ocr_retry"}
+                self._replace_overlapping_line(merged_lines, translated)
+                retry_lines.append(translated)
+                retry_recovered.update(matched)
+            recovered.update(retry_recovered)
+            retries.append(
+                {
+                    "region_type": region.get("type"),
+                    "bbox": [float(value) for value in (x0, y0, x1, y1)],
+                    "scale": scale,
+                    "engine": retry.engine,
+                    "confidence": round(retry.confidence, 4),
+                    "recovered_question_numbers": sorted(retry_recovered),
+                    "accepted_lines": retry_lines,
+                }
+            )
+            if missing_numbers <= recovered:
+                break
+
+        metadata["visual_ocr_retries"] = retries
+        metadata["visual_ocr_retry_missing"] = sorted(missing_numbers)
+        metadata["visual_ocr_retry_recovered"] = sorted(recovered)
+        if not recovered:
+            return OCRResult(result.text, result.confidence, result.engine, metadata)
+
+        metadata["lines"] = merged_lines
+        metadata["boxes"] = [line.get("bbox") for line in merged_lines if line.get("bbox")]
+        text = normalize_text("\n".join(str(line.get("text") or "") for line in merged_lines))
+        return OCRResult(text, result.confidence, result.engine, metadata)
+
+    def _missing_visual_question_numbers(self, text: str) -> set[int]:
+        header_pattern = re.compile(r"questions?\s+(\d{1,2})\s*(?:-|–|to)\s*(\d{1,2})", re.IGNORECASE)
+        headers = list(header_pattern.finditer(text))
+        missing: set[int] = set()
+        visual_markers = (
+            "complete the table",
+            "complete the flow chart",
+            "complete the flowchart",
+            "label the diagram",
+            "label the figure",
+        )
+        for index, header in enumerate(headers):
+            section_end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+            section = text[header.end() : section_end]
+            if not any(marker in section.lower() for marker in visual_markers):
+                continue
+            start, end = int(header.group(1)), int(header.group(2))
+            if start > end:
+                start, end = end, start
+            present = self._question_numbers_in_text(section)
+            missing.update(set(range(start, end + 1)) - present)
+        return missing
+
+    def _question_numbers_in_text(self, text: str) -> set[int]:
+        parenthesized = {int(number) for number in re.findall(r"\((\d{1,2})\)", text)}
+        numbered = {
+            int(number)
+            for number in re.findall(r"(?:^|\s)(\d{1,2})\s*[\.)](?=\s|$)", text, flags=re.MULTILINE)
+        }
+        return parenthesized | numbered
+
+    def _replace_overlapping_line(self, lines: list[dict[str, Any]], replacement: dict[str, Any]) -> None:
+        replacement_bbox = self._flat_bbox(replacement.get("bbox"))
+        if replacement_bbox is None:
+            lines.append(replacement)
+            return
+        for index, line in enumerate(lines):
+            bbox = self._flat_bbox(line.get("bbox"))
+            if bbox is not None and self._bbox_overlap_ratio(bbox, replacement_bbox) >= 0.5:
+                lines[index] = replacement
+                return
+        lines.append(replacement)
+
+    def _translate_bbox(
+        self,
+        value: Any,
+        offset_x: int,
+        offset_y: int,
+        scale: float,
+    ) -> list[list[float]] | list[float] | None:
+        if not isinstance(value, (list, tuple)):
+            return None
+        if len(value) >= 4 and all(isinstance(item, (int, float)) for item in value[:4]):
+            x0, y0, x1, y1 = (float(item) for item in value[:4])
+            return [
+                offset_x + x0 / scale,
+                offset_y + y0 / scale,
+                offset_x + x1 / scale,
+                offset_y + y1 / scale,
+            ]
+        points = [point for point in value if isinstance(point, (list, tuple)) and len(point) >= 2]
+        if not points:
+            return None
+        return [
+            [offset_x + float(point[0]) / scale, offset_y + float(point[1]) / scale]
+            for point in points
+        ]
+
+    def _flat_bbox(self, value: Any) -> list[float] | None:
+        if not isinstance(value, (list, tuple)):
+            return None
+        if len(value) >= 4 and all(isinstance(item, (int, float)) for item in value[:4]):
+            x0, y0, x1, y1 = (float(item) for item in value[:4])
+            return [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
+        points = [point for point in value if isinstance(point, (list, tuple)) and len(point) >= 2]
+        if not points:
+            return None
+        xs = [float(point[0]) for point in points]
+        ys = [float(point[1]) for point in points]
+        return [min(xs), min(ys), max(xs), max(ys)]
+
+    def _clip_image_bbox(self, bbox: list[float], width: int, height: int) -> tuple[int, int, int, int]:
+        x0 = max(0, min(width - 1, int(bbox[0])))
+        y0 = max(0, min(height - 1, int(bbox[1])))
+        x1 = max(x0 + 1, min(width, int(bbox[2] + 0.999)))
+        y1 = max(y0 + 1, min(height, int(bbox[3] + 0.999)))
+        return x0, y0, x1, y1
+
+    def _bbox_overlap_ratio(self, first: list[float], second: list[float]) -> float:
+        width = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
+        height = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
+        intersection = width * height
+        smaller = min(
+            max(1.0, (first[2] - first[0]) * (first[3] - first[1])),
+            max(1.0, (second[2] - second[0]) * (second[3] - second[1])),
+        )
+        return intersection / smaller
 
     def _elapsed(self, started: float) -> float:
         return round(time.perf_counter() - started, 3)
