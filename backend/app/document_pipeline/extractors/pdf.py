@@ -6,6 +6,7 @@ from typing import Any, Callable
 from PIL import Image
 
 from ..config import DocumentPipelineConfig
+from ..connectors import ConnectorDetectionResult, RasterConnectorDetector
 from ..layout import DocLayoutDetector, LayoutResult
 from ..models import DocumentElement, ProcessedDocument, ProcessedPage
 from ..normalization import normalize_inline_text, normalize_text
@@ -21,6 +22,7 @@ class PDFExtractor:
         self.config = config
         self.ocr = ocr
         self.layout = layout
+        self.connectors = RasterConnectorDetector(config)
 
     def extract(
         self,
@@ -82,6 +84,7 @@ class PDFExtractor:
                 page_timing["render_seconds"] = 0.0
                 page_timing["layout_seconds"] = 0.0
                 page_timing["ocr_seconds"] = 0.0
+                page_timing["connector_seconds"] = 0.0
 
                 if quality.native_text_is_usable:
                     elements = [
@@ -104,6 +107,7 @@ class PDFExtractor:
                     ocr_result = None
                     merge_reasons = self._ocr_merge_reasons(native_text)
                     layout_result = self._empty_layout_result()
+                    connector_result = self._empty_connector_result()
                     rendered_page = None
                     layout_needed = bool(merge_reasons)
                     if layout_needed:
@@ -165,6 +169,14 @@ class PDFExtractor:
                             )
                             processing_route = "native_pdf_plus_ocr"
                             page_quality_score = min(quality.score, ocr_result.confidence or quality.score)
+                    if rendered_page is not None and ocr_result is not None:
+                        connector_started = time.perf_counter()
+                        connector_result = self.connectors.detect(
+                            rendered_page,
+                            layout_result.region_dicts(),
+                            ocr_result.metadata.get("lines") or [],
+                        )
+                        page_timing["connector_seconds"] = self._elapsed(connector_started)
                     pages.append(
                         ProcessedPage(
                             page_number=page_index,
@@ -185,6 +197,8 @@ class PDFExtractor:
                                 "layout_engine": layout_result.engine,
                                 "layout_regions": layout_result.region_dicts(),
                                 "layout_metadata": layout_result.metadata,
+                                "connector_regions": connector_result.regions,
+                                "connector_metadata": connector_result.metadata,
                                 "timing": {**page_timing, "route": processing_route},
                             },
                         )
@@ -236,6 +250,13 @@ class PDFExtractor:
                     characters=len(ocr_result.text),
                 )
                 text = normalize_text(ocr_result.text)
+                connector_started = time.perf_counter()
+                connector_result = self.connectors.detect(
+                    rendered_page,
+                    layout_result.region_dicts(),
+                    ocr_result.metadata.get("lines") or [],
+                )
+                page_timing["connector_seconds"] = self._elapsed(connector_started)
                 elements = []
                 if text:
                     elements.append(
@@ -267,6 +288,8 @@ class PDFExtractor:
                             "layout_engine": layout_result.engine,
                             "layout_regions": layout_result.region_dicts(),
                             "layout_metadata": layout_result.metadata,
+                            "connector_regions": connector_result.regions,
+                            "connector_metadata": connector_result.metadata,
                             "timing": {**page_timing, "route": "pdf_page_ocr"},
                         },
                     )
@@ -352,6 +375,9 @@ class PDFExtractor:
 
     def _empty_layout_result(self) -> LayoutResult:
         return LayoutResult("layout_not_attempted", [], {"skipped": True})
+
+    def _empty_connector_result(self) -> ConnectorDetectionResult:
+        return ConnectorDetectionResult([], {"skipped": True, "reason": "ocr_not_attempted"})
 
     def _ocr_merge_reasons(self, native_text: str) -> list[str]:
         reasons = []

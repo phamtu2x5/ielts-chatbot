@@ -381,6 +381,9 @@ class IELTSQuestionVisualParser:
     raw linearized text instead of inventing rows, columns, nodes or edges.
     """
 
+    def __init__(self, direction_min_confidence: float = 0.55) -> None:
+        self.direction_min_confidence = direction_min_confidence
+
     def parse(
         self,
         text: str,
@@ -416,7 +419,7 @@ class IELTSQuestionVisualParser:
         source_element_ids: list[str],
         spatial_pages: list[dict[str, Any]],
     ) -> ParsedQuestionVisual | None:
-        if question_type != "flowchart_completion":
+        if question_type not in {"flowchart_completion", "diagram_labeling"}:
             table_candidate = self._best_region_candidate(
                 spatial_pages,
                 "table",
@@ -463,6 +466,29 @@ class IELTSQuestionVisualParser:
                         display_text=self._flowchart_text(flowchart),
                         confidence=float(flowchart["confidence"]),
                     )
+        if question_type == "diagram_labeling":
+            figure_candidate = self._best_region_candidate(
+                spatial_pages,
+                "figure",
+                question_start,
+                question_end,
+            )
+            if figure_candidate:
+                diagram = self._reconstruct_spatial_diagram(
+                    figure_candidate,
+                    text,
+                    question_start,
+                    question_end,
+                    source_element_ids,
+                )
+                if diagram:
+                    return ParsedQuestionVisual(
+                        visual_type="diagram",
+                        element_id=f"visual-diagram-{question_start}-{question_end}",
+                        payload=diagram,
+                        display_text=self._diagram_text(diagram),
+                        confidence=float(diagram["confidence"]),
+                    )
         return None
 
     def _best_region_candidate(
@@ -494,6 +520,7 @@ class IELTSQuestionVisualParser:
                         "lines": region_lines,
                         "matched_questions": matched,
                         "layout_confidence": float(region.get("confidence") or 0.0),
+                        "connectors": self._region_connectors(page.get("connector_regions") or [], bbox),
                     }
                 )
         if not candidates:
@@ -523,16 +550,22 @@ class IELTSQuestionVisualParser:
         if len(usable_rows) < 2:
             return None
 
-        width_counts = Counter(len(row) for row in usable_rows)
-        column_count = max(width_counts, key=lambda width: (width_counts[width], width))
-        anchor_rows = [sorted(row, key=lambda line: line.center_x) for row in usable_rows if len(row) == column_count]
-        if not anchor_rows:
+        first_numbered_row = next(
+            (
+                index
+                for index, row in enumerate(clustered_rows)
+                if self._question_numbers(" ".join(line.text for line in row), expected)
+            ),
+            None,
+        )
+        column_centers = self._table_column_centers(clustered_rows, usable_rows, first_numbered_row)
+        if len(column_centers) < 2:
             return None
-        column_centers = [median(row[index].center_x for row in anchor_rows) for index in range(column_count)]
+        column_count = len(column_centers)
 
         spatial_rows: list[list[str]] = []
         row_numbers: list[set[int]] = []
-        for row in clustered_rows:
+        for clustered_index, row in enumerate(clustered_rows):
             cells: list[list[_SpatialOCRLine]] = [[] for _ in column_centers]
             for line in sorted(row, key=lambda item: item.center_x):
                 column_index = min(
@@ -541,7 +574,9 @@ class IELTSQuestionVisualParser:
                 )
                 cells[column_index].append(line)
             values = [normalize_text(" ".join(line.text for line in cell)) for cell in cells]
-            if sum(bool(value) for value in values) < 2:
+            populated = sum(bool(value) for value in values)
+            is_header_continuation = first_numbered_row is not None and clustered_index < first_numbered_row
+            if populated < 2 and not (is_header_continuation and populated == 1):
                 continue
             spatial_rows.append(values)
             row_numbers.append(self._question_numbers(" ".join(values), expected))
@@ -554,9 +589,23 @@ class IELTSQuestionVisualParser:
         columns = []
         for column_index in range(column_count):
             parts = [row[column_index] for row in header_rows if row[column_index]]
-            columns.append(normalize_text(" ".join(dict.fromkeys(parts))) or f"Column {column_index + 1}")
+            columns.append(normalize_text(" ".join(dict.fromkeys(parts))))
         rows = spatial_rows[first_data_row:]
         matched = set().union(*row_numbers[first_data_row:])
+        missing_questions = sorted(expected - matched)
+        duplicate_questions = sorted(
+            number
+            for number in expected
+            if sum(number in numbers for numbers in row_numbers[first_data_row:]) > 1
+        )
+        missing_headers = [index + 1 for index, column in enumerate(columns) if not column]
+        quality_issues = []
+        if missing_questions:
+            quality_issues.append("missing_question_numbers")
+        if duplicate_questions:
+            quality_issues.append("duplicate_question_numbers")
+        if missing_headers:
+            quality_issues.append("missing_column_headers")
         coverage = len(matched) / max(1, len(expected))
         ocr_confidence = sum(line.confidence for line in candidate["lines"]) / max(1, len(candidate["lines"]))
         confidence = min(candidate["layout_confidence"], ocr_confidence) * (0.75 + 0.25 * coverage)
@@ -572,7 +621,38 @@ class IELTSQuestionVisualParser:
             "raw_text": raw_text,
             "page_numbers": [candidate["page"]],
             "source_element_ids": source_element_ids,
+            "quality_status": "degraded" if quality_issues else "passed",
+            "quality_issues": quality_issues,
+            "missing_question_numbers": missing_questions,
+            "duplicate_question_numbers": duplicate_questions,
+            "missing_column_headers": missing_headers,
         }
+
+    def _table_column_centers(
+        self,
+        clustered_rows: list[list[_SpatialOCRLine]],
+        usable_rows: list[list[_SpatialOCRLine]],
+        first_numbered_row: int | None,
+    ) -> list[float]:
+        header_rows = clustered_rows[:first_numbered_row] if first_numbered_row is not None else []
+        header_candidates = [row for row in header_rows if 2 <= len(row) <= 8]
+        if header_candidates:
+            anchor = max(header_candidates, key=lambda row: (len(row), self._row_width(row)))
+            return [line.center_x for line in sorted(anchor, key=lambda line: line.center_x)]
+
+        width_counts = Counter(len(row) for row in usable_rows)
+        column_count = max(width_counts, key=lambda width: (width_counts[width], width))
+        anchor_rows = [
+            sorted(row, key=lambda line: line.center_x)
+            for row in usable_rows
+            if len(row) == column_count
+        ]
+        if not anchor_rows:
+            return []
+        return [median(row[index].center_x for row in anchor_rows) for index in range(column_count)]
+
+    def _row_width(self, row: list[_SpatialOCRLine]) -> float:
+        return max(line.bbox[2] for line in row) - min(line.bbox[0] for line in row)
 
     def _reconstruct_spatial_flowchart(
         self,
@@ -584,7 +664,8 @@ class IELTSQuestionVisualParser:
     ) -> dict[str, Any] | None:
         blank_numbers = list(range(question_start, question_end + 1))
         expected = set(blank_numbers)
-        groups = self._cluster_flow_nodes(candidate["lines"])
+        flow_lines = self._without_visual_title(candidate["lines"], candidate["bbox"], expected)
+        groups = self._cluster_flow_nodes(flow_lines)
         nodes = []
         matched = set()
         for index, group in enumerate(groups, 1):
@@ -603,27 +684,248 @@ class IELTSQuestionVisualParser:
             )
         if len(nodes) < 2 or not matched:
             return None
-        ocr_confidence = sum(line.confidence for line in candidate["lines"]) / max(1, len(candidate["lines"]))
-        confidence = min(candidate["layout_confidence"], ocr_confidence) * 0.6
+        edges, unresolved = self._connector_graph(nodes, candidate.get("connectors") or [], candidate["bbox"])
+        missing_questions = sorted(expected - matched)
+        quality_issues = []
+        if missing_questions:
+            quality_issues.append("missing_question_numbers")
+        if unresolved:
+            quality_issues.append("unresolved_connectors")
+        if not candidate.get("connectors"):
+            quality_issues.append("no_connector_geometry")
+        ocr_confidence = sum(line.confidence for line in flow_lines) / max(1, len(flow_lines))
+        connector_coverage = len(edges) / max(1, len(candidate.get("connectors") or []))
+        confidence = min(candidate["layout_confidence"], ocr_confidence) * (0.6 + 0.3 * connector_coverage)
         return {
             "type": "flowchart",
             "question_range": [question_start, question_end],
             "nodes": nodes,
-            "edges": [],
+            "edges": edges,
+            "connectors": candidate.get("connectors") or [],
+            "unresolved_connectors": unresolved,
             "blank_question_numbers": blank_numbers,
             "bbox": candidate["bbox"],
-            "source": "doclayout_yolo+rapidocr_boxes",
+            "source": "doclayout_yolo+rapidocr_boxes+raster_connectors",
             "confidence": round(confidence, 4),
-            "edge_detection": "not_available",
+            "edge_detection": (
+                "raster_arrowheads"
+                if edges
+                else "connector_geometry_only"
+                if candidate.get("connectors")
+                else "not_available"
+            ),
+            "quality_status": "degraded" if quality_issues else "passed",
+            "quality_issues": quality_issues,
+            "missing_question_numbers": missing_questions,
             "raw_text": raw_text,
             "page_numbers": [candidate["page"]],
             "source_element_ids": source_element_ids,
         }
 
+    def _reconstruct_spatial_diagram(
+        self,
+        candidate: dict[str, Any],
+        raw_text: str,
+        question_start: int,
+        question_end: int,
+        source_element_ids: list[str],
+    ) -> dict[str, Any] | None:
+        expected = set(range(question_start, question_end + 1))
+        lines = self._without_visual_title(candidate["lines"], candidate["bbox"], expected)
+        numbered = [line for line in lines if self._question_numbers(line.text, expected)]
+        if not numbered:
+            return None
+
+        labels = []
+        used_context: set[int] = set()
+        context_lines = [line for line in lines if not self._question_numbers(line.text, expected)]
+        region_width = max(1.0, candidate["bbox"][2] - candidate["bbox"][0])
+        region_height = max(1.0, candidate["bbox"][3] - candidate["bbox"][1])
+        context_limit = max(region_width, region_height) * 0.16
+        for index, line in enumerate(numbered, 1):
+            numbers = sorted(self._question_numbers(line.text, expected))
+            nearby = sorted(
+                (
+                    (self._bbox_distance(line.bbox, candidate_line.bbox), context_index, candidate_line)
+                    for context_index, candidate_line in enumerate(context_lines)
+                    if context_index not in used_context
+                ),
+                key=lambda item: item[0],
+            )
+            context = []
+            for distance, context_index, candidate_line in nearby[:2]:
+                if distance > context_limit:
+                    continue
+                used_context.add(context_index)
+                context.append(candidate_line)
+            grouped = [line, *context]
+            labels.append(
+                {
+                    "id": f"label-{index}",
+                    "question_number": numbers[0] if len(numbers) == 1 else None,
+                    "question_numbers": numbers,
+                    "text": normalize_text(" ".join(item.text for item in sorted(grouped, key=lambda item: (item.center_y, item.center_x)))),
+                    "bbox": self._union_bbox([item.bbox for item in grouped]),
+                }
+            )
+
+        matched = {number for label in labels for number in label["question_numbers"]}
+        missing = sorted(expected - matched)
+        connectors = candidate.get("connectors") or []
+        quality_issues = []
+        if missing:
+            quality_issues.append("missing_question_numbers")
+        if not connectors:
+            quality_issues.append("no_connector_geometry")
+        elif len(connectors) < len(labels):
+            quality_issues.append("connector_coverage_low")
+        if connectors and all(
+            float(connector.get("direction_confidence") or 0.0) < self.direction_min_confidence
+            for connector in connectors
+        ):
+            quality_issues.append("low_confidence_connectors")
+        ocr_confidence = sum(line.confidence for line in lines) / max(1, len(lines))
+        confidence = min(candidate["layout_confidence"], ocr_confidence) * (0.7 if connectors else 0.55)
+        return {
+            "type": "diagram",
+            "question_range": [question_start, question_end],
+            "labels": labels,
+            "connectors": connectors,
+            "edges": [],
+            "blank_question_numbers": list(range(question_start, question_end + 1)),
+            "bbox": candidate["bbox"],
+            "source": "doclayout_yolo+rapidocr_boxes+raster_connectors",
+            "confidence": round(confidence, 4),
+            "quality_status": "degraded" if quality_issues else "passed",
+            "quality_issues": quality_issues,
+            "missing_question_numbers": missing,
+            "raw_text": raw_text,
+            "page_numbers": [candidate["page"]],
+            "source_element_ids": source_element_ids,
+        }
+
+    def _without_visual_title(
+        self,
+        lines: list[_SpatialOCRLine],
+        region_bbox: list[float],
+        expected: set[int],
+    ) -> list[_SpatialOCRLine]:
+        region_width = max(1.0, region_bbox[2] - region_bbox[0])
+        region_height = max(1.0, region_bbox[3] - region_bbox[1])
+        return [
+            line
+            for line in lines
+            if not (
+                not self._question_numbers(line.text, expected)
+                and line.center_y <= region_bbox[1] + region_height * 0.14
+                and (line.bbox[2] - line.bbox[0]) >= region_width * 0.25
+            )
+        ]
+
+    def _connector_graph(
+        self,
+        nodes: list[dict[str, Any]],
+        connectors: list[dict[str, Any]],
+        region_bbox: list[float],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        edges = []
+        unresolved = []
+        seen: set[tuple[str, str]] = set()
+        max_distance = max(region_bbox[2] - region_bbox[0], region_bbox[3] - region_bbox[1]) * 0.16
+        spatial_nodes = [node for node in nodes if node.get("bbox")]
+        for connector in connectors:
+            bbox = _flat_bbox(connector.get("bbox"))
+            head = connector.get("arrowhead_point")
+            if bbox is None or not isinstance(head, (list, tuple)) or len(head) < 2:
+                unresolved.append({"connector_id": connector.get("id"), "reason": "missing_geometry"})
+                continue
+            endpoints = connector.get("endpoints") or []
+            endpoint_nodes = []
+            for endpoint in endpoints[:2]:
+                if not isinstance(endpoint, (list, tuple)) or len(endpoint) < 2:
+                    continue
+                nearest_endpoint = min(
+                    ((self._point_bbox_distance(endpoint, node["bbox"]), node) for node in spatial_nodes),
+                    key=lambda item: item[0],
+                    default=None,
+                )
+                if nearest_endpoint and all(nearest_endpoint[1]["id"] != item[1]["id"] for item in endpoint_nodes):
+                    endpoint_nodes.append(nearest_endpoint)
+            nearest = endpoint_nodes if len(endpoint_nodes) == 2 else sorted(
+                ((self._bbox_distance(bbox, node["bbox"]), node) for node in spatial_nodes),
+                key=lambda item: item[0],
+            )[:2]
+            if len(nearest) < 2 or nearest[1][0] > max_distance:
+                unresolved.append({"connector_id": connector.get("id"), "reason": "nodes_not_resolved"})
+                continue
+            node_pair = [nearest[0][1], nearest[1][1]]
+            head_distances = [self._point_bbox_distance(head, node["bbox"]) for node in node_pair]
+            target_index = 0 if head_distances[0] <= head_distances[1] else 1
+            target = node_pair[target_index]
+            source = node_pair[1 - target_index]
+            confidence = float(connector.get("direction_confidence") or 0.0)
+            if confidence < self.direction_min_confidence:
+                unresolved.append(
+                    {
+                        "connector_id": connector.get("id"),
+                        "node_ids": [source["id"], target["id"]],
+                        "reason": "direction_confidence_low",
+                        "confidence": round(confidence, 4),
+                    }
+                )
+                continue
+            key = (source["id"], target["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            edges.append(
+                {
+                    "from": source["id"],
+                    "to": target["id"],
+                    "connector_id": connector.get("id"),
+                    "confidence": round(confidence, 4),
+                    "evidence": "raster_arrowhead",
+                }
+            )
+        return edges, unresolved
+
+    def _region_connectors(
+        self,
+        connector_regions: list[dict[str, Any]],
+        region_bbox: list[float],
+    ) -> list[dict[str, Any]]:
+        selected = []
+        for connector_region in connector_regions:
+            bbox = _flat_bbox(connector_region.get("bbox"))
+            if bbox is None or self._bbox_overlap_ratio(bbox, region_bbox) < 0.5:
+                continue
+            selected.extend(connector_region.get("connectors") or [])
+        return selected
+
+    def _bbox_overlap_ratio(self, first: list[float], second: list[float]) -> float:
+        width = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
+        height = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
+        intersection = width * height
+        first_area = max(1.0, (first[2] - first[0]) * (first[3] - first[1]))
+        second_area = max(1.0, (second[2] - second[0]) * (second[3] - second[1]))
+        return intersection / min(first_area, second_area)
+
+    def _bbox_distance(self, first: list[float], second: list[float]) -> float:
+        dx = max(first[0] - second[2], second[0] - first[2], 0.0)
+        dy = max(first[1] - second[3], second[1] - first[3], 0.0)
+        return (dx * dx + dy * dy) ** 0.5
+
+    def _point_bbox_distance(self, point: list[float] | tuple[float, ...], bbox: list[float]) -> float:
+        x, y = float(point[0]), float(point[1])
+        dx = max(bbox[0] - x, x - bbox[2], 0.0)
+        dy = max(bbox[1] - y, y - bbox[3], 0.0)
+        return (dx * dx + dy * dy) ** 0.5
+
     def _cluster_flow_nodes(self, lines: list[_SpatialOCRLine]) -> list[list[_SpatialOCRLine]]:
         if not lines:
             return []
-        max_gap = median(line.height for line in lines) * 0.9
+        median_height = median(line.height for line in lines)
+        max_gap = median_height * 1.15
         groups: list[list[_SpatialOCRLine]] = []
         for line in sorted(lines, key=lambda item: (item.bbox[1], item.bbox[0])):
             target = None
@@ -633,7 +935,9 @@ class IELTSQuestionVisualParser:
                 horizontal_overlap = max(0.0, min(line.bbox[2], bbox[2]) - max(line.bbox[0], bbox[0]))
                 overlap_ratio = horizontal_overlap / max(1.0, min(line.bbox[2] - line.bbox[0], bbox[2] - bbox[0]))
                 vertical_gap = max(0.0, line.bbox[1] - bbox[3], bbox[1] - line.bbox[3])
-                if overlap_ratio >= 0.25 and vertical_gap <= max_gap and (target_gap is None or vertical_gap < target_gap):
+                if overlap_ratio >= 0.25 and vertical_gap <= max_gap and (
+                    target_gap is None or vertical_gap < target_gap
+                ):
                     target = group
                     target_gap = vertical_gap
             if target is None:
@@ -700,16 +1004,42 @@ class IELTSQuestionVisualParser:
     ) -> ParsedQuestionVisual:
         blank_numbers = list(range(question_start, question_end + 1))
         nodes, edges = self._parse_arrow_flow(text, blank_numbers)
-        confidence = 0.7 if nodes and edges else 0.35
+        ordered_items: list[str] = []
+        edge_detection = "text_arrows" if edges else "not_available"
+        if not edges:
+            ordered_nodes = self._parse_ordered_flow_items(text, blank_numbers)
+            if ordered_nodes:
+                nodes = ordered_nodes
+                ordered_items = [node["id"] for node in nodes]
+                edge_detection = "not_present_in_source"
+        matched = {
+            number
+            for node in nodes
+            for number in node.get("question_numbers") or (
+                [node["question_number"]] if node.get("question_number") else []
+            )
+        }
+        missing = sorted(set(blank_numbers) - matched)
+        quality_issues = []
+        if missing:
+            quality_issues.append("missing_question_numbers")
+        if not edges and not ordered_items:
+            quality_issues.append("no_explicit_structure")
+        confidence = 0.7 if edges else 0.68 if ordered_items and not missing else 0.35
         flowchart = {
             "type": "flowchart",
             "question_range": [question_start, question_end],
             "nodes": nodes,
             "edges": edges,
+            "ordered_items": ordered_items,
             "blank_question_numbers": blank_numbers,
             "bbox": [],
             "source": "ielts_question_group_parser",
             "confidence": confidence,
+            "edge_detection": edge_detection,
+            "quality_status": "degraded" if quality_issues else "passed",
+            "quality_issues": quality_issues,
+            "missing_question_numbers": missing,
             "raw_text": text,
             "page_numbers": page_numbers,
             "source_element_ids": source_element_ids,
@@ -722,6 +1052,40 @@ class IELTSQuestionVisualParser:
             display_text=display,
             confidence=confidence,
         )
+
+    def _parse_ordered_flow_items(
+        self,
+        text: str,
+        blank_numbers: list[int],
+    ) -> list[dict[str, Any]]:
+        bullet_pattern = re.compile(r"^\s*[•●▪◦*-]\s+(.+)$")
+        items = []
+        for line in text.splitlines():
+            match = bullet_pattern.match(line)
+            if not match:
+                continue
+            item_text = normalize_text(match.group(1))
+            if item_text:
+                items.append(item_text)
+        if len(items) < 2:
+            return []
+        nodes = []
+        for index, item in enumerate(items, 1):
+            numbers = [
+                number
+                for number in blank_numbers
+                if re.search(rf"(?<!\d){number}(?!\d)", item)
+            ]
+            nodes.append(
+                {
+                    "id": f"node-{index}",
+                    "text": item,
+                    "question_number": numbers[0] if len(numbers) == 1 else None,
+                    "question_numbers": numbers,
+                    "sequence_index": index,
+                }
+            )
+        return nodes
 
     def _parse_markdown_like_table(self, text: str) -> tuple[list[str], list[list[str]]]:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -807,6 +1171,13 @@ class IELTSQuestionVisualParser:
             lines.append(f"- {node['id']}: {label}")
         for edge in flowchart.get("edges") or []:
             lines.append(f"- edge: {edge['from']} -> {edge['to']}")
+        return "\n".join(lines)
+
+    def _diagram_text(self, diagram: dict[str, Any]) -> str:
+        lines = [f"Diagram Questions {diagram['question_range'][0]}-{diagram['question_range'][1]}"]
+        for label in diagram.get("labels") or []:
+            lines.append(f"- {label['id']}: {label.get('text', '')}")
+        lines.append(f"- detected connectors: {len(diagram.get('connectors') or [])}")
         return "\n".join(lines)
 
     def _visual_fallback_text(self, visual_type: str, payload: dict[str, Any]) -> str:

@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import tempfile
 import unittest
@@ -6,7 +7,7 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.document_pipeline.config import DocumentPipelineConfig
+from app.document_pipeline.connectors import RasterConnectorDetector
 from app.document_pipeline.chunking import SemanticChunker
 from app.document_pipeline.ielts import IELTSStructureParser, StructuredChunker
 from app.document_pipeline.extractors.text import TextExtractor
@@ -340,6 +342,79 @@ class PDFSpatialVisualParserTests(unittest.TestCase):
         self.assertEqual(visual.payload["source"], "doclayout_yolo+rapidocr_boxes")
         self.assertEqual(visual.payload["bbox"], [0.0, 0.0, 600.0, 220.0])
 
+    def test_pdf_table_uses_header_columns_when_a_cell_is_split_into_ocr_fragments(self) -> None:
+        lines = [
+            self._line("Category", 20, 20),
+            self._line("Fact", 220, 20),
+            self._line("Example", 480, 20),
+            self._line("Colour", 20, 80),
+            self._line("uses (5)", 190, 80),
+            self._line("in fermentation", 330, 80),
+            self._line("(6)", 480, 80),
+            self._line("Species", 20, 140),
+            self._line("can be (7)", 190, 140),
+            self._line("or blended", 330, 140),
+            self._line("Example wine", 480, 140),
+        ]
+
+        visual = self.parser.parse(
+            "Questions 5-7 Complete the table.",
+            5,
+            7,
+            "table_completion",
+            [2],
+            ["p2-e4"],
+            spatial_pages=[
+                {
+                    "page": 2,
+                    "ocr_lines": lines,
+                    "layout_regions": [{"type": "table", "confidence": 0.93, "bbox": [0, 0, 650, 220]}],
+                }
+            ],
+        )
+
+        self.assertIsNotNone(visual)
+        self.assertEqual(visual.payload["columns"], ["Category", "Fact", "Example"])
+        self.assertEqual(
+            visual.payload["rows"],
+            [
+                ["Colour", "uses (5) in fermentation", "(6)"],
+                ["Species", "can be (7) or blended", "Example wine"],
+            ],
+        )
+        self.assertEqual(visual.payload["quality_status"], "passed")
+
+    def test_pdf_table_reports_missing_question_numbers_without_rewriting_ocr(self) -> None:
+        lines = [
+            self._line("Category", 20, 20),
+            self._line("Answer", 300, 20),
+            self._line("Colour", 20, 80),
+            self._line("(5)", 300, 80),
+            self._line("Species", 20, 140),
+            self._line("(Z)", 300, 140),
+        ]
+
+        visual = self.parser.parse(
+            "Questions 5-6 Complete the table.",
+            5,
+            6,
+            "table_completion",
+            [2],
+            ["p2-e4"],
+            spatial_pages=[
+                {
+                    "page": 2,
+                    "ocr_lines": lines,
+                    "layout_regions": [{"type": "table", "confidence": 0.93, "bbox": [0, 0, 600, 220]}],
+                }
+            ],
+        )
+
+        self.assertIsNotNone(visual)
+        self.assertEqual(visual.payload["missing_question_numbers"], [6])
+        self.assertEqual(visual.payload["quality_status"], "degraded")
+        self.assertIn("(Z)", visual.payload["rows"][1])
+
     def test_spatial_table_can_override_non_table_instruction_type(self) -> None:
         lines = [
             self._line("Category", 20, 20, 250),
@@ -406,6 +481,139 @@ class PDFSpatialVisualParserTests(unittest.TestCase):
         self.assertTrue(all(node["bbox"] for node in visual.payload["nodes"]))
         self.assertEqual(visual.payload["edges"], [])
         self.assertEqual(visual.payload["edge_detection"], "not_available")
+
+    def test_pdf_flowchart_maps_raster_arrowheads_to_nodes(self) -> None:
+        lines = [
+            self._line("step (18)", 20, 50),
+            self._line("step (19)", 320, 50),
+            self._line("step (20)", 620, 50),
+        ]
+        connectors = [
+            {
+                "id": "connector-1",
+                "bbox": [170, 45, 320, 75],
+                "endpoints": [[170, 60], [320, 60]],
+                "arrowhead_point": [310, 60],
+                "direction_confidence": 0.9,
+            },
+            {
+                "id": "connector-2",
+                "bbox": [470, 45, 620, 75],
+                "endpoints": [[470, 60], [620, 60]],
+                "arrowhead_point": [610, 60],
+                "direction_confidence": 0.88,
+            },
+        ]
+        visual = self.parser.parse(
+            "Questions 18-20 Complete the flow chart.",
+            18,
+            20,
+            "flowchart_completion",
+            [4],
+            ["p4-e5"],
+            spatial_pages=[
+                {
+                    "page": 4,
+                    "ocr_lines": lines,
+                    "layout_regions": [{"type": "figure", "confidence": 0.92, "bbox": [0, 0, 800, 180]}],
+                    "connector_regions": [{"bbox": [0, 0, 800, 180], "connectors": connectors}],
+                }
+            ],
+        )
+
+        self.assertIsNotNone(visual)
+        self.assertEqual(
+            [(edge["from"], edge["to"]) for edge in visual.payload["edges"]],
+            [("node-1", "node-2"), ("node-2", "node-3")],
+        )
+        self.assertEqual(visual.payload["edge_detection"], "raster_arrowheads")
+
+    def test_textual_flowchart_preserves_order_without_inventing_edges(self) -> None:
+        visual = self.parser.parse(
+            """Questions 34-37
+Complete the flow chart below.
+• For (34) early communities produced paintings.
+• Early period: groups used (35) for paintings.
+• Mid period: paintings appeared in (36).
+• Later period: patterns were painted on (37).""",
+            34,
+            37,
+            "flowchart_completion",
+            [6],
+            ["p6-e3"],
+        )
+
+        self.assertIsNotNone(visual)
+        self.assertEqual(len(visual.payload["nodes"]), 4)
+        self.assertEqual(len(visual.payload["ordered_items"]), 4)
+        self.assertEqual(visual.payload["edges"], [])
+        self.assertEqual(visual.payload["edge_detection"], "not_present_in_source")
+        self.assertEqual(visual.payload["quality_status"], "passed")
+
+    def test_diagram_labels_keep_bbox_without_inventing_edges(self) -> None:
+        lines = [
+            self._line("water is atomized into", 250, 30, 220),
+            self._line("7.", 250, 60, 40),
+            self._line("8.", 20, 150, 40),
+            self._line("are formed", 20, 180, 120),
+            self._line("6.", 650, 150, 40),
+            self._line("air", 720, 150, 60),
+        ]
+        visual = self.parser.parse(
+            "Questions 6-8 Label the diagram below.",
+            6,
+            8,
+            "diagram_labeling",
+            [2],
+            ["p2-e3"],
+            spatial_pages=[
+                {
+                    "page": 2,
+                    "ocr_lines": lines,
+                    "layout_regions": [{"type": "figure", "confidence": 0.94, "bbox": [0, 0, 850, 260]}],
+                    "connector_regions": [
+                        {
+                            "bbox": [0, 0, 850, 260],
+                            "connectors": [
+                                {
+                                    "id": "connector-1",
+                                    "bbox": [290, 80, 400, 140],
+                                    "endpoints": [[290, 80], [400, 140]],
+                                    "arrowhead_point": [400, 140],
+                                    "direction_confidence": 0.4,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        )
+
+        self.assertIsNotNone(visual)
+        self.assertEqual(visual.visual_type, "diagram")
+        self.assertEqual({label["question_number"] for label in visual.payload["labels"]}, {6, 7, 8})
+        self.assertEqual(visual.payload["edges"], [])
+        self.assertEqual(visual.payload["quality_status"], "degraded")
+
+
+class RasterConnectorDetectorTests(unittest.TestCase):
+    def test_detector_emits_json_safe_geometry_for_diagonal_arrow(self) -> None:
+        image = Image.new("RGB", (400, 200), "white")
+        draw = ImageDraw.Draw(image)
+        draw.line((90, 150, 300, 50), fill="black", width=8)
+        draw.polygon([(300, 50), (276, 53), (288, 73)], fill="black")
+        detector = RasterConnectorDetector(DocumentPipelineConfig())
+
+        result = detector.detect(
+            image,
+            [{"type": "figure", "confidence": 0.9, "bbox": [0, 0, 400, 200]}],
+            [],
+        )
+
+        self.assertGreaterEqual(result.metadata["connectors_found"], 1)
+        connector = result.regions[0]["connectors"][0]
+        self.assertEqual(len(connector["endpoints"]), 2)
+        json.dumps(result.regions)
 
 
 class WritingVisualParserAdditionalTests(unittest.TestCase):
@@ -545,6 +753,43 @@ class IELTSStructureTests(unittest.TestCase):
             chunk_max_tokens=50,
             chunk_overlap_tokens=10,
         )
+
+    def test_label_diagram_group_emits_structured_diagram_chunk(self) -> None:
+        text = (
+            "Snow production equipment\n"
+            "This passage explains a mechanical process in detail.\n"
+            "Questions 6-8 Label the diagram below using NO MORE THAN TWO WORDS.\n"
+            "6. air 7. droplets 8. crystals"
+        )
+        ocr_lines = [
+            {"text": "6. air", "confidence": 0.96, "bbox": [[20, 80], [120, 80], [120, 100], [20, 100]]},
+            {"text": "7. droplets", "confidence": 0.96, "bbox": [[300, 40], [430, 40], [430, 60], [300, 60]]},
+            {"text": "8. crystals", "confidence": 0.96, "bbox": [[20, 180], [150, 180], [150, 200], [20, 200]]},
+        ]
+        document = make_document(
+            [
+                ProcessedPage(
+                    1,
+                    "native_pdf_plus_ocr",
+                    0.9,
+                    [make_element("p1-e1", 1, text)],
+                    metadata={
+                        "ocr_metadata": {"lines": ocr_lines},
+                        "layout_regions": [{"type": "figure", "confidence": 0.93, "bbox": [0, 0, 600, 240]}],
+                    },
+                )
+            ]
+        )
+
+        structured = IELTSStructureParser(self.config).parse(document)
+        groups = [group for passage in structured.passages for group in passage.question_groups]
+        group = next(group for group in groups if group.question_start == 6)
+        chunks = StructuredChunker(self.config).chunk(document, structured)
+
+        self.assertEqual(group.question_type, "diagram_labeling")
+        self.assertEqual(group.visual_element["type"], "diagram")
+        self.assertEqual(len(group.visual_element["labels"]), 3)
+        self.assertIn("diagram", [chunk.metadata.get("unit_type") for chunk in chunks])
 
     def test_group_ranges_drive_diagnostics_for_visual_questions(self) -> None:
         passage_one = "First Passage. " + "This passage discusses wine production and history. " * 30

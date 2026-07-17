@@ -128,8 +128,7 @@
             {
               "type": "diagram",
               "question_range": [6, 8],
-              "expected_status": "unsupported",
-              "reason": "Diagram labels are retained for later visual-structure implementation."
+              "min_labels": 3
             }
           ]
         }
@@ -163,7 +162,7 @@
           "covered_question_numbers": {"start": 1, "end": 40},
           "forbidden_titles": ["Leighton Buzzard", "Costa Rica.", "Australia.", "New"],
           "visuals": [
-            {"type": "flowchart", "question_range": [34, 37], "min_nodes": 4, "min_edges": 3}
+            {"type": "flowchart", "question_range": [34, 37], "min_nodes": 4, "min_ordered_items": 4}
           ]
         }
       }

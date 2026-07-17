@@ -127,6 +127,11 @@ class NativeOCRReconciler:
             "ocr_elements": page_metadata.get("ocr_elements", 0),
             "duplicates_removed": page_metadata.get("duplicates_removed", 0),
             "alternative_sources": len(page_metadata.get("alternative_sources", [])),
+            "connector_regions": len(page_metadata.get("connector_regions", [])),
+            "connectors_found": sum(
+                len(region.get("connectors") or [])
+                for region in page_metadata.get("connector_regions", [])
+            ),
             "element_types": sorted({element.type for element in page.elements}),
             "timing": page_metadata.get("timing", {}),
         }

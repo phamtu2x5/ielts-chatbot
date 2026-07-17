@@ -93,6 +93,7 @@ class DocumentProcessor:
                 "structure_parse_finished",
                 duration_seconds=timing["structure_parse_seconds"],
                 passages=len(structured_document.passages),
+                sections=len(structured_document.sections),
             )
             chunk_started = time.perf_counter()
             self._emit(progress, "chunking_started", structured=True)

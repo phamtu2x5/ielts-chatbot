@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class DocumentPipelineConfig:
-    parser_version: str = "1.6.0"
+    parser_version: str = "1.8.0"
     max_upload_mb: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_MAX_UPLOAD_MB", "25")))
     max_pdf_pages: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_MAX_PDF_PAGES", "80")))
     native_min_chars: int = field(default_factory=lambda: int(os.getenv("DOCUMENT_NATIVE_MIN_CHARS", "40")))
@@ -55,6 +55,30 @@ class DocumentPipelineConfig:
     enable_ielts_structure_parser: bool = field(
         default_factory=lambda: os.getenv("DOCUMENT_ENABLE_IELTS_STRUCTURE", "true").lower() == "true"
     )
+    writing_collection_min_tasks: int = field(
+        default_factory=lambda: int(os.getenv("DOCUMENT_WRITING_COLLECTION_MIN_TASKS", "2"))
+    )
+    writing_visual_gap_ratio: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_WRITING_VISUAL_GAP_RATIO", "0.35"))
+    )
+    writing_adjacent_block_gap_factor: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_WRITING_ADJACENT_BLOCK_GAP_FACTOR", "4.0"))
+    )
+    connector_enabled: bool = field(
+        default_factory=lambda: os.getenv("DOCUMENT_CONNECTOR_ENABLE", "true").lower() == "true"
+    )
+    connector_min_component_area_ratio: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_CONNECTOR_MIN_COMPONENT_AREA_RATIO", "0.0015"))
+    )
+    connector_max_component_area_ratio: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_CONNECTOR_MAX_COMPONENT_AREA_RATIO", "0.08"))
+    )
+    connector_min_span_ratio: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_CONNECTOR_MIN_SPAN_RATIO", "0.07"))
+    )
+    connector_direction_min_confidence: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_CONNECTOR_DIRECTION_MIN_CONFIDENCE", "0.55"))
+    )
 
     def __post_init__(self) -> None:
         if self.max_upload_mb <= 0 or self.max_pdf_pages <= 0:
@@ -72,6 +96,10 @@ class DocumentPipelineConfig:
             self.ocr_duplicate_similarity_threshold,
             self.ocr_duplicate_token_overlap_threshold,
             self.ocr_min_new_token_ratio,
+            self.connector_min_component_area_ratio,
+            self.connector_max_component_area_ratio,
+            self.connector_min_span_ratio,
+            self.connector_direction_min_confidence,
         )
         if any(value < 0 or value > 1 for value in thresholds):
             raise ValueError("Document quality and OCR thresholds must be between 0 and 1.")
@@ -92,6 +120,14 @@ class DocumentPipelineConfig:
             raise ValueError("LAYOUT_ENGINE must be doclayout_yolo.")
         if self.layout_image_size <= 0:
             raise ValueError("LAYOUT_IMAGE_SIZE must be positive.")
+        if self.writing_collection_min_tasks < 2:
+            raise ValueError("DOCUMENT_WRITING_COLLECTION_MIN_TASKS must be at least 2.")
+        if not 0 < self.writing_visual_gap_ratio < 1:
+            raise ValueError("DOCUMENT_WRITING_VISUAL_GAP_RATIO must be between 0 and 1.")
+        if self.writing_adjacent_block_gap_factor <= 0:
+            raise ValueError("DOCUMENT_WRITING_ADJACENT_BLOCK_GAP_FACTOR must be positive.")
+        if self.connector_min_component_area_ratio >= self.connector_max_component_area_ratio:
+            raise ValueError("Connector component area limits are invalid.")
 
 
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md", ".text"}

@@ -5,6 +5,7 @@ from typing import Any, Callable
 from PIL import Image
 
 from ..config import DocumentPipelineConfig
+from ..connectors import RasterConnectorDetector
 from ..models import DocumentElement, ProcessedDocument, ProcessedPage
 from ..normalization import normalize_text
 from ..layout import DocLayoutDetector
@@ -21,6 +22,7 @@ class ImageExtractor:
         self.ocr = ocr
         self.layout = layout
         self.visual_parser = WritingTaskTableParser()
+        self.connectors = RasterConnectorDetector(config)
 
     def extract(
         self,
@@ -72,6 +74,13 @@ class ImageExtractor:
                 boxes=len(ocr_result.metadata.get("boxes") or []),
                 text_preview=ocr_result.text[:4000],
             )
+            connector_started = time.perf_counter()
+            connector_result = self.connectors.detect(
+                image,
+                layout_result.region_dicts(),
+                ocr_result.metadata.get("lines") or [],
+            )
+            connector_seconds = self._elapsed(connector_started)
 
         text = normalize_text(ocr_result.text)
         elements = []
@@ -112,6 +121,7 @@ class ImageExtractor:
             "image_open_seconds": open_seconds,
             "layout_seconds": layout_seconds,
             "ocr_seconds": ocr_seconds,
+            "connector_seconds": connector_seconds,
             "visual_parse_seconds": visual_parse_seconds,
             "total_seconds": total_seconds,
         }
@@ -124,6 +134,8 @@ class ImageExtractor:
             "layout_engine": layout_result.engine,
             "layout_regions": layout_result.region_dicts(),
             "layout_metadata": layout_result.metadata,
+            "connector_regions": connector_result.regions,
+            "connector_metadata": connector_result.metadata,
             "timing": {"extraction": extraction_timing},
         }
         if parsed_visual:
@@ -194,6 +206,8 @@ class ImageExtractor:
                         "layout_engine": layout_result.engine,
                         "layout_regions": layout_result.region_dicts(),
                         "layout_metadata": layout_result.metadata,
+                        "connector_regions": connector_result.regions,
+                        "connector_metadata": connector_result.metadata,
                         "timing": extraction_timing,
                     },
                 )

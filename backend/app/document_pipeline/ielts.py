@@ -6,6 +6,7 @@ from .chunking import estimate_tokens
 from .config import DocumentPipelineConfig
 from .models import DocumentChunk, DocumentElement, ProcessedDocument
 from .visual import IELTSQuestionVisualParser
+from .writing import WritingCollectionParser, WritingSection
 
 
 QUESTION_HEADER_RE = re.compile(
@@ -125,9 +126,10 @@ class IELTSDocument:
     passages: list[IELTSPassage]
     outline: dict[str, Any]
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    sections: list[WritingSection] = field(default_factory=list)
 
     def has_structure(self) -> bool:
-        return bool(self.passages and any(passage.question_groups for passage in self.passages))
+        return bool(self.sections or (self.passages and any(passage.question_groups for passage in self.passages)))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +138,7 @@ class IELTSDocument:
             "passages": [passage.to_dict() for passage in self.passages],
             "outline": self.outline,
             "diagnostics": self.diagnostics,
+            "sections": [section.to_dict() for section in self.sections],
         }
 
 
@@ -164,11 +167,49 @@ class _TitleCandidate:
 class IELTSStructureParser:
     def __init__(self, config: DocumentPipelineConfig) -> None:
         self.config = config
-        self.visual_parser = IELTSQuestionVisualParser()
+        self.visual_parser = IELTSQuestionVisualParser(config.connector_direction_min_confidence)
+        self.writing_parser = WritingCollectionParser(config)
 
     def parse(self, document: ProcessedDocument) -> IELTSDocument:
         if document.metadata.get("document_type") == "ielts_writing_task_1":
             structured = self._writing_structure(document)
+            document.metadata["ielts_structure"] = structured.to_dict()
+            return structured
+
+        writing_sections = self.writing_parser.parse(document)
+        if writing_sections:
+            writing_tasks = [section for section in writing_sections if section.type == "writing_task_1"]
+            sample_answers = [section for section in writing_sections if section.type == "sample_answer"]
+            outline = {
+                "document_type": "ielts_writing_collection",
+                "tasks": [
+                    {
+                        "task_index": section.task_index,
+                        "title": section.title,
+                        "visual_type": section.visual_type,
+                        "pages": section.pages,
+                    }
+                    for section in writing_sections
+                    if section.type == "writing_task_1"
+                ],
+            }
+            structured = IELTSDocument(
+                document_id=document.document_id,
+                filename=document.filename,
+                passages=[],
+                outline=outline,
+                diagnostics={
+                    "writing_tasks_found": len(writing_tasks),
+                    "sample_answers_found": len(sample_answers),
+                    "unpaired_tasks": sorted(
+                        {section.task_index for section in writing_tasks}
+                        - {section.task_index for section in sample_answers}
+                    ),
+                },
+                sections=writing_sections,
+            )
+            document.metadata["document_type"] = "ielts_writing_collection"
+            document.metadata["sections"] = [section.to_dict() for section in writing_sections]
             document.metadata["ielts_structure"] = structured.to_dict()
             return structured
 
@@ -278,6 +319,7 @@ class IELTSStructureParser:
                 "page": page.page_number,
                 "layout_regions": page.metadata.get("layout_regions") or [],
                 "ocr_lines": (page.metadata.get("ocr_metadata") or {}).get("lines") or [],
+                "connector_regions": page.metadata.get("connector_regions") or [],
             }
             for page in document.pages
             if page.page_number in selected
@@ -350,7 +392,7 @@ class IELTSStructureParser:
 
     def _group_quality(self, parsed: _ParsedGroup) -> tuple[int, int, int]:
         group = parsed.group
-        layout_bonus = 1 if group.question_type in {"table_completion", "flowchart_completion"} else 0
+        layout_bonus = 1 if group.question_type in {"table_completion", "flowchart_completion", "diagram_labeling"} else 0
         return (len(group.questions), layout_bonus, len(group.text))
 
     def _logical_group_end(self, full_text: str, header_start: int, next_header_start: int, start: int, end: int) -> int:
@@ -389,7 +431,7 @@ class IELTSStructureParser:
             title_offset = self._passage_title_offset(section)
             if title_offset is not None:
                 question_type = self._infer_question_type(section)
-                if question_type not in {"table_completion", "flowchart_completion"} or self._visual_tail_is_passage_body(section[title_offset:]):
+                if question_type not in {"table_completion", "flowchart_completion", "diagram_labeling"} or self._visual_tail_is_passage_body(section[title_offset:]):
                     stop_candidates.append(header_start + title_offset)
         return min(stop_candidates)
 
@@ -668,6 +710,8 @@ class IELTSStructureParser:
             return "table_completion"
         if "flow chart" in lowered or "flow-chart" in lowered or "flowchart" in lowered:
             return "flowchart_completion"
+        if "label the diagram" in lowered or "label the figure" in lowered:
+            return "diagram_labeling"
         if "choose the correct letter" in lowered:
             return "multiple_choice"
         if "give two examples" in lowered:
@@ -1004,6 +1048,9 @@ class StructuredChunker:
         if not structured.has_structure():
             return chunks
 
+        if structured.sections:
+            return self._writing_chunks(document, structured.sections)
+
         chunks.append(self._outline_chunk(document, structured, len(chunks)))
         for passage in structured.passages:
             if passage.text:
@@ -1015,6 +1062,48 @@ class StructuredChunker:
                 for question in group.questions:
                     chunks.append(self._question_chunk(document, passage, group, question, len(chunks)))
 
+        return chunks
+
+    def _writing_chunks(
+        self,
+        document: ProcessedDocument,
+        sections: list[WritingSection],
+    ) -> list[DocumentChunk]:
+        chunks: list[DocumentChunk] = []
+        for section in sections:
+            parts = self._split_text(section.text, self.config.chunk_max_tokens)
+            for part_index, part in enumerate(parts, 1):
+                unit_type = "writing_task" if section.type == "writing_task_1" else "sample_answer"
+                title = section.title or f"Writing Task {section.task_index}"
+                retrieval = (
+                    f"IELTS Writing Task 1. Task {section.task_index}. "
+                    f"Section: {unit_type}. Visual type: {section.visual_type or 'unknown'}. "
+                    f"Title: {title}.\n\n{part}"
+                )
+                chunks.append(
+                    self._make_chunk(
+                        document=document,
+                        index=len(chunks),
+                        chunk_id=(
+                            f"{document.document_id}-writing-{section.task_index}-{unit_type}-{part_index}"
+                        ),
+                        text=part,
+                        retrieval_text=retrieval,
+                        pages=section.pages,
+                        element_ids=section.element_ids,
+                        heading_path=[title, unit_type],
+                        min_confidence=section.confidence,
+                        metadata={
+                            "unit_type": unit_type,
+                            "chunk_reason": unit_type,
+                            "parent_id": f"writing-task-{section.task_index}",
+                            "task_index": section.task_index,
+                            "task_title": section.title,
+                            "visual_type": section.visual_type,
+                            "section_id": section.section_id,
+                        },
+                    )
+                )
         return chunks
 
     def _outline_chunk(self, document: ProcessedDocument, structured: IELTSDocument, index: int) -> DocumentChunk:
@@ -1231,6 +1320,15 @@ class StructuredChunker:
                     lines.append(f"- edge: {edge['from']} -> {edge['to']}")
                 return "\n".join(lines)
             return self._visual_fallback_text("Flowchart", visual)
+        if visual_type == "diagram":
+            labels = visual.get("labels") or []
+            if labels:
+                lines = [f"Diagram Questions {visual['question_range'][0]}-{visual['question_range'][1]}"]
+                for label in labels:
+                    lines.append(f"- {label['id']}: {label.get('text', '')}")
+                lines.append(f"- detected connectors: {len(visual.get('connectors') or [])}")
+                return "\n".join(lines)
+            return self._visual_fallback_text("Diagram", visual)
         return str(visual)
 
     def _visual_fallback_text(self, label: str, visual: dict[str, Any]) -> str:

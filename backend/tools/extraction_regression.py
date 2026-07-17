@@ -440,10 +440,18 @@ def evaluate_visual(
         return CheckResult(name, "failed", expected=expected, actual=None)
 
     problems = []
-    for field_name, actual_key in (("min_rows", "rows"), ("min_columns", "columns"), ("min_nodes", "nodes"), ("min_edges", "edges")):
+    for field_name, actual_key in (
+        ("min_rows", "rows"),
+        ("min_columns", "columns"),
+        ("min_nodes", "nodes"),
+        ("min_edges", "edges"),
+        ("min_labels", "labels"),
+        ("min_ordered_items", "ordered_items"),
+    ):
         minimum = expected.get(field_name)
         if minimum is not None and len(match.get(actual_key) or []) < minimum:
             problems.append(f"{actual_key}<{minimum}")
+    problems.extend(str(issue) for issue in match.get("quality_issues") or [])
     return CheckResult(
         name,
         "degraded" if problems else "passed",
@@ -455,6 +463,9 @@ def evaluate_visual(
             "columns": len(match.get("columns") or []),
             "nodes": len(match.get("nodes") or []),
             "edges": len(match.get("edges") or []),
+            "labels": len(match.get("labels") or []),
+            "connectors": len(match.get("connectors") or []),
+            "ordered_items": len(match.get("ordered_items") or []),
             "confidence": match.get("confidence"),
         },
         details=", ".join(problems) if problems else None,
@@ -693,6 +704,17 @@ def draw_debug_overlay(image: Image.Image, page: dict[str, Any], native_scale: f
         bbox = flat_bbox(line.get("bbox"))
         if bbox:
             draw.rectangle(bbox, outline="blue", width=2)
+    connector_regions = metadata.get("connector_regions") or []
+    write_json(page_dir / "connectors.json", connector_regions)
+    for connector_region in connector_regions:
+        for connector in connector_region.get("connectors") or []:
+            bbox = flat_bbox(connector.get("bbox"))
+            if bbox:
+                draw.rectangle(bbox, outline="orange", width=3)
+            head = connector.get("arrowhead_point")
+            if isinstance(head, (list, tuple)) and len(head) >= 2:
+                x, y = float(head[0]), float(head[1])
+                draw.ellipse((x - 5, y - 5, x + 5, y + 5), outline="magenta", width=3)
     for element in page.get("elements") or []:
         bbox = flat_bbox(element.get("bbox"))
         if bbox:

@@ -112,5 +112,37 @@ class ExtractionRegressionTests(unittest.TestCase):
 
         self.assertEqual(status_from_checks(checks), "unsupported")
 
+    def test_writing_collection_sections_are_evaluated(self) -> None:
+        canonical = {
+            "metadata": {
+                "page_count": 1,
+                "sections": [
+                    {
+                        "type": "writing_task_1",
+                        "title": "Task title",
+                        "visual_type": "line_chart",
+                    },
+                    {"type": "sample_answer", "title": "Task title"},
+                ],
+            },
+            "pages": [{"page_number": 1}],
+        }
+        fixture = {
+            "kind": "ielts_writing_collection",
+            "expected": {
+                "page_count": 1,
+                "writing_collection": {
+                    "task_count": 1,
+                    "sample_answer_count": 1,
+                    "task_titles": ["Task title"],
+                    "visual_types": ["line_chart"],
+                },
+            },
+        }
+
+        checks = evaluate_document(canonical, [{"chunk_id": "c1"}], fixture)
+
+        self.assertEqual(status_from_checks(checks), "passed")
+
 if __name__ == "__main__":
     unittest.main()
