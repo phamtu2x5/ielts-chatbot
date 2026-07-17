@@ -40,5 +40,9 @@ execFileSync(
   { stdio: "inherit" }
 );
 
-requireNativePackage();
+// Re-resolve from a fresh process after npm changes node_modules.
+execFileSync(process.execPath, ["-e", `require(${JSON.stringify(nativePackage)})`], {
+  cwd: process.cwd(),
+  stdio: "inherit",
+});
 console.log("Rollup native package OK");
