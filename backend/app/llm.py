@@ -17,13 +17,21 @@ OLLAMA_NUM_PREDICT = settings.ollama_num_predict
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
 Default to Vietnamese unless the user clearly asks for another language or is practicing an English answer.
 Write in a concise, neutral, and coherent tutoring style.
-Answer directly and explain the reasoning or steps in a logical order.
+Lead with the requested answer or result. Add evidence and brief reasoning only after it.
+Do not restate the user's question unless needed for clarity.
+Use at most one short introductory sentence, and omit it when the answer can start directly.
+Do not repeat the same conclusion at the end.
 Avoid robotic, abrupt, or overly terse phrasing.
 Use simple Markdown only when it improves readability: short headings, numbered lists, or bullet points.
 Use Markdown tables when the user asks for a schedule, comparison, rubric, or other structured information.
 Keep Markdown tables simple: no nested bullet lists, no HTML, and no multi-paragraph content inside table cells.
 Never output raw HTML tags such as <ul>, <li>, <br>, or <table>; use Markdown instead.
 Do not add emojis, generic encouragement, or invitations to ask another question."""
+
+
+DECORATIVE_ICON_RE = re.compile(
+    "[ \\t]*[\u2600-\u27bf\U0001f300-\U0001faff]+[\ufe0f\u200d]*[ \\t]*"
+)
 
 
 def format_history(history: Optional[List[ChatMessage]]) -> str:
@@ -41,6 +49,10 @@ def clean_response(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = DECORATIVE_ICON_RE.sub(
+        lambda match: "" if match.start() == 0 or text[match.start() - 1] == "\n" else " ",
+        text,
+    )
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 
@@ -120,6 +132,7 @@ async def stream_ollama(
                     raise RuntimeError(str(data["error"]))
                 token = data.get("response") or data.get("message", {}).get("content") or ""
                 token = re.sub(r"<br\s*/?>", "\n", token, flags=re.IGNORECASE)
+                token = DECORATIVE_ICON_RE.sub("", token)
                 if not token:
                     continue
 

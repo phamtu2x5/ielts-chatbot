@@ -30,7 +30,7 @@ except ImportError:
 from app import rag
 from app.document_scope import resolve_document_scope
 from app.intent import detect_query_intent, filter_sources_for_intent
-from app.llm import looks_like_prompt_echo
+from app.llm import clean_response, looks_like_prompt_echo
 from app.structured_store import StructuredDocumentStore
 from app.table_operations import (
     comparison_row,
@@ -428,6 +428,11 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertTrue(looks_like_prompt_echo(echoed, prompt))
         self.assertFalse(looks_like_prompt_echo("Câu 1 là TRUE vì đoạn văn nêu...", prompt))
+
+    def test_response_cleanup_removes_decorative_icons(self) -> None:
+        cleaned = clean_response("✅ Kết quả: C tăng 33%. 👉 A → B vẫn giữ mũi tên.")
+
+        self.assertEqual(cleaned, "Kết quả: C tăng 33%. A → B vẫn giữ mũi tên.")
 
     def _chunk(self, chunk_id: str, source_file: str, text: str) -> dict:
         return {
