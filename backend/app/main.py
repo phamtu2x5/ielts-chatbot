@@ -14,11 +14,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from .config import settings
+from .document_scope import DocumentScope, resolve_document_scope
 from .document_pipeline import DocumentProcessor
-from .intent import dedupe_sources, detect_query_intent, filter_sources_for_intent
+from .intent import dedupe_sources, detect_query_intent_decision, filter_sources_for_intent
 from .llm import OLLAMA_MODEL, OLLAMA_NUM_PREDICT, classify_route, direct_prompt, query_ollama, rag_prompt, stream_ollama
 from .rag import get_store
 from .schemas import ChatRequest, ChatResponse, SearchRequest, SearchResponse, StatsResponse, UploadResponse
+from .table_operations import (
+    comparison_row,
+    format_number,
+    table_cell_value,
+    table_change_calculations,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -140,6 +147,11 @@ NO_RAG_MATCH_RESPONSE = (
     "Bạn có thể hỏi rõ hơn theo tên bài, số trang, hoặc upload lại tài liệu nếu phần đó nằm trong bảng/ảnh chưa được trích xuất tốt."
 )
 
+AMBIGUOUS_DOCUMENT_RESPONSE = (
+    "Mình chưa xác định được bạn đang hỏi tài liệu nào vì có nhiều file phù hợp. "
+    "Vui lòng nêu tên file hoặc đính kèm lại đúng tài liệu cần hỏi."
+)
+
 
 def document_extraction_failure_detail(document: Any) -> str:
     metadata = document.metadata or {}
@@ -223,40 +235,6 @@ def _table_from_source(source: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _lookup_terms(text: str) -> set[str]:
-    return {
-        term
-        for term in re.findall(r"[\w]+", text.lower(), flags=re.UNICODE)
-        if len(term) > 1 or term.isdigit()
-    }
-
-
-def _row_match_score(message: str, row_label: Any) -> float:
-    label = str(row_label).strip()
-    if not label:
-        return 0.0
-    lowered = message.lower()
-    label_lower = label.lower()
-    if re.search(rf"(?<!\w){re.escape(label_lower)}(?!\w)", lowered):
-        return 10.0
-    overlap = _lookup_terms(message) & _lookup_terms(label)
-    return float(len(overlap))
-
-
-def _column_match_score(message: str, column_label: Any) -> float:
-    label = str(column_label).strip()
-    if not label:
-        return 0.0
-    query_terms = _lookup_terms(message)
-    column_terms = _lookup_terms(label)
-    score = float(len(query_terms & column_terms))
-    query_years = set(re.findall(r"\b\d{4}\b", message))
-    column_years = set(re.findall(r"\b\d{4}\b", label))
-    if query_years and query_years & column_years:
-        score += 4.0
-    return score
-
-
 def _render_show_questions(sources: list[dict[str, Any]]) -> str | None:
     question_groups = [
         source
@@ -302,35 +280,104 @@ def _lookup_table_cell(message: str, sources: list[dict[str, Any]]) -> str | Non
             columns = metadata.get("table_columns") or []
             row = metadata.get("table_row")
             rows = [row] if isinstance(row, list) else []
-        if len(columns) < 2 or not rows:
-            continue
-        column_scores = [
-            (index, _column_match_score(message, column))
-            for index, column in enumerate(columns[1:], 1)
-        ]
-        column_scores = [(index, score) for index, score in column_scores if score > 0]
-        if not column_scores:
-            continue
-        target_index, column_score = max(column_scores, key=lambda item: item[1])
-        for row in rows:
-            if not row or len(row) <= target_index:
-                continue
-            row_score = _row_match_score(message, row[0])
-            if row_score <= 0:
-                continue
-            score = row_score + column_score
-            if best_match is None or score > best_match[0]:
-                best_match = (score, row[target_index], source)
+        match = table_cell_value(message, {"columns": columns, "rows": rows})
+        if match and (best_match is None or match[0] > best_match[0]):
+            best_match = (match[0], match[1], source)
     if best_match is None:
         return None
     _, value, source = best_match
     return f"{value}\n\nNguồn: {_source_label(source)}."
 
 
+def _full_table_source(sources: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    candidates = []
+    for source in sources:
+        table = _table_from_source(source)
+        if not table or not table.get("columns") or not table.get("rows"):
+            continue
+        candidates.append((len(table.get("rows") or []), table, source))
+    if not candidates:
+        return None
+    _, table, source = max(candidates, key=lambda item: item[0])
+    return table, source
+
+
+def _render_table_calculation(message: str, sources: list[dict[str, Any]]) -> str | None:
+    selected = _full_table_source(sources)
+    if not selected:
+        return None
+    table, source = selected
+    result = table_change_calculations(message, table)
+    if not result:
+        return None
+    lines = [
+        f"- {item['label']}: {format_number(item['second'])} - {format_number(item['first'])} = {format_number(item['change'])}"
+        for item in result["calculations"]
+    ]
+    direction = "giảm" if result["direction"] == "decrease" else "tăng"
+    winner = result["winner"]
+    lines.append(
+        f"\n{winner['label']} có mức {direction} lớn nhất: {format_number(winner['change'])}."
+    )
+    lines.append(f"\nNguồn: {_source_label(source)}.")
+    return "\n".join(lines)
+
+
+def _render_table_comparison(message: str, sources: list[dict[str, Any]]) -> str | None:
+    selected = _full_table_source(sources)
+    if not selected:
+        return None
+    table, source = selected
+    row = comparison_row(message, table)
+    if not row:
+        return None
+    markdown = _markdown_table({"columns": table.get("columns") or [], "rows": [row]})
+    return f"{markdown}\n\nNguồn: {_source_label(source)}." if markdown else None
+
+
+def _render_writing_prompt(sources: list[dict[str, Any]]) -> str | None:
+    for source in sources:
+        if source.get("metadata", {}).get("unit_type") not in {"writing_prompt", "writing_task"}:
+            continue
+        text = (source.get("display_text") or source.get("text") or "").strip()
+        if text:
+            return f"{text}\n\nNguồn: {_source_label(source)}."
+    return None
+
+
+def _render_writing_inventory(sources: list[dict[str, Any]]) -> str | None:
+    tasks = [source for source in sources if source.get("metadata", {}).get("unit_type") == "writing_task"]
+    if not tasks:
+        return None
+    answer_keys = {
+        str(source.get("metadata", {}).get("section_id", "")).removesuffix("-answer")
+        for source in sources
+        if source.get("metadata", {}).get("unit_type") == "sample_answer"
+    }
+    lines = ["Các đề và bài mẫu trong tài liệu:"]
+    for source in sorted(tasks, key=lambda item: (min(item.get("pages") or [999]), item.get("chunk_index", 0))):
+        text = (source.get("display_text") or source.get("text") or "").strip()
+        title = next((line.strip() for line in text.splitlines() if line.strip()), "Writing task")
+        section_key = str(source.get("metadata", {}).get("section_id", "")).removesuffix("-task")
+        sample_label = "có bài mẫu" if section_key in answer_keys else "chưa thấy bài mẫu"
+        lines.append(f"- Trang {', '.join(str(page) for page in source.get('pages') or [])}: {title} ({sample_label})")
+    lines.append(f"\nNguồn: {_source_label(tasks[0])}.")
+    return "\n".join(lines)
+
+
 def static_response_for_sources(message: str, query_intent: str, sources: list[dict[str, Any]]) -> str | None:
-    cell_answer = _lookup_table_cell(message, sources)
-    if cell_answer:
-        return cell_answer
+    if query_intent == "table_cell":
+        return _lookup_table_cell(message, sources)
+    if query_intent == "table_calculation":
+        return _render_table_calculation(message, sources)
+    if query_intent == "table_comparison":
+        return _render_table_comparison(message, sources)
+    if query_intent == "show_writing_prompt":
+        return _render_writing_prompt(sources)
+    if query_intent == "document_overview":
+        inventory = _render_writing_inventory(sources)
+        if inventory:
+            return inventory
 
     if query_intent == "show_questions":
         questions = _render_show_questions(sources)
@@ -372,6 +419,28 @@ def static_response_for_sources(message: str, query_intent: str, sources: list[d
             "Để tránh tự tưởng tượng cấu trúc, mình chưa mô tả flowchart."
         )
 
+    if query_intent == "show_diagram":
+        for source in sources:
+            diagram = source.get("metadata", {}).get("diagram")
+            if not isinstance(diagram, dict):
+                continue
+            nodes = diagram.get("nodes") or []
+            edges = diagram.get("edges") or []
+            if not nodes or not edges:
+                return _visual_incomplete_text(diagram, source)
+            lines = ["Mình tìm thấy cấu trúc diagram:"]
+            for node in nodes:
+                label = f"Question {node['question_number']} blank" if node.get("question_number") else node.get("text", "")
+                lines.append(f"- {node['id']}: {label}")
+            for edge in edges:
+                lines.append(f"- edge: {edge['from']} -> {edge['to']}")
+            lines.append(f"\nNguồn: {_source_label(source)}.")
+            return "\n".join(lines)
+        return (
+            "Mình chưa có dữ liệu diagram đã được trích xuất theo cấu trúc cho phần này. "
+            "Để tránh tự tưởng tượng nhãn hoặc quan hệ, mình chưa mô tả diagram."
+        )
+
     return None
 
 
@@ -395,6 +464,8 @@ def compact_final_context_debug(sources: list[dict[str, Any]]) -> list[dict[str,
     return [
         {
             "chunk_id": source.get("chunk_id"),
+            "document_id": source.get("document_id"),
+            "source_file": source.get("source_file"),
             "method": source.get("retrieval_method"),
             "unit_type": source.get("metadata", {}).get("unit_type"),
             "passage_number": source.get("metadata", {}).get("passage_number"),
@@ -416,6 +487,14 @@ class ChatPreparation:
     query_intent: str = "direct"
 
 
+def ambiguous_document_response(scope: DocumentScope) -> str:
+    files = [name for name in scope.matched_files if name]
+    if not files:
+        return AMBIGUOUS_DOCUMENT_RESPONSE
+    choices = "\n".join(f"- {name}" for name in files[:10])
+    return f"{AMBIGUOUS_DOCUMENT_RESPONSE}\n\nCác file có thể liên quan:\n{choices}"
+
+
 async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     message = req.message.strip()
     store = get_store()
@@ -424,14 +503,82 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     catalog: list[dict[str, Any]] = []
     probe: dict[str, Any] = {"results": []}
     query_intent = "direct"
+    intent_debug: dict[str, Any] = {}
 
     stats = await run_in_threadpool(store.stats)
+    full_catalog = await run_in_threadpool(store.document_catalog)
+    scope = resolve_document_scope(message, full_catalog, req.document_ids)
+    scope_ids = scope.resolved_document_ids or scope.allowed_document_ids
+
+    if scope.ambiguous:
+        debug = {
+            "route_decision": "rag",
+            "query_intent": "ambiguous_document",
+            "target_resolution": scope.to_debug(),
+            "catalog": full_catalog,
+            "probe": compact_probe_debug(probe),
+            "retrieval": {
+                "method": None,
+                "structured_hits": 0,
+                "before_filter_count": 0,
+                "after_filter_count": 0,
+                "final_context": [],
+            },
+            "source_count": 0,
+        }
+        return ChatPreparation(
+            prompt=None,
+            static_response=ambiguous_document_response(scope),
+            route_used="vector_rag_ambiguous_document",
+            sources=[],
+            debug=debug,
+            query_intent="ambiguous_document",
+        )
+
+    if scope.document_grounded and req.document_ids and not scope_ids:
+        debug = {
+            "route_decision": "rag",
+            "query_intent": "document_no_match",
+            "target_resolution": scope.to_debug(),
+            "catalog": full_catalog,
+            "probe": compact_probe_debug(probe),
+            "retrieval": {
+                "method": None,
+                "structured_hits": 0,
+                "before_filter_count": 0,
+                "after_filter_count": 0,
+                "final_context": [],
+            },
+            "source_count": 0,
+        }
+        return ChatPreparation(
+            prompt=None,
+            static_response=NO_RAG_MATCH_RESPONSE,
+            route_used="vector_rag_no_match",
+            sources=[],
+            debug=debug,
+            query_intent="document_no_match",
+        )
+
     if stats["chunks"] > 0:
         probe_top_k = max(settings.rag_probe_top_k, settings.rag_top_k)
-        probe, catalog = await run_in_threadpool(store.probe_with_catalog, message, probe_top_k)
-        query_intent = detect_query_intent(message, probe)
+        probe, catalog = await run_in_threadpool(
+            store.probe_with_catalog,
+            message,
+            probe_top_k,
+            scope_ids,
+        )
+        if scope.document_grounded:
+            probe["has_document_intent"] = True
+        intent_decision = detect_query_intent_decision(
+            message,
+            probe,
+            document_grounded=scope.document_grounded or probe.get("has_document_intent", False),
+        )
+        query_intent = intent_decision.intent
+        intent_debug = intent_decision.to_debug()
 
-        if probe.get("has_document_intent"):
+        if scope.document_grounded or probe.get("has_document_intent"):
             route = "rag"
         else:
             document_context = format_router_document_context(catalog, probe)
@@ -441,21 +588,48 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             probe.get("is_overview") or probe.get("top_question_score", 0.0) >= 1
         ):
             route = "rag"
+        if route == "rag" and query_intent == "direct":
+            intent_decision = detect_query_intent_decision(
+                message,
+                probe,
+                document_grounded=True,
+            )
+            query_intent = intent_decision.intent
+            intent_debug = intent_decision.to_debug()
     else:
-        query_intent = "direct"
+        intent_decision = detect_query_intent_decision(
+            message,
+            probe,
+            document_grounded=scope.document_grounded,
+        )
+        query_intent = intent_decision.intent
+        intent_debug = intent_decision.to_debug()
+        route = "rag" if scope.document_grounded else "direct"
 
     if route == "rag":
+        evidence_candidate_count = 0
+        evidence_context_count = 0
+        structured_top_k = 50 if query_intent == "document_overview" else max(
+            settings.rag_top_k,
+            settings.rag_overview_top_k,
+        )
         structured_sources = await run_in_threadpool(
             store.structured_lookup,
             message,
             query_intent,
-            max(settings.rag_top_k, settings.rag_overview_top_k),
+            structured_top_k,
+            scope_ids,
         )
         retrieval_method = "structured" if structured_sources else None
         if structured_sources:
-            sources = structured_sources[: settings.rag_top_k]
+            source_limit = 50 if query_intent == "document_overview" else settings.rag_top_k
+            sources = structured_sources[:source_limit]
         elif probe.get("is_overview"):
-            sources = await run_in_threadpool(store.overview, settings.rag_overview_top_k)
+            sources = await run_in_threadpool(
+                store.overview,
+                settings.rag_overview_top_k,
+                scope_ids,
+            )
             for source in sources:
                 source["probe_overview_score"] = 1.0
             retrieval_method = "overview"
@@ -463,23 +637,65 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             sources = (probe.get("results") or [])[: settings.rag_top_k]
             retrieval_method = "probe"
         else:
-            sources = await run_in_threadpool(store.search, message, settings.rag_top_k)
+            sources = await run_in_threadpool(store.search, message, settings.rag_top_k, scope_ids)
             retrieval_method = "dense"
         before_filter_count = len(sources)
         sources = filter_sources_for_intent(sources, message, query_intent)
         if query_intent == "solve_questions" and sources:
-            question_context = await run_in_threadpool(store.question_context_for_sources, sources, 8)
-            expansion = await run_in_threadpool(store.passage_context_for_sources, sources, 3)
-            sources = dedupe_sources(sources + question_context + expansion)
+            question_context = await run_in_threadpool(
+                store.question_context_for_sources,
+                sources,
+                8,
+                scope_ids,
+            )
+            target_passages = {
+                source.get("metadata", {}).get("passage_number")
+                for source in sources + question_context
+                if source.get("metadata", {}).get("passage_number")
+            }
+            evidence_query = " ".join(
+                source.get("display_text") or source.get("text") or ""
+                for source in sources + question_context
+                if source.get("metadata", {}).get("unit_type") in {"question", "question_group"}
+            ).strip() or message
+            evidence_candidates = await run_in_threadpool(
+                store.search,
+                evidence_query,
+                max(settings.rag_top_k * 3, 12),
+                scope_ids,
+            )
+            evidence_candidate_count = len(evidence_candidates)
+            evidence_context = [
+                source
+                for source in evidence_candidates
+                if source.get("metadata", {}).get("unit_type") == "passage"
+                and (
+                    not target_passages
+                    or source.get("metadata", {}).get("passage_number") in target_passages
+                )
+            ][:3]
+            if not evidence_context:
+                evidence_context = await run_in_threadpool(
+                    store.passage_context_for_sources,
+                    sources,
+                    3,
+                    scope_ids,
+                )
+            evidence_context_count = len(evidence_context)
+            sources = dedupe_sources(sources + question_context + evidence_context)
         sources = dedupe_sources(sources)
     else:
         structured_sources = []
         retrieval_method = None
         before_filter_count = 0
+        evidence_candidate_count = 0
+        evidence_context_count = 0
 
     debug = {
         "route_decision": route,
         "query_intent": query_intent,
+        "intent_decision": intent_debug,
+        "target_resolution": scope.to_debug(),
         "catalog": catalog,
         "probe": compact_probe_debug(probe),
         "retrieval": {
@@ -487,6 +703,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "structured_hits": len(structured_sources),
             "before_filter_count": before_filter_count,
             "after_filter_count": len(sources),
+            "evidence_candidate_count": evidence_candidate_count,
+            "evidence_context_count": evidence_context_count,
             "final_context": compact_final_context_debug(sources),
         },
         "source_count": len(sources),
@@ -514,13 +732,40 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 debug=debug,
                 query_intent=query_intent,
             )
+        deterministic_intents = {
+            "show_questions",
+            "show_table",
+            "extract_table",
+            "table_cell",
+            "table_calculation",
+            "table_comparison",
+            "show_flowchart",
+            "show_diagram",
+            "show_writing_prompt",
+        }
+        if query_intent in deterministic_intents:
+            debug["no_match_guard"] = "deterministic_intent_without_structured_response"
+            return ChatPreparation(
+                prompt=None,
+                static_response=NO_RAG_MATCH_RESPONSE,
+                route_used="vector_rag_no_match",
+                sources=sources,
+                debug=debug,
+                query_intent=query_intent,
+            )
         context = (
             format_context(sources, max_chars_per_source=settings.rag_overview_source_chars)
             if probe.get("is_overview")
             else format_context(sources)
         )
         return ChatPreparation(
-            prompt=rag_prompt(message, context, req.conversation_history, query_intent=query_intent),
+            prompt=rag_prompt(
+                message,
+                context,
+                req.conversation_history,
+                query_intent=query_intent,
+                allow_solution=bool(intent_debug.get("allow_solution")),
+            ),
             static_response=None,
             route_used="vector_rag",
             sources=sources,

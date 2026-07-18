@@ -102,8 +102,16 @@ def upload_document(base_url: str, path: Path, timeout: float) -> dict[str, Any]
     }
 
 
-def ask_chat(base_url: str, message: str, timeout: float) -> dict[str, Any]:
-    payload = json.dumps({"message": message}, ensure_ascii=False).encode("utf-8")
+def ask_chat(
+    base_url: str,
+    message: str,
+    timeout: float,
+    document_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    payload = json.dumps(
+        {"message": message, "document_ids": document_ids or None},
+        ensure_ascii=False,
+    ).encode("utf-8")
     started = time.perf_counter()
     status, response = request_json(
         "POST",
@@ -205,6 +213,7 @@ def capture_case(
     case: dict[str, Any],
     result: dict[str, Any],
     source_index: dict[str, dict[str, Any]] | None = None,
+    request_document_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     response = result.get("response") or {}
     raw_sources = response.get("sources") or []
@@ -217,9 +226,11 @@ def capture_case(
         "category": case["category"],
         "query": case["query"],
         "target_files": case.get("target_files", []),
+        "request_document_ids": request_document_ids or [],
         "http_status": result.get("http_status"),
         "duration_seconds": result.get("duration_seconds"),
         "request_error": result.get("error"),
+        "error_detail": response if result.get("http_status") != 200 else None,
         "answer": response.get("response"),
         "route_used": response.get("route_used"),
         "sources": [compact_source_reference(source) for source in raw_sources],
@@ -254,6 +265,11 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     failed_upload_files = {
         item["filename"] for item in upload_results if item.get("http_status") != 200
     }
+    uploaded_document_ids = {
+        item["filename"]: str((item.get("response") or {}).get("document_id"))
+        for item in upload_results
+        if item.get("http_status") == 200 and (item.get("response") or {}).get("document_id")
+    }
 
     case_results: list[dict[str, Any]] = []
     source_index: dict[str, dict[str, Any]] = {}
@@ -271,11 +287,22 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
                         "error": f"target upload failed: {', '.join(blocked_files)}",
                     },
                     source_index,
+                    [],
                 )
             )
             continue
+        request_document_ids = [
+            uploaded_document_ids[filename]
+            for filename in case.get("target_files", [])
+            if filename in uploaded_document_ids
+        ]
         try:
-            raw_result = ask_chat(base_url, case["query"], args.chat_timeout)
+            raw_result = ask_chat(
+                base_url,
+                case["query"],
+                args.chat_timeout,
+                request_document_ids,
+            )
         except Exception as exc:
             raw_result = {
                 "http_status": None,
@@ -286,7 +313,14 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         response_debug = (raw_result.get("response") or {}).get("debug") or {}
         if not document_catalog and response_debug.get("catalog"):
             document_catalog = response_debug["catalog"]
-        case_results.append(capture_case(case, raw_result, source_index))
+        case_results.append(
+            capture_case(
+                case,
+                raw_result,
+                source_index,
+                request_document_ids,
+            )
+        )
 
     upload_errors = sum(item.get("http_status") != 200 for item in upload_results)
     request_errors = sum(

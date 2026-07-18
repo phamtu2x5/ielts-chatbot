@@ -223,6 +223,7 @@ function App() {
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [pendingFiles, setPendingFiles] = useState([]);
+  const [activeDocumentIds, setActiveDocumentIds] = useState([]);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
   const hasStreamingAssistant = messages.some((message) => message.streaming);
@@ -378,6 +379,7 @@ function App() {
               name: data.file_name,
               status: "ready",
               chunks: data.chunks_processed,
+              documentId: data.document_id,
             });
           } catch (error) {
             failedFiles.push({ name: item.name, error: error.message });
@@ -388,6 +390,11 @@ function App() {
           }
         }
         setIsUploading(false);
+        if (uploadedFiles.length) {
+          setActiveDocumentIds((current) => [
+            ...new Set([...current, ...uploadedFiles.map((data) => data.document_id)]),
+          ]);
+        }
         setMessages((current) =>
           current.map((message) =>
             message.id === assistantId
@@ -448,6 +455,9 @@ function App() {
         body: JSON.stringify({
           message: text,
           conversation_history: history,
+          document_ids: uploadedFiles.length
+            ? uploadedFiles.map((data) => data.document_id)
+            : activeDocumentIds,
         }),
       });
       if (!response.ok || !response.body) {

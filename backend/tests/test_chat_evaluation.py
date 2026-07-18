@@ -107,8 +107,9 @@ class ChatEvaluationManifestTests(unittest.TestCase):
             },
         }
         source_index = {}
-        capture = capture_case(case, result, source_index)
+        capture = capture_case(case, result, source_index, ["doc-1"])
         self.assertEqual(capture["answer"], "Nội dung nói về Mars.")
+        self.assertEqual(capture["request_document_ids"], ["doc-1"])
         self.assertEqual(
             capture["sources"],
             [
@@ -129,6 +130,26 @@ class ChatEvaluationManifestTests(unittest.TestCase):
         self.assertNotIn("raw_response", capture)
         self.assertNotIn("status", capture)
         self.assertNotIn("failures", capture)
+
+    def test_capture_preserves_http_error_detail(self) -> None:
+        case = {
+            "id": "error",
+            "category": "writing_generation",
+            "query": "Viết overview.",
+            "target_files": ["writing.png"],
+        }
+        capture = capture_case(
+            case,
+            {
+                "http_status": 502,
+                "duration_seconds": 0.2,
+                "response": {"detail": "Ollama unavailable"},
+            },
+            request_document_ids=["doc-writing"],
+        )
+
+        self.assertEqual(capture["error_detail"], {"detail": "Ollama unavailable"})
+        self.assertEqual(capture["request_document_ids"], ["doc-writing"])
 
     def test_upload_capture_omits_large_extraction_debug(self) -> None:
         result = {

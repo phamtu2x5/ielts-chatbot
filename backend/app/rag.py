@@ -148,21 +148,39 @@ class LocalVectorStore:
         return len(chunks)
 
     @synchronized
-    def search(self, query: str, top_k: int = 5) -> List[Dict]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
         if not self._docs or self._embeddings.size == 0:
             return []
 
-        return self._dense_search(query, top_k=max(1, min(top_k, 50)), min_score=self.min_score)
+        return self._dense_search(
+            query,
+            top_k=max(1, min(top_k, 50)),
+            min_score=self.min_score,
+            document_ids=document_ids,
+        )
 
     @synchronized
-    def probe(self, query: str, top_k: int = 3) -> Dict:
+    def probe(
+        self,
+        query: str,
+        top_k: int = 3,
+        document_ids: List[str] | None = None,
+    ) -> Dict:
         if not self._docs:
             return {"results": [], "has_hits": False, "has_strong_hits": False}
 
         is_overview = self._is_document_overview_query(query)
         has_document_intent = is_overview or self._has_document_intent(query)
         if is_overview:
-            results = self.overview(top_k=settings.rag_overview_top_k)
+            results = self.overview(
+                top_k=settings.rag_overview_top_k,
+                document_ids=document_ids,
+            )
             for result in results:
                 result["probe_dense_score"] = float(result.get("score", 0.0))
                 result["probe_keyword_score"] = 0.0
@@ -182,9 +200,18 @@ class LocalVectorStore:
 
         top_k = max(1, min(top_k, 50))
         probe_min_dense = settings.rag_probe_min_dense_score
-        dense_results = self._dense_search(query, top_k=top_k, min_score=probe_min_dense) if self._embeddings.size else []
-        keyword_results = self._keyword_search(query, top_k=top_k)
-        question_results = self._question_range_search(query, top_k=top_k)
+        dense_results = (
+            self._dense_search(
+                query,
+                top_k=top_k,
+                min_score=probe_min_dense,
+                document_ids=document_ids,
+            )
+            if self._embeddings.size
+            else []
+        )
+        keyword_results = self._keyword_search(query, top_k=top_k, document_ids=document_ids)
+        question_results = self._question_range_search(query, top_k=top_k, document_ids=document_ids)
 
         merged: dict[str, Dict] = {}
         for result in dense_results:
@@ -247,40 +274,85 @@ class LocalVectorStore:
         }
 
     @synchronized
-    def probe_with_catalog(self, query: str, top_k: int = 3) -> tuple[Dict, List[Dict]]:
-        return self.probe(query, top_k), self.document_catalog()
+    def probe_with_catalog(
+        self,
+        query: str,
+        top_k: int = 3,
+        document_ids: List[str] | None = None,
+    ) -> tuple[Dict, List[Dict]]:
+        return self.probe(query, top_k, document_ids), self.document_catalog(document_ids)
 
     @synchronized
-    def overview(self, top_k: int = 8) -> List[Dict]:
-        return self.structured_store.overview(top_k=top_k)
+    def overview(self, top_k: int = 8, document_ids: List[str] | None = None) -> List[Dict]:
+        return self.structured_store.overview(top_k=top_k, document_ids=document_ids)
 
     @synchronized
-    def structured_lookup(self, query: str, intent: str, top_k: int = 8) -> List[Dict]:
-        return self.structured_store.structured_lookup(query=query, intent=intent, top_k=top_k)
+    def structured_lookup(
+        self,
+        query: str,
+        intent: str,
+        top_k: int = 8,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
+        return self.structured_store.structured_lookup(
+            query=query,
+            intent=intent,
+            top_k=top_k,
+            document_ids=document_ids,
+        )
 
     @synchronized
-    def document_catalog(self) -> List[Dict]:
-        return self.structured_store.document_catalog()
+    def document_catalog(self, document_ids: List[str] | None = None) -> List[Dict]:
+        return self.structured_store.document_catalog(document_ids=document_ids)
 
     @synchronized
-    def question_context_for_sources(self, sources: List[Dict], top_k: int = 8) -> List[Dict]:
-        return self.structured_store.question_context_for_sources(sources=sources, top_k=top_k)
+    def question_context_for_sources(
+        self,
+        sources: List[Dict],
+        top_k: int = 8,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
+        return self.structured_store.question_context_for_sources(
+            sources=sources,
+            top_k=top_k,
+            document_ids=document_ids,
+        )
 
     @synchronized
-    def passage_context_for_sources(self, sources: List[Dict], max_chunks_per_passage: int = 3) -> List[Dict]:
+    def passage_context_for_sources(
+        self,
+        sources: List[Dict],
+        max_chunks_per_passage: int = 3,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
         return self.structured_store.passage_context_for_sources(
             sources=sources,
             max_chunks_per_passage=max_chunks_per_passage,
+            document_ids=document_ids,
         )
 
-    def _dense_search(self, query: str, top_k: int, min_score: float) -> List[Dict]:
+    def _dense_search(
+        self,
+        query: str,
+        top_k: int,
+        min_score: float,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
         query_embedding = self._embed([query])[0]
         if self._embeddings.shape[1] != query_embedding.shape[0]:
             raise RuntimeError(
                 "Stored embeddings are incompatible with the configured embedding model. Rebuild the RAG index."
             )
+        allowed = set(document_ids or [])
+        candidate_indices = [
+            index
+            for index, doc in enumerate(self._docs)
+            if not allowed or doc.get("document_id") in allowed
+        ]
+        if not candidate_indices:
+            return []
         scores = self._embeddings @ query_embedding
-        order = np.argsort(scores)[::-1][:top_k]
+        order = sorted(candidate_indices, key=lambda index: scores[index], reverse=True)[:top_k]
 
         results = []
         for idx in order:
@@ -292,13 +364,21 @@ class LocalVectorStore:
             results.append(doc)
         return results
 
-    def _keyword_search(self, query: str, top_k: int) -> List[Dict]:
+    def _keyword_search(
+        self,
+        query: str,
+        top_k: int,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
         query_terms = self._terms(query)
         if not query_terms:
             return []
 
         results = []
+        allowed = set(document_ids or [])
         for doc in self._docs:
+            if allowed and doc.get("document_id") not in allowed:
+                continue
             text = doc.get("retrieval_text") or doc.get("text", "")
             text_terms = set(self._terms(text))
             overlap = sum(1 for term in query_terms if term in text_terms)
@@ -312,14 +392,22 @@ class LocalVectorStore:
 
         return sorted(results, key=lambda item: item["keyword_score"], reverse=True)[:top_k]
 
-    def _question_range_search(self, query: str, top_k: int) -> List[Dict]:
+    def _question_range_search(
+        self,
+        query: str,
+        top_k: int,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
         ranges = self._question_ranges(query)
         if not ranges:
             return []
 
         header_results = []
         numeric_results = []
+        allowed = set(document_ids or [])
         for doc in self._docs:
+            if allowed and doc.get("document_id") not in allowed:
+                continue
             metadata_score = self._question_metadata_match_score(doc, ranges)
             text = doc.get("text", "")
             header_score = 0.0

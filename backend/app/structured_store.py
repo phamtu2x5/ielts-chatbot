@@ -17,13 +17,21 @@ class StructuredDocumentStore:
     def docs(self) -> List[Dict]:
         return self._docs_provider()
 
-    def overview(self, top_k: int = 8) -> List[Dict]:
+    def overview(self, top_k: int = 8, document_ids: List[str] | None = None) -> List[Dict]:
         top_k = max(1, min(top_k, 50))
+        docs = self._docs_in_scope(document_ids)
         outline_docs = [
             doc
-            for doc in self.docs
+            for doc in docs
             if doc.get("metadata", {}).get("unit_type")
-            in {"document_outline", "passage_summary", "writing_prompt", "writing_table"}
+            in {
+                "document_outline",
+                "passage_summary",
+                "writing_prompt",
+                "writing_table",
+                "writing_task",
+                "sample_answer",
+            }
         ]
         if outline_docs:
             results = []
@@ -33,7 +41,7 @@ class StructuredDocumentStore:
                 results.append(item)
             passage_docs = [
                 doc
-                for doc in sorted(self.docs, key=lambda item: item.get("chunk_index", 0))
+                for doc in sorted(docs, key=lambda item: item.get("chunk_index", 0))
                 if doc.get("metadata", {}).get("unit_type") == "passage"
             ]
             seen_passages = set()
@@ -49,7 +57,7 @@ class StructuredDocumentStore:
                     break
             return results
 
-        docs = sorted(self.docs, key=lambda doc: (min(doc.get("pages") or [999]), doc.get("chunk_index", 0)))
+        docs = sorted(docs, key=lambda doc: (min(doc.get("pages") or [999]), doc.get("chunk_index", 0)))
         content_docs = [doc for doc in docs if doc.get("token_count", 0) >= 80]
         selected = content_docs[:top_k] if content_docs else docs[:top_k]
         results = []
@@ -59,23 +67,30 @@ class StructuredDocumentStore:
             results.append(item)
         return results
 
-    def structured_lookup(self, query: str, intent: str, top_k: int = 8) -> List[Dict]:
+    def structured_lookup(
+        self,
+        query: str,
+        intent: str,
+        top_k: int = 8,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
         top_k = max(1, min(top_k, 50))
         if intent == "document_overview":
-            return self.overview(top_k=top_k)
+            return self.overview(top_k=top_k, document_ids=document_ids)
 
         ranges = self._question_ranges(query)
-        if intent in {"show_table", "extract_table", "semantic_qa"}:
-            table_cell_hits = self._table_cell_lookup(query, top_k=top_k)
+        if intent == "table_cell":
+            table_cell_hits = self._table_cell_lookup(query, top_k=top_k, document_ids=document_ids)
             if table_cell_hits:
                 return table_cell_hits
-        if intent in {"show_table", "extract_table"}:
+        if intent in {"show_table", "extract_table", "table_calculation", "table_comparison"}:
             return self._visual_lookup(
                 ranges=ranges,
                 visual_unit_type="table",
                 question_type="table_completion",
                 top_k=top_k,
                 prefer_writing=self._looks_like_writing_reference(query),
+                document_ids=document_ids,
             )
         if intent == "show_flowchart":
             return self._visual_lookup(
@@ -84,14 +99,28 @@ class StructuredDocumentStore:
                 question_type="flowchart_completion",
                 top_k=top_k,
                 prefer_writing=False,
+                document_ids=document_ids,
             )
+        if intent == "show_diagram":
+            return self._visual_lookup(
+                ranges=ranges,
+                visual_unit_type="diagram",
+                question_type="diagram_completion",
+                top_k=top_k,
+                prefer_writing=False,
+                document_ids=document_ids,
+            )
+        if intent == "show_writing_prompt":
+            return self._unit_lookup({"writing_prompt", "writing_task"}, top_k, document_ids)
+        if intent == "writing_generation":
+            return self._unit_lookup({"writing_prompt", "writing_table"}, top_k, document_ids)
         if ranges and intent in {"show_questions", "translate_questions", "explain_questions", "solve_questions"}:
-            return self._question_lookup(ranges, top_k=top_k)
+            return self._question_lookup(ranges, top_k=top_k, document_ids=document_ids)
         return []
 
-    def document_catalog(self) -> List[Dict]:
+    def document_catalog(self, document_ids: List[str] | None = None) -> List[Dict]:
         catalog: dict[str, Dict] = {}
-        for doc in self.docs:
+        for doc in self._docs_in_scope(document_ids):
             source_file = doc.get("source_file", "unknown")
             entry = catalog.setdefault(
                 source_file,
@@ -138,62 +167,82 @@ class StructuredDocumentStore:
             for item in catalog.values()
         ]
 
-    def question_context_for_sources(self, sources: List[Dict], top_k: int = 8) -> List[Dict]:
+    def question_context_for_sources(
+        self,
+        sources: List[Dict],
+        top_k: int = 8,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
         wanted_parent_ids = {
-            source.get("metadata", {}).get("parent_id")
+            (source.get("document_id"), source.get("metadata", {}).get("parent_id"))
             for source in sources
             if source.get("metadata", {}).get("unit_type") == "question"
         }
         wanted_ranges = {
-            tuple(source.get("metadata", {}).get("question_range") or [])
+            (source.get("document_id"), tuple(source.get("metadata", {}).get("question_range") or []))
             for source in sources
             if source.get("metadata", {}).get("unit_type") == "question_group"
         }
-        wanted_ranges = {item for item in wanted_ranges if len(item) == 2}
+        wanted_ranges = {item for item in wanted_ranges if len(item[1]) == 2}
         if not wanted_parent_ids and not wanted_ranges:
             return []
 
         results = []
-        for doc in sorted(self.docs, key=lambda item: item.get("chunk_index", 0)):
+        for doc in sorted(self._docs_in_scope(document_ids), key=lambda item: item.get("chunk_index", 0)):
             metadata = doc.get("metadata", {})
             unit_type = metadata.get("unit_type")
             question_range = metadata.get("question_range")
+            document_id = doc.get("document_id")
             if unit_type == "question_group":
                 chunk_id = doc.get("chunk_id")
-                if chunk_id in wanted_parent_ids or tuple(question_range or []) in wanted_ranges:
+                if (document_id, chunk_id) in wanted_parent_ids or (
+                    document_id,
+                    tuple(question_range or []),
+                ) in wanted_ranges:
                     results.append(self._mark_retrieval(doc, "parent_question_group", 1.0))
-            elif unit_type == "question" and tuple(question_range or []) in wanted_ranges:
+            elif unit_type == "question" and (document_id, tuple(question_range or [])) in wanted_ranges:
                 results.append(self._mark_retrieval(doc, "child_question", 0.8))
             if len(results) >= top_k:
                 break
         return results
 
-    def passage_context_for_sources(self, sources: List[Dict], max_chunks_per_passage: int = 3) -> List[Dict]:
-        passage_numbers = {
-            source.get("metadata", {}).get("passage_number")
+    def passage_context_for_sources(
+        self,
+        sources: List[Dict],
+        max_chunks_per_passage: int = 3,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
+        passage_keys = {
+            (source.get("document_id"), source.get("metadata", {}).get("passage_number"))
             for source in sources
             if source.get("metadata", {}).get("passage_number")
         }
-        if not passage_numbers:
+        if not passage_keys:
             return []
 
         results: list[Dict] = []
-        counts: dict[int, int] = {}
-        for doc in sorted(self.docs, key=lambda item: item.get("chunk_index", 0)):
+        counts: dict[tuple[str | None, int], int] = {}
+        for doc in sorted(self._docs_in_scope(document_ids), key=lambda item: item.get("chunk_index", 0)):
             metadata = doc.get("metadata", {})
             passage_number = metadata.get("passage_number")
-            if metadata.get("unit_type") != "passage" or passage_number not in passage_numbers:
+            passage_key = (doc.get("document_id"), passage_number)
+            if metadata.get("unit_type") != "passage" or passage_key not in passage_keys:
                 continue
-            count = counts.get(passage_number, 0)
+            count = counts.get(passage_key, 0)
             if count >= max_chunks_per_passage:
                 continue
             results.append(self._mark_retrieval(doc, "parent_passage", 1.0))
-            counts[passage_number] = count + 1
+            counts[passage_key] = count + 1
         return results
 
-    def _question_lookup(self, ranges: List[tuple[int, int]], top_k: int) -> List[Dict]:
+    def _question_lookup(
+        self,
+        ranges: List[tuple[int, int]],
+        top_k: int,
+        document_ids: List[str] | None,
+    ) -> List[Dict]:
         scored = []
-        for doc in self.docs:
+        for doc in self._docs_in_scope(document_ids):
             metadata = doc.get("metadata", {})
             unit_type = metadata.get("unit_type")
             if unit_type not in {"question_group", "question"}:
@@ -223,9 +272,10 @@ class StructuredDocumentStore:
         question_type: str,
         top_k: int,
         prefer_writing: bool,
+        document_ids: List[str] | None,
     ) -> List[Dict]:
         scored = []
-        for doc in self.docs:
+        for doc in self._docs_in_scope(document_ids):
             metadata = doc.get("metadata", {})
             unit_type = metadata.get("unit_type")
             is_visual = unit_type == visual_unit_type or metadata.get("question_type") == question_type
@@ -251,9 +301,14 @@ class StructuredDocumentStore:
             scored.append(self._mark_retrieval(doc, f"structured_{visual_unit_type}", score))
         return sorted(scored, key=lambda item: item["structured_score"], reverse=True)[:top_k]
 
-    def _table_cell_lookup(self, query: str, top_k: int) -> List[Dict]:
+    def _table_cell_lookup(
+        self,
+        query: str,
+        top_k: int,
+        document_ids: List[str] | None,
+    ) -> List[Dict]:
         scored = []
-        for doc in self.docs:
+        for doc in self._docs_in_scope(document_ids):
             metadata = doc.get("metadata", {})
             table = metadata.get("table")
             columns = table.get("columns") if isinstance(table, dict) else metadata.get("table_columns")
@@ -274,6 +329,25 @@ class StructuredDocumentStore:
             if best > 0:
                 scored.append(self._mark_retrieval(doc, "structured_table_cell", best))
         return sorted(scored, key=lambda item: item["structured_score"], reverse=True)[:top_k]
+
+    def _unit_lookup(
+        self,
+        unit_types: set[str],
+        top_k: int,
+        document_ids: List[str] | None,
+    ) -> List[Dict]:
+        results = [
+            self._mark_retrieval(doc, "structured_unit", 1.0)
+            for doc in sorted(self._docs_in_scope(document_ids), key=lambda item: item.get("chunk_index", 0))
+            if doc.get("metadata", {}).get("unit_type") in unit_types
+        ]
+        return results[:top_k]
+
+    def _docs_in_scope(self, document_ids: List[str] | None) -> List[Dict]:
+        if not document_ids:
+            return self.docs
+        allowed = set(document_ids)
+        return [doc for doc in self.docs if doc.get("document_id") in allowed]
 
     def _question_ranges(self, query: str) -> List[tuple[int, int]]:
         ranges: list[tuple[int, int]] = []

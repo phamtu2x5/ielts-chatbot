@@ -115,6 +115,42 @@ class _FakeStore:
         return {"documents": 1, "chunks": 1, "embedding_model": "test"}
 
 
+class _FakeChatStore:
+    def __init__(self, catalog: list[dict]) -> None:
+        self.catalog = catalog
+
+    def stats(self) -> dict:
+        return {"documents": len(self.catalog), "chunks": len(self.catalog), "embedding_model": "test"}
+
+    def document_catalog(self, document_ids=None) -> list[dict]:
+        if not document_ids:
+            return self.catalog
+        allowed = set(document_ids)
+        return [
+            item
+            for item in self.catalog
+            if allowed.intersection(item.get("document_ids", []))
+        ]
+
+    def probe_with_catalog(self, query, top_k, document_ids=None):
+        return (
+            {
+                "results": [],
+                "has_hits": False,
+                "has_strong_hits": False,
+                "has_document_intent": True,
+                "is_overview": False,
+            },
+            self.document_catalog(document_ids),
+        )
+
+    def structured_lookup(self, query, intent, top_k, document_ids=None):
+        return []
+
+    def search(self, query, top_k, document_ids=None):
+        return []
+
+
 class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_upload_connects_processor_chunks_and_store(self) -> None:
         store = _FakeStore()
@@ -136,6 +172,82 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.chunks_processed, 1)
             self.assertEqual(store.received_chunks[0]["metadata"]["parser_version"], "1.10.0")
             self.assertEqual(list(Path(temp_dir).iterdir()), [])
+
+    async def test_document_query_without_sources_does_not_fall_back_to_base_model(self) -> None:
+        catalog = [
+            {
+                "source_file": "sample.pdf",
+                "document_ids": ["doc-1"],
+                "mime_types": ["application/pdf"],
+            }
+        ]
+        with patch.object(main, "get_store", return_value=_FakeChatStore(catalog)):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Nội dung Questions 1-4 trong sample.pdf là gì?",
+                    document_ids=["doc-1"],
+                )
+            )
+
+        self.assertEqual(prepared.route_used, "vector_rag_no_match")
+        self.assertIsNone(prepared.prompt)
+        self.assertEqual(prepared.static_response, main.NO_RAG_MATCH_RESPONSE)
+
+    async def test_ambiguous_question_range_requests_a_document_choice(self) -> None:
+        catalog = [
+            {"source_file": "reading-2.pdf", "document_ids": ["doc-2"], "mime_types": ["application/pdf"]},
+            {"source_file": "reading-4.pdf", "document_ids": ["doc-4"], "mime_types": ["application/pdf"]},
+        ]
+        with patch.object(main, "get_store", return_value=_FakeChatStore(catalog)):
+            prepared = await main.prepare_chat(main.ChatRequest(message="Liệt kê Questions 1-4"))
+
+        self.assertEqual(prepared.route_used, "vector_rag_ambiguous_document")
+        self.assertIn("Vui lòng nêu tên file", prepared.static_response)
+
+    async def test_static_table_operations_do_not_collapse_to_first_cell(self) -> None:
+        source = {
+            "source_file": "writing.png",
+            "pages": [1],
+            "metadata": {
+                "unit_type": "writing_table",
+                "table": {
+                    "columns": [
+                        "Country",
+                        "Internet Access 2019 (%)",
+                        "Internet Access 2024 (%)",
+                        "Smartphone Ownership 2019 (%)",
+                        "Smartphone Ownership 2024 (%)",
+                    ],
+                    "rows": [
+                        ["A", 78, 96, 82, 99],
+                        ["B", 61, 89, 67, 94],
+                        ["C", 42, 75, 48, 83],
+                    ],
+                },
+            },
+        }
+
+        cell = main.static_response_for_sources(
+            "Smartphone Ownership của Country B năm 2024 là bao nhiêu?",
+            "table_cell",
+            [source],
+        )
+        calculation = main.static_response_for_sources(
+            "Từ bảng, quốc gia nào tăng Internet Access nhiều nhất từ 2019 đến 2024? Trình bày phép tính.",
+            "table_calculation",
+            [source],
+        )
+        comparison = main.static_response_for_sources(
+            "So sánh Internet Access và Smartphone Ownership của Country A trong cả hai năm.",
+            "table_comparison",
+            [source],
+        )
+
+        self.assertTrue(cell.startswith("94"))
+        self.assertIn("A: 96 - 78 = 18", calculation)
+        self.assertIn("B: 89 - 61 = 28", calculation)
+        self.assertIn("C: 75 - 42 = 33", calculation)
+        self.assertIn("| A | 78 | 96 | 82 | 99 |", comparison)
 
 
 if __name__ == "__main__":

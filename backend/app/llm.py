@@ -217,6 +217,7 @@ def rag_prompt(
     context: str,
     history: Optional[List[ChatMessage]] = None,
     query_intent: str = "semantic_qa",
+    allow_solution: bool = False,
 ) -> str:
     history_text = format_history(history)
     if query_intent in {"show_questions", "translate_questions"}:
@@ -280,6 +281,22 @@ def rag_prompt(
                 "- Summarize the document from the outline and passage context.",
                 "- Mention passage titles, page ranges, and question groups when available.",
                 "- Do not answer individual questions or invent answer keys.",
+            ]
+        )
+    elif query_intent == "writing_generation":
+        parts.extend(
+            [
+                "Generation policy:",
+                "- The user explicitly requested a Writing response based on the supplied prompt or structured visual data.",
+                "- Use only values, labels, periods, categories, and instructions present in the context.",
+                "- Do not substitute a different chart, topic, country, date, or measurement.",
+            ]
+        )
+    elif not allow_solution:
+        parts.extend(
+            [
+                "Generation policy:",
+                "- Do not provide an answer key or solve exercise questions unless the user explicitly requested it.",
             ]
         )
     if history_text:

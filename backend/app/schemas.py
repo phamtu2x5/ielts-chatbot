@@ -11,6 +11,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8_000)
     conversation_history: Optional[List[ChatMessage]] = Field(default=None, max_length=20)
+    document_ids: Optional[List[str]] = Field(default=None, max_length=50)
 
 
 class ChatResponse(BaseModel):

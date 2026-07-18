@@ -1,4 +1,5 @@
 import re
+from dataclasses import asdict, dataclass
 from typing import Any
 
 
@@ -19,6 +20,12 @@ NO_SOLUTION_MARKERS = [
     "chỉ liệt kê",
     "chỉ trích xuất",
     "không tự giải",
+    "không chọn",
+    "chưa chọn",
+    "không xác định đáp án",
+    "không ghép",
+    "chưa ghép",
+    "chưa viết",
 ]
 
 SHOW_MARKERS = [
@@ -31,8 +38,9 @@ SHOW_MARKERS = [
     "mô tả",
 ]
 
-TABLE_MARKERS = ["bảng", "table", "hàng", "cột", "ô trống"]
+TABLE_MARKERS = ["bảng", "table", "hàng", "cột"]
 FLOWCHART_MARKERS = ["flowchart", "flow chart", "flow-chart", "sơ đồ", "node", "hướng nối"]
+DIAGRAM_MARKERS = ["diagram", "biểu đồ cấu tạo", "nhãn trống"]
 PASSAGE_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
 
 SOLVE_MARKERS = [
@@ -49,6 +57,26 @@ SOLVE_MARKERS = [
     "true false not given",
     "t/f/ng",
 ]
+
+CALCULATION_MARKERS = ["tăng nhiều nhất", "giảm nhiều nhất", "phép tính", "chênh lệch", "difference"]
+COMPARISON_MARKERS = ["so sánh", "compare", "comparison"]
+WRITING_GENERATION_MARKERS = ["viết bài", "write an essay", "write a report", "170-190", "170–190"]
+
+
+@dataclass(frozen=True)
+class QueryIntentDecision:
+    intent: str
+    confidence: float
+    reason: str
+    allow_solution: bool
+    question_ranges: list[tuple[int, int]]
+    passage_number: int | None
+    visual_target: str | None = None
+
+    def to_debug(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["question_ranges"] = [list(item) for item in self.question_ranges]
+        return payload
 
 
 def parse_question_ranges(message: str) -> list[tuple[int, int]]:
@@ -81,40 +109,115 @@ def _looks_like_table_cell_lookup(text: str) -> bool:
     asks_value = any(marker in text for marker in ["bao nhiêu", "giá trị", "tỷ lệ", "số liệu", "value", "figure"])
     has_year_or_number = bool(re.search(r"\b\d{4}\b", text))
     has_row_reference = bool(
-        re.search(r"(?:hàng|row|dòng|nước)\s+[a-z0-9][\w-]*", text, flags=re.IGNORECASE)
+        re.search(r"(?:hàng|row|dòng|nước|country)\s+[a-z0-9][\w-]*", text, flags=re.IGNORECASE)
     )
     return asks_value and has_year_or_number and has_row_reference
 
 
-def detect_query_intent(message: str, probe: dict[str, Any]) -> str:
+def looks_like_document_overview(message: str) -> bool:
+    lowered = message.lower()
+    markers = [
+        "nội dung tài liệu",
+        "nội dung của tài liệu",
+        "tóm tắt tài liệu",
+        "tổng quan tài liệu",
+        "gồm những passage",
+        "gồm các passage",
+        "ba passage",
+        "cấu trúc reading test",
+        "chứa những đề và bài mẫu",
+        "những tài liệu nào",
+        "các tài liệu đã tải",
+        "summary of the document",
+        "summarize the document",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
+def detect_query_intent_decision(
+    message: str,
+    probe: dict[str, Any],
+    document_grounded: bool | None = None,
+) -> QueryIntentDecision:
     lowered = message.lower()
     question_ranges = parse_question_ranges(message)
+    passage_number = parse_passage_number(message)
     forbid_solution = _has_any(lowered, NO_SOLUTION_MARKERS)
     targets_table = _has_any(lowered, TABLE_MARKERS)
     targets_flowchart = _has_any(lowered, FLOWCHART_MARKERS)
+    targets_diagram = _has_any(lowered, DIAGRAM_MARKERS)
     asks_show = _has_any(lowered, SHOW_MARKERS)
+    asks_translate = any(marker in lowered for marker in ["dịch", "translate", "nghĩa tiếng việt", "nghĩa là gì"])
+    asks_explain = any(marker in lowered for marker in ["giải thích", "explain", "phân tích"])
+    asks_solve = any(marker in lowered for marker in SOLVE_MARKERS)
+    is_grounded = probe.get("has_document_intent") if document_grounded is None else document_grounded
 
-    if probe.get("is_overview"):
-        return "document_overview"
+    def decision(
+        intent: str,
+        confidence: float,
+        reason: str,
+        allow_solution: bool = False,
+        visual_target: str | None = None,
+    ) -> QueryIntentDecision:
+        return QueryIntentDecision(
+            intent=intent,
+            confidence=confidence,
+            reason=reason,
+            allow_solution=allow_solution,
+            question_ranges=question_ranges,
+            passage_number=passage_number,
+            visual_target=visual_target,
+        )
+
+    if probe.get("is_overview") or looks_like_document_overview(message):
+        return decision("document_overview", 0.98, "overview marker or overview probe")
 
     if targets_flowchart and (asks_show or forbid_solution):
-        return "show_flowchart"
+        return decision("show_flowchart", 0.98, "flowchart target with show/no-solve constraint", visual_target="flowchart")
+    if targets_diagram and (asks_show or forbid_solution):
+        return decision("show_diagram", 0.98, "diagram target with show/no-solve constraint", visual_target="diagram")
+    if targets_table and _has_any(lowered, CALCULATION_MARKERS):
+        return decision("table_calculation", 0.98, "table target with calculation operation", visual_target="table")
+    if targets_table and _has_any(lowered, COMPARISON_MARKERS):
+        return decision("table_comparison", 0.98, "table target with comparison operation", visual_target="table")
     if _looks_like_table_cell_lookup(lowered):
-        return "show_table"
+        return decision("table_cell", 0.98, "single table row/column value lookup", visual_target="table")
     if targets_table and (asks_show or forbid_solution):
-        return "show_table"
+        return decision("show_table", 0.98, "table target with show/no-solve constraint", visual_target="table")
+
+    writing_reference = any(
+        marker in lowered
+        for marker in ["writing", "task 1", "task 2", "ảnh", "hình", "image"]
+    )
+    asks_write_overview = "overview" in lowered and any(marker in lowered for marker in ["viết", "write"])
+    if writing_reference and not forbid_solution and (
+        _has_any(lowered, WRITING_GENERATION_MARKERS) or asks_write_overview
+    ):
+        return decision("writing_generation", 0.98, "explicit writing generation request", allow_solution=True)
+    if writing_reference and any(marker in lowered for marker in ["yêu cầu", "đề bài", "prompt"]):
+        return decision("show_writing_prompt", 0.95, "writing prompt request without generation")
 
     if question_ranges:
-        if any(marker in lowered for marker in ["dịch", "translate", "nghĩa tiếng việt", "nghĩa là gì"]):
-            return "translate_questions"
-        if any(marker in lowered for marker in ["giải thích", "explain", "phân tích"]):
-            return "explain_questions"
         if forbid_solution:
-            return "show_questions"
-        if any(marker in lowered for marker in SOLVE_MARKERS):
-            return "solve_questions"
-        return "show_questions"
-    return "semantic_qa" if probe.get("has_document_intent") else "direct"
+            if asks_translate:
+                return decision("translate_questions", 0.99, "translation request with no-solution constraint")
+            if asks_explain:
+                return decision("explain_questions", 0.99, "explanation request with no-solution constraint")
+            return decision("show_questions", 0.99, "question range with no-solution constraint")
+        if asks_translate:
+            return decision("translate_questions", 0.98, "explicit translation request")
+        if asks_solve:
+            return decision("solve_questions", 0.99, "explicit answer/solve request", allow_solution=True)
+        if asks_explain:
+            return decision("explain_questions", 0.95, "question explanation request without solve marker")
+        return decision("show_questions", 0.9, "question range defaults to show-only")
+    if is_grounded:
+        return decision("semantic_qa", 0.85, "document-grounded semantic question", allow_solution=True)
+    return decision("direct", 0.9, "question is independent from uploaded documents")
+
+
+def detect_query_intent(message: str, probe: dict[str, Any]) -> str:
+    return detect_query_intent_decision(message, probe).intent
 
 
 def ranges_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
@@ -132,7 +235,7 @@ def filter_sources_for_intent(sources: list[dict[str, Any]], message: str, inten
             or source.get("metadata", {}).get("unit_type") == "document_outline"
         ]
 
-    if intent in {"show_table", "extract_table"}:
+    if intent in {"show_table", "extract_table", "table_cell", "table_calculation", "table_comparison"}:
         table_sources = []
         for source in sources:
             metadata = source.get("metadata", {})
@@ -142,11 +245,13 @@ def filter_sources_for_intent(sources: list[dict[str, Any]], message: str, inten
                 table_sources.append(source)
         return table_sources
 
-    if intent == "show_flowchart":
+    if intent in {"show_flowchart", "show_diagram"}:
         flowchart_sources = []
         for source in sources:
             metadata = source.get("metadata", {})
-            if metadata.get("unit_type") == "flowchart" or metadata.get("question_type") == "flowchart_completion":
+            visual_type = "flowchart" if intent == "show_flowchart" else "diagram"
+            question_type = "flowchart_completion" if intent == "show_flowchart" else "diagram_completion"
+            if metadata.get("unit_type") == visual_type or metadata.get("question_type") == question_type:
                 flowchart_sources.append(source)
         return flowchart_sources
 

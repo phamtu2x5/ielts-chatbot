@@ -28,9 +28,11 @@ except ImportError:
     sys.modules["sentence_transformers"] = sentence_transformers_stub
 
 from app import rag
+from app.document_scope import resolve_document_scope
 from app.intent import detect_query_intent, filter_sources_for_intent
 from app.llm import looks_like_prompt_echo
 from app.structured_store import StructuredDocumentStore
+from app.table_operations import comparison_row, table_cell_value, table_change_calculations
 
 
 class FakeVectorStore(rag.LocalVectorStore):
@@ -142,7 +144,11 @@ class LocalVectorStoreTests(unittest.TestCase):
         store.upsert([reading_table], "reading.pdf")
         store.upsert([writing_table], "writing.png")
 
-        hits = store.structured_lookup("Smartphone Ownership của nước B năm 2024 là bao nhiêu?", "show_table", top_k=2)
+        hits = store.structured_lookup(
+            "Smartphone Ownership của nước B năm 2024 là bao nhiêu?",
+            "table_cell",
+            top_k=2,
+        )
 
         self.assertEqual(hits[0]["chunk_id"], "writing-table")
         self.assertEqual(hits[0]["retrieval_method"], "structured_table_cell")
@@ -195,13 +201,176 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertEqual(intent, "show_flowchart")
 
-    def test_exact_table_cell_query_is_show_table_intent(self) -> None:
+    def test_exact_table_cell_query_has_table_cell_intent(self) -> None:
         intent = detect_query_intent(
             "Tỷ lệ sở hữu smartphone của nước B năm 2024 là bao nhiêu?",
             {"is_overview": False, "has_document_intent": True},
         )
 
-        self.assertEqual(intent, "show_table")
+        self.assertEqual(intent, "table_cell")
+
+    def test_explicit_answer_wins_over_explanation_marker(self) -> None:
+        intent = detect_query_intent(
+            "Trả lời Question 40 và giải thích vì sao đáp án phù hợp.",
+            {"is_overview": False, "has_document_intent": True},
+        )
+
+        self.assertEqual(intent, "solve_questions")
+
+    def test_no_choice_constraint_prevents_solving(self) -> None:
+        intent = detect_query_intent(
+            "Hiển thị Questions 20-22, không chọn ba đáp án.",
+            {"is_overview": False, "has_document_intent": True},
+        )
+
+        self.assertEqual(intent, "show_questions")
+
+    def test_blank_notes_are_questions_not_a_table_without_table_marker(self) -> None:
+        intent = detect_query_intent(
+            "Liệt kê Questions 28-29 cùng phần hướng dẫn và các ô trống, chưa điền đáp án.",
+            {"is_overview": False, "has_document_intent": True},
+        )
+
+        self.assertEqual(intent, "show_questions")
+
+    def test_no_matching_constraint_keeps_explain_intent(self) -> None:
+        intent = detect_query_intent(
+            "Giải thích Questions 27-32, không ghép đáp án A-H.",
+            {"is_overview": False, "has_document_intent": True},
+        )
+
+        self.assertEqual(intent, "explain_questions")
+
+    def test_table_operations_have_distinct_intents(self) -> None:
+        probe = {"is_overview": False, "has_document_intent": True}
+
+        self.assertEqual(
+            detect_query_intent("Từ bảng, quốc gia nào tăng nhiều nhất? Trình bày phép tính.", probe),
+            "table_calculation",
+        )
+        self.assertEqual(
+            detect_query_intent("So sánh hai chỉ số của Country A từ bảng.", probe),
+            "table_comparison",
+        )
+
+    def test_structured_table_operations_return_cell_calculation_and_comparison(self) -> None:
+        table = {
+            "columns": [
+                "Country",
+                "Internet Access 2019 (%)",
+                "Internet Access 2024 (%)",
+                "Smartphone Ownership 2019 (%)",
+                "Smartphone Ownership 2024 (%)",
+            ],
+            "rows": [
+                ["A", 78, 96, 82, 99],
+                ["B", 61, 89, 67, 94],
+                ["C", 42, 75, 48, 83],
+            ],
+        }
+
+        cell = table_cell_value("Smartphone Ownership của Country B năm 2024 là bao nhiêu?", table)
+        calculation = table_change_calculations(
+            "Quốc gia nào tăng Internet Access nhiều nhất từ 2019 đến 2024? Trình bày phép tính.",
+            table,
+        )
+        row = comparison_row(
+            "So sánh Internet Access và Smartphone Ownership của Country A trong cả hai năm.",
+            table,
+        )
+
+        self.assertEqual(cell[1], 94)
+        self.assertEqual(
+            [item["change"] for item in calculation["calculations"]],
+            [18.0, 28.0, 33.0],
+        )
+        self.assertEqual(calculation["winner"]["label"], "C")
+        self.assertEqual(row, ["A", 78, 96, 82, 99])
+
+    def test_document_scope_resolves_filename_and_reports_ambiguity(self) -> None:
+        catalog = [
+            {
+                "source_file": "IZONE _ IELTS READING TEST 2.pdf",
+                "document_ids": ["doc-2"],
+                "mime_types": ["application/pdf"],
+            },
+            {
+                "source_file": "IZONE _ IELTS READING TEST 4.pdf",
+                "document_ids": ["doc-4"],
+                "mime_types": ["application/pdf"],
+            },
+        ]
+
+        resolved = resolve_document_scope("Liệt kê Questions 1-4 trong Reading Test 2", catalog)
+        ambiguous = resolve_document_scope("Liệt kê Questions 1-4", catalog)
+
+        self.assertEqual(resolved.resolved_document_ids, ["doc-2"])
+        self.assertFalse(resolved.ambiguous)
+        self.assertTrue(ambiguous.ambiguous)
+
+    def test_structured_lookup_filters_duplicate_question_ranges_by_document(self) -> None:
+        store = FakeVectorStore()
+        first = self._chunk("doc-a-questions", "a.pdf", "Questions 1-4")
+        first["document_id"] = "doc-a"
+        first["metadata"] = {"unit_type": "question_group", "question_range": [1, 4]}
+        second = self._chunk("doc-b-questions", "b.pdf", "Questions 1-4")
+        second["document_id"] = "doc-b"
+        second["metadata"] = {"unit_type": "question_group", "question_range": [1, 4]}
+        store.upsert([first], "a.pdf")
+        store.upsert([second], "b.pdf")
+
+        hits = store.structured_lookup(
+            "Liệt kê Questions 1-4",
+            "show_questions",
+            top_k=5,
+            document_ids=["doc-b"],
+        )
+
+        self.assertEqual([item["chunk_id"] for item in hits], ["doc-b-questions"])
+
+    def test_dense_and_probe_search_filter_before_ranking(self) -> None:
+        store = FakeVectorStore()
+        first = self._chunk("doc-a-long", "a.pdf", "unrelated " * 100)
+        first["document_id"] = "doc-a"
+        second = self._chunk("doc-b-short", "b.pdf", "target text")
+        second["document_id"] = "doc-b"
+        store.upsert([first], "a.pdf")
+        store.upsert([second], "b.pdf")
+
+        dense = store.search("target", top_k=5, document_ids=["doc-b"])
+        probe = store.probe("target", top_k=5, document_ids=["doc-b"])
+
+        self.assertEqual([item["document_id"] for item in dense], ["doc-b"])
+        self.assertTrue(
+            all(item["document_id"] == "doc-b" for item in probe["results"])
+        )
+
+    def test_parent_expansion_preserves_document_id(self) -> None:
+        store = FakeVectorStore()
+        chunks = []
+        for document_id, source_file in [("doc-a", "a.pdf"), ("doc-b", "b.pdf")]:
+            group = self._chunk(f"{document_id}-group", source_file, "Questions 1-4")
+            group["document_id"] = document_id
+            group["metadata"] = {
+                "unit_type": "question_group",
+                "question_range": [1, 4],
+            }
+            passage = self._chunk(f"{document_id}-passage", source_file, "Passage 1")
+            passage["document_id"] = document_id
+            passage["metadata"] = {"unit_type": "passage", "passage_number": 1}
+            chunks.extend([group, passage])
+        store.upsert(chunks[:2], "a.pdf")
+        store.upsert(chunks[2:], "b.pdf")
+        source = dict(chunks[2])
+        source["metadata"] = {**source["metadata"], "passage_number": 1}
+
+        expanded = store.passage_context_for_sources(
+            [source],
+            max_chunks_per_passage=3,
+            document_ids=["doc-b"],
+        )
+
+        self.assertEqual([item["document_id"] for item in expanded], ["doc-b"])
 
     def test_explicit_passage_filter_does_not_fallback_to_wrong_passage(self) -> None:
         sources = [
