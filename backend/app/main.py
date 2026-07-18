@@ -75,12 +75,55 @@ def format_context(sources: list[dict], max_chars_per_source: int | None = None)
     for index, source in enumerate(sources, 1):
         source_file = source.get("source_file", "unknown")
         pages = source.get("pages") or []
-        page_label = f", pages {', '.join(str(page) for page in pages)}" if pages else ""
         text = source.get("display_text") or source.get("text", "")
         if max_chars_per_source and len(text) > max_chars_per_source:
             text = text[:max_chars_per_source].rsplit(" ", 1)[0] + " ..."
-        parts.append(f"[Source {index}: {source_file}{page_label}]\n{text}")
+        unit_type = source.get("metadata", {}).get("unit_type")
+        role = {
+            "question_group": "QUESTION INSTRUCTIONS",
+            "question": "QUESTION",
+            "passage": "PASSAGE EVIDENCE",
+            "document_outline": "DOCUMENT OUTLINE",
+            "writing_prompt": "WRITING PROMPT",
+            "writing_task": "WRITING TASK",
+            "sample_answer": "SAMPLE ANSWER",
+            "writing_table": "STRUCTURED TABLE",
+            "table": "STRUCTURED TABLE",
+            "flowchart": "STRUCTURED FLOWCHART",
+            "diagram": "STRUCTURED DIAGRAM",
+        }.get(unit_type, "DOCUMENT CONTEXT")
+        parts.append(
+            f"--- {role} {index} ---\n"
+            f"File: {source_file}\n"
+            f"Pages: {', '.join(str(page) for page in pages) if pages else 'unknown'}\n"
+            f"{text}"
+        )
     return "\n\n".join(parts)
+
+
+def evidence_query_for_sources(sources: list[dict[str, Any]], fallback: str) -> str:
+    question_sources = [
+        source
+        for source in sources
+        if source.get("metadata", {}).get("unit_type") == "question"
+    ]
+    candidates = question_sources or [
+        source
+        for source in sources
+        if source.get("metadata", {}).get("unit_type") == "question_group"
+    ]
+    queries: list[str] = []
+    for source in candidates:
+        text = (source.get("display_text") or source.get("text") or "").strip()
+        if not text:
+            continue
+        text = re.sub(r"^\s*\d{1,2}\s*[.)]\s*", "", text)
+        option_matches = list(re.finditer(r"(?<![A-Za-z0-9])([A-H])(?=\s+\S)", text))
+        if len(option_matches) >= 2:
+            text = text[: option_matches[0].start()].strip()
+        if text and text not in queries:
+            queries.append(text)
+    return " ".join(queries).strip() or fallback
 
 
 def format_router_document_context(catalog: list[dict], probe: dict) -> str:
@@ -134,6 +177,7 @@ def compact_probe_debug(probe: dict) -> dict:
         "has_hits": probe.get("has_hits", False),
         "has_strong_hits": probe.get("has_strong_hits", False),
         "top_score": probe.get("top_score", 0.0),
+        "top_fused_score": probe.get("top_fused_score", 0.0),
         "top_keyword_score": probe.get("top_keyword_score", 0.0),
         "top_question_score": probe.get("top_question_score", 0.0),
         "top_overview_score": probe.get("top_overview_score", 0.0),
@@ -148,6 +192,8 @@ def compact_probe_debug(probe: dict) -> dict:
                 "keyword": item.get("probe_keyword_score", 0.0),
                 "question": item.get("probe_question_score", 0.0),
                 "overview": item.get("probe_overview_score", 0.0),
+                "fused": item.get("rrf_score", 0.0),
+                "methods": item.get("retrieval_methods", []),
                 "chunk_id": item.get("chunk_id"),
                 "unit_type": item.get("metadata", {}).get("unit_type"),
                 "chunk_reason": item.get("metadata", {}).get("chunk_reason"),
@@ -628,6 +674,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     query_intent = "direct"
     intent_debug: dict[str, Any] = {}
     writing_parent_id: str | None = None
+    evidence_query: str | None = None
 
     stats = await run_in_threadpool(store.stats)
     full_catalog = await run_in_threadpool(store.document_catalog)
@@ -794,27 +841,17 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 for source in sources + question_context
                 if source.get("metadata", {}).get("passage_number")
             }
-            evidence_query = " ".join(
-                source.get("display_text") or source.get("text") or ""
-                for source in sources + question_context
-                if source.get("metadata", {}).get("unit_type") in {"question", "question_group"}
-            ).strip() or message
+            evidence_query = evidence_query_for_sources(sources + question_context, message)
             evidence_candidates = await run_in_threadpool(
-                store.search,
+                store.hybrid_search,
                 evidence_query,
                 max(settings.rag_top_k * 3, 12),
                 scope_ids,
+                ["passage"],
+                sorted(target_passages),
             )
             evidence_candidate_count = len(evidence_candidates)
-            evidence_context = [
-                source
-                for source in evidence_candidates
-                if source.get("metadata", {}).get("unit_type") == "passage"
-                and (
-                    not target_passages
-                    or source.get("metadata", {}).get("passage_number") in target_passages
-                )
-            ][:3]
+            evidence_context = evidence_candidates[:3]
             if not evidence_context:
                 evidence_context = await run_in_threadpool(
                     store.passage_context_for_sources,
@@ -846,6 +883,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "after_filter_count": len(sources),
             "evidence_candidate_count": evidence_candidate_count,
             "evidence_context_count": evidence_context_count,
+            "evidence_query": evidence_query,
             "writing_parent_id": writing_parent_id,
             "final_context": compact_final_context_debug(sources),
         },

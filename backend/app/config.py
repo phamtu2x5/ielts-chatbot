@@ -54,6 +54,7 @@ class AppSettings:
     rag_probe_min_dense_score: float = field(
         default_factory=lambda: float(os.getenv("RAG_PROBE_MIN_DENSE_SCORE", "0.35"))
     )
+    rag_rrf_k: int = field(default_factory=lambda: int(os.getenv("RAG_RRF_K", "60")))
     rag_overview_top_k: int = field(default_factory=lambda: int(os.getenv("RAG_OVERVIEW_TOP_K", "8")))
     rag_overview_source_chars: int = field(
         default_factory=lambda: int(os.getenv("RAG_OVERVIEW_SOURCE_CHARS", "900"))
@@ -67,7 +68,12 @@ class AppSettings:
             raise ValueError("OLLAMA_NUM_PREDICT and OLLAMA_NUM_CTX must be positive.")
         if self.ollama_timeout_seconds <= 0:
             raise ValueError("OLLAMA_TIMEOUT_SECONDS must be positive.")
-        if self.rag_top_k <= 0 or self.rag_probe_top_k <= 0 or self.rag_overview_top_k <= 0:
+        if (
+            self.rag_top_k <= 0
+            or self.rag_probe_top_k <= 0
+            or self.rag_overview_top_k <= 0
+            or self.rag_rrf_k <= 0
+        ):
             raise ValueError("RAG top-k settings must be positive.")
         if self.rag_overview_source_chars <= 0:
             raise ValueError("RAG_OVERVIEW_SOURCE_CHARS must be positive.")

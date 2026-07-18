@@ -334,6 +334,47 @@ class LocalVectorStoreTests(unittest.TestCase):
             all(item["document_id"] == "doc-b" for item in probe["results"])
         )
 
+    def test_rrf_rewards_candidates_supported_by_multiple_retrievers(self) -> None:
+        store = FakeVectorStore()
+
+        hits = store._fuse_ranked_results(
+            dense_results=[
+                {"chunk_id": "dense-only", "score": 0.99},
+                {"chunk_id": "consensus", "score": 0.7},
+            ],
+            keyword_results=[
+                {"chunk_id": "consensus", "keyword_score": 3.0},
+            ],
+            question_results=[],
+            top_k=2,
+        )
+
+        self.assertEqual(hits[0]["chunk_id"], "consensus")
+        self.assertEqual(hits[0]["retrieval_methods"], ["dense", "keyword"])
+
+    def test_hybrid_search_filters_unit_and_passage_before_ranking(self) -> None:
+        store = FakeVectorStore()
+        wrong_passage = self._chunk("wrong-passage", "reading.pdf", "target " * 100)
+        wrong_passage["document_id"] = "doc-reading"
+        wrong_passage["metadata"] = {"unit_type": "passage", "passage_number": 1}
+        question = self._chunk("question", "reading.pdf", "target question")
+        question["document_id"] = "doc-reading"
+        question["metadata"] = {"unit_type": "question", "passage_number": 2}
+        evidence = self._chunk("evidence", "reading.pdf", "target evidence")
+        evidence["document_id"] = "doc-reading"
+        evidence["metadata"] = {"unit_type": "passage", "passage_number": 2}
+        store.upsert([wrong_passage, question, evidence], "reading.pdf")
+
+        hits = store.hybrid_search(
+            "target",
+            top_k=5,
+            document_ids=["doc-reading"],
+            unit_types=["passage"],
+            passage_numbers=[2],
+        )
+
+        self.assertEqual([item["chunk_id"] for item in hits], ["evidence"])
+
     def test_parent_expansion_preserves_document_id(self) -> None:
         store = FakeVectorStore()
         chunks = []
@@ -390,9 +431,14 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertFalse(looks_like_prompt_echo("Câu 1 là TRUE vì đoạn văn nêu...", prompt))
 
     def test_response_cleanup_removes_decorative_icons(self) -> None:
-        cleaned = clean_response("✅ Kết quả: C tăng 33%. 👉 A → B vẫn giữ mũi tên.")
+        cleaned = clean_response(
+            "✅ Kết quả: C tăng 33%. 👉 A → B vẫn giữ mũi tên. [Source 2: reading.pdf, pages 1, 2]"
+        )
 
-        self.assertEqual(cleaned, "Kết quả: C tăng 33%. A → B vẫn giữ mũi tên.")
+        self.assertEqual(
+            cleaned,
+            "Kết quả: C tăng 33%. A → B vẫn giữ mũi tên. reading.pdf, pages 1, 2",
+        )
 
     def test_writing_output_contract_and_validation(self) -> None:
         contract = writing_output_contract(

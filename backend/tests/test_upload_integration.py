@@ -152,6 +152,44 @@ class _FakeChatStore:
 
 
 class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    def test_evidence_query_prefers_child_question_and_removes_options(self) -> None:
+        sources = [
+            {
+                "display_text": "Questions 11-13 Choose the correct letter. 11. Vintage wines are A mostly better. B often preferred. C often discussed.",
+                "metadata": {"unit_type": "question_group"},
+            },
+            {
+                "display_text": "11. Vintage wines are A mostly better. B often preferred. C often discussed. D more costly.",
+                "metadata": {"unit_type": "question"},
+            },
+        ]
+
+        query = main.evidence_query_for_sources(sources, "Trả lời Question 11")
+
+        self.assertEqual(query, "Vintage wines are")
+
+    def test_context_assigns_roles_without_source_prompt_tokens(self) -> None:
+        context = main.format_context(
+            [
+                {
+                    "source_file": "reading.pdf",
+                    "pages": [2],
+                    "display_text": "11. Vintage wines are...",
+                    "metadata": {"unit_type": "question"},
+                },
+                {
+                    "source_file": "reading.pdf",
+                    "pages": [1, 2],
+                    "display_text": "Passage evidence",
+                    "metadata": {"unit_type": "passage"},
+                },
+            ]
+        )
+
+        self.assertIn("--- QUESTION 1 ---", context)
+        self.assertIn("--- PASSAGE EVIDENCE 2 ---", context)
+        self.assertNotIn("[Source", context)
+
     async def test_upload_connects_processor_chunks_and_store(self) -> None:
         store = _FakeStore()
         with tempfile.TemporaryDirectory() as temp_dir:

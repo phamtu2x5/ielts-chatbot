@@ -165,6 +165,46 @@ class LocalVectorStore:
         )
 
     @synchronized
+    def hybrid_search(
+        self,
+        query: str,
+        top_k: int = 5,
+        document_ids: List[str] | None = None,
+        unit_types: List[str] | None = None,
+        passage_numbers: List[int] | None = None,
+    ) -> List[Dict]:
+        if not self._docs:
+            return []
+
+        top_k = max(1, min(top_k, 50))
+        candidate_k = min(max(top_k * 2, top_k), 50)
+        dense_results = (
+            self._dense_search(
+                query,
+                top_k=candidate_k,
+                min_score=settings.rag_probe_min_dense_score,
+                document_ids=document_ids,
+                unit_types=unit_types,
+                passage_numbers=passage_numbers,
+            )
+            if self._embeddings.size
+            else []
+        )
+        keyword_results = self._keyword_search(
+            query,
+            top_k=candidate_k,
+            document_ids=document_ids,
+            unit_types=unit_types,
+            passage_numbers=passage_numbers,
+        )
+        return self._fuse_ranked_results(
+            dense_results=dense_results,
+            keyword_results=keyword_results,
+            question_results=[],
+            top_k=top_k,
+        )
+
+    @synchronized
     def probe(
         self,
         query: str,
@@ -213,61 +253,27 @@ class LocalVectorStore:
         keyword_results = self._keyword_search(query, top_k=top_k, document_ids=document_ids)
         question_results = self._question_range_search(query, top_k=top_k, document_ids=document_ids)
 
-        merged: dict[str, Dict] = {}
-        for result in dense_results:
-            key = result.get("chunk_id") or f"dense-{result.get('chunk_index')}"
-            merged[key] = dict(result)
-            merged[key]["probe_dense_score"] = float(result.get("score", 0.0))
-            merged[key]["probe_keyword_score"] = 0.0
-            merged[key]["probe_question_score"] = 0.0
-            merged[key]["probe_overview_score"] = 0.0
-
-        for result in keyword_results:
-            key = result.get("chunk_id") or f"keyword-{result.get('chunk_index')}"
-            if key not in merged:
-                merged[key] = dict(result)
-                merged[key]["score"] = 0.0
-                merged[key]["probe_dense_score"] = 0.0
-                merged[key]["probe_question_score"] = 0.0
-                merged[key]["probe_overview_score"] = 0.0
-            merged[key]["probe_keyword_score"] = float(result.get("keyword_score", 0.0))
-
-        for result in question_results:
-            key = result.get("chunk_id") or f"question-{result.get('chunk_index')}"
-            if key not in merged:
-                merged[key] = dict(result)
-                merged[key]["score"] = 0.0
-                merged[key]["probe_dense_score"] = 0.0
-                merged[key]["probe_keyword_score"] = 0.0
-                merged[key]["probe_overview_score"] = 0.0
-            merged[key]["probe_question_score"] = float(result.get("question_score", 0.0))
-
-        results = sorted(
-            merged.values(),
-            key=lambda item: (
-                item.get("probe_overview_score", 0.0),
-                item.get("probe_question_score", 0.0),
-                item.get("probe_keyword_score", 0.0),
-                item.get("probe_dense_score", 0.0),
-            ),
-            reverse=True,
-        )[:top_k]
+        results = self._fuse_ranked_results(
+            dense_results=dense_results,
+            keyword_results=keyword_results,
+            question_results=question_results,
+            top_k=top_k,
+        )
 
         return {
             "results": results,
             "has_hits": bool(results),
-            "has_strong_hits": bool(
-                results
-                and (
-                    results[0].get("probe_keyword_score", 0.0) >= 2
-                    or results[0].get("probe_question_score", 0.0) >= 1
-                    or results[0].get("probe_overview_score", 0.0) >= 1
-                    or results[0].get("probe_dense_score", 0.0) >= self.min_score
-                )
+            "has_strong_hits": any(
+                result.get("probe_keyword_score", 0.0) >= 2
+                or result.get("probe_question_score", 0.0) >= 1
+                or result.get("probe_overview_score", 0.0) >= 1
+                or result.get("probe_dense_score", 0.0) >= self.min_score
+                for result in results
             ),
             "has_document_intent": has_document_intent,
             "is_overview": False,
             "top_score": results[0].get("score", 0.0) if results else 0.0,
+            "top_fused_score": results[0].get("rrf_score", 0.0) if results else 0.0,
             "top_keyword_score": results[0].get("probe_keyword_score", 0.0) if results else 0.0,
             "top_question_score": results[0].get("probe_question_score", 0.0) if results else 0.0,
             "top_overview_score": 0.0,
@@ -350,18 +356,19 @@ class LocalVectorStore:
         top_k: int,
         min_score: float,
         document_ids: List[str] | None = None,
+        unit_types: List[str] | None = None,
+        passage_numbers: List[int] | None = None,
     ) -> List[Dict]:
         query_embedding = self._embed([query])[0]
         if self._embeddings.shape[1] != query_embedding.shape[0]:
             raise RuntimeError(
                 "Stored embeddings are incompatible with the configured embedding model. Rebuild the RAG index."
             )
-        allowed = set(document_ids or [])
-        candidate_indices = [
-            index
-            for index, doc in enumerate(self._docs)
-            if not allowed or doc.get("document_id") in allowed
-        ]
+        candidate_indices = self._candidate_indices(
+            document_ids=document_ids,
+            unit_types=unit_types,
+            passage_numbers=passage_numbers,
+        )
         if not candidate_indices:
             return []
         scores = self._embeddings @ query_embedding
@@ -382,16 +389,21 @@ class LocalVectorStore:
         query: str,
         top_k: int,
         document_ids: List[str] | None = None,
+        unit_types: List[str] | None = None,
+        passage_numbers: List[int] | None = None,
     ) -> List[Dict]:
         query_terms = self._terms(query)
         if not query_terms:
             return []
 
         results = []
-        allowed = set(document_ids or [])
-        for doc in self._docs:
-            if allowed and doc.get("document_id") not in allowed:
-                continue
+        candidate_indices = self._candidate_indices(
+            document_ids=document_ids,
+            unit_types=unit_types,
+            passage_numbers=passage_numbers,
+        )
+        for index in candidate_indices:
+            doc = self._docs[index]
             text = doc.get("retrieval_text") or doc.get("text", "")
             text_terms = set(self._terms(text))
             overlap = sum(1 for term in query_terms if term in text_terms)
@@ -404,6 +416,71 @@ class LocalVectorStore:
             results.append(item)
 
         return sorted(results, key=lambda item: item["keyword_score"], reverse=True)[:top_k]
+
+    def _candidate_indices(
+        self,
+        document_ids: List[str] | None = None,
+        unit_types: List[str] | None = None,
+        passage_numbers: List[int] | None = None,
+    ) -> List[int]:
+        allowed_documents = set(document_ids or [])
+        allowed_units = set(unit_types or [])
+        allowed_passages = set(passage_numbers or [])
+        return [
+            index
+            for index, doc in enumerate(self._docs)
+            if (not allowed_documents or doc.get("document_id") in allowed_documents)
+            and (
+                not allowed_units
+                or doc.get("metadata", {}).get("unit_type") in allowed_units
+            )
+            and (
+                not allowed_passages
+                or doc.get("metadata", {}).get("passage_number") in allowed_passages
+            )
+        ]
+
+    def _fuse_ranked_results(
+        self,
+        dense_results: List[Dict],
+        keyword_results: List[Dict],
+        question_results: List[Dict],
+        top_k: int,
+    ) -> List[Dict]:
+        merged: dict[str, Dict] = {}
+        rankings = [
+            ("dense", dense_results, "score", "probe_dense_score"),
+            ("keyword", keyword_results, "keyword_score", "probe_keyword_score"),
+            ("question", question_results, "question_score", "probe_question_score"),
+        ]
+        for method, results, raw_score_key, debug_score_key in rankings:
+            for rank, result in enumerate(results, 1):
+                key = result.get("chunk_id") or f"{method}-{result.get('chunk_index')}"
+                item = merged.setdefault(key, dict(result))
+                item.setdefault("score", 0.0)
+                item.setdefault("probe_dense_score", 0.0)
+                item.setdefault("probe_keyword_score", 0.0)
+                item.setdefault("probe_question_score", 0.0)
+                item.setdefault("probe_overview_score", 0.0)
+                item.setdefault("retrieval_methods", [])
+                item["retrieval_method"] = "hybrid"
+                item[debug_score_key] = float(result.get(raw_score_key, 0.0))
+                item["rrf_score"] = float(item.get("rrf_score", 0.0)) + 1.0 / (
+                    settings.rag_rrf_k + rank
+                )
+                if method not in item["retrieval_methods"]:
+                    item["retrieval_methods"].append(method)
+
+        return sorted(
+            merged.values(),
+            key=lambda item: (
+                item.get("rrf_score", 0.0),
+                item.get("probe_question_score", 0.0),
+                item.get("probe_keyword_score", 0.0),
+                item.get("probe_dense_score", 0.0),
+            ),
+            reverse=True,
+        )[:top_k]
 
     def _question_range_search(
         self,

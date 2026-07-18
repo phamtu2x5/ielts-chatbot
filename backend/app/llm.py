@@ -100,6 +100,7 @@ def clean_response(text: str) -> str:
         lambda match: "" if match.start() == 0 or text[match.start() - 1] == "\n" else " ",
         text,
     )
+    text = re.sub(r"\[Source\s+\d+\s*:\s*([^\]]+)\]", r"\1", text, flags=re.IGNORECASE)
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 
