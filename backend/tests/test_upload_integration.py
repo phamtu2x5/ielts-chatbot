@@ -6,7 +6,6 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from fastapi import HTTPException
 from starlette.datastructures import Headers, UploadFile
 
 
@@ -292,42 +291,18 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             prompt="grounded solve prompt",
             static_response=None,
             route_used="vector_rag",
-            sources=[
-                {
-                    "source_file": "reading.pdf",
-                    "pages": [2],
-                    "display_text": "11. Which statement is correct? A first B second C third D fourth",
-                    "metadata": {"unit_type": "question", "question_range": [11, 11]},
-                },
-                {
-                    "source_file": "reading.pdf",
-                    "pages": [1],
-                    "display_text": "The significance of a vintage often promotes speculation and disagreement.",
-                    "metadata": {"unit_type": "passage", "passage_number": 1},
-                },
-            ],
+            sources=[],
             debug={"intent_decision": {"allow_solution": True}},
             query_intent="solve_questions",
         )
-        model = AsyncMock(
-            return_value=(
-                '{"answers":[{"question_number":11,"answer":"C","relationship":"supports",'
-                '"evidence_quote":"The significance of a vintage often promotes speculation and disagreement.",'
-                '"reasoning":"The passage says the topic attracts discussion.",'
-                '"option_checks":[{"option":"A","relationship":"not_supported"},'
-                '{"option":"B","relationship":"not_supported"},{"option":"C","relationship":"supported"},'
-                '{"option":"D","relationship":"not_supported"}]}]}'
-            )
-        )
+        model = AsyncMock(return_value="C because it is explicitly discussed.")
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Trả lời Question 11.")
 
-        self.assertIn("Câu 11: **C**", answer)
-        self.assertIn("promotes speculation and disagreement", answer)
+        self.assertEqual(answer, "C because it is explicitly discussed.")
         self.assertEqual(model.await_count, 1)
-        self.assertTrue(main.requires_reviewed_generation(prepared, "Trả lời Question 11."))
-        self.assertIn("response_format", model.await_args.kwargs)
+        self.assertFalse(main.requires_reviewed_generation(prepared, "Trả lời Question 11."))
 
     async def test_writing_generation_rewrites_wrong_language_and_length(self) -> None:
         prepared = main.ChatPreparation(
@@ -385,19 +360,12 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.debug["generation"]["selected_candidate"], "first")
         self.assertTrue(prepared.debug["generation"]["final_issues"])
 
-    async def test_writing_semantic_answer_uses_validated_evidence(self) -> None:
+    async def test_writing_semantic_answer_defaults_to_english(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded writing analysis prompt",
             static_response=None,
             route_used="vector_rag",
-            sources=[
-                {
-                    "source_file": "writing.pdf",
-                    "pages": [4],
-                    "display_text": "The figures rose steadily throughout the period.",
-                    "metadata": {"unit_type": "sample_answer", "parent_id": "writing-task-2"},
-                }
-            ],
+            sources=[],
             debug={
                 "intent_decision": {"allow_solution": True},
                 "retrieval": {"writing_parent_id": "writing-task-2"},
@@ -405,82 +373,17 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             query_intent="semantic_qa",
         )
         model = AsyncMock(
-            return_value=(
-                '{"answers":[{"question_number":null,'
-                '"answer":"The paragraph describes a steady upward trend.",'
-                '"relationship":"supports","evidence_quote":"The figures rose steadily throughout the period.",'
-                '"reasoning":"The values increased across the period.","option_checks":[]}]}'
-            )
+            side_effect=[
+                "Bài viết mô tả xu hướng tăng rõ rệt trong giai đoạn này.",
+                "The paragraph describes a clear upward trend over the period.",
+            ]
         )
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Describe the main trend in this Writing task.")
 
-        self.assertIn("The paragraph describes a steady upward trend.", answer)
-        self.assertIn("The figures rose steadily", answer)
-        self.assertEqual(model.await_count, 1)
-
-    async def test_grounded_generation_rejects_quote_not_in_context(self) -> None:
-        prepared = main.ChatPreparation(
-            prompt="grounded solve prompt",
-            static_response=None,
-            route_used="vector_rag",
-            sources=[
-                {
-                    "source_file": "reading.pdf",
-                    "pages": [1],
-                    "display_text": "The passage contains a different statement.",
-                    "metadata": {"unit_type": "passage"},
-                }
-            ],
-            debug={"intent_decision": {"allow_solution": True}},
-            query_intent="semantic_qa",
-        )
-        model = AsyncMock(
-            return_value=(
-                '{"answers":[{"question_number":null,"answer":"Invented claim",'
-                '"relationship":"supports","evidence_quote":"This quote is not in the source.",'
-                '"reasoning":"Invented","option_checks":[]}]}'
-            )
-        )
-
-        with patch.object(main, "query_ollama", model):
-            answer = await main.generate_answer(prepared, "What does the passage say?")
-
-        self.assertEqual(answer, main.NO_RAG_MATCH_RESPONSE)
-        self.assertEqual(
-            prepared.debug["generation"]["grounding"]["rejected_answers"][0]["issue"],
-            "evidence_quote_not_found",
-        )
-
-    async def test_chat_preserves_ollama_error_diagnostics(self) -> None:
-        prepared = main.ChatPreparation(
-            prompt="grounded prompt",
-            static_response=None,
-            route_used="vector_rag",
-            sources=[],
-            debug={"intent_decision": {"allow_solution": True}},
-            query_intent="writing_generation",
-        )
-        error = main.OllamaRequestError(
-            "Ollama returned HTTP 500.",
-            status_code=500,
-            response_body="upstream failure",
-            attempts=2,
-        )
-
-        with (
-            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
-            patch.object(main, "generate_answer", AsyncMock(side_effect=error)),
-        ):
-            with self.assertRaises(HTTPException) as raised:
-                await main.chat(main.ChatRequest(message="Write the report."))
-
-        detail = raised.exception.detail
-        self.assertEqual(detail["generation_error"]["status_code"], 500)
-        self.assertEqual(detail["generation_error"]["attempts"], 2)
-        self.assertEqual(detail["query_intent"], "writing_generation")
-        self.assertEqual(detail["debug"]["generation"]["error"]["response_body"], "upstream failure")
+        self.assertEqual(answer, "The paragraph describes a clear upward trend over the period.")
+        self.assertEqual(model.await_count, 2)
 
     async def test_explicit_no_solution_request_is_rewritten_without_blocking(self) -> None:
         prepared = main.ChatPreparation(

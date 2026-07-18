@@ -21,10 +21,7 @@ NO_SOLUTION_PATTERNS = [
 ]
 
 NO_WRITING_PATTERNS = [
-    re.compile(
-        r"\b(?:không|chưa)\s+viết\s+(?:bài(?:\s+(?:viết|writing))?|report|essay|đoạn\s+trả\s+lời)\b",
-        re.IGNORECASE,
-    ),
+    re.compile(r"\b(?:không|chưa)\s+viết(?:\s+(?:bài|đoạn|report|essay))?\b", re.IGNORECASE),
     re.compile(
         r"\bchỉ\s+(?:trình\s+bày|nêu|giải\s+thích|mô\s+tả)\s+(?:phần\s+)?(?:yêu\s+cầu|đề\s+bài|prompt)\b",
         re.IGNORECASE,
@@ -85,13 +82,10 @@ class QueryIntentDecision:
     question_ranges: list[tuple[int, int]]
     passage_number: int | None
     visual_target: str | None = None
-    writing_target: str | None = None
-    excluded_sections: tuple[str, ...] = ()
 
     def to_debug(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["question_ranges"] = [list(item) for item in self.question_ranges]
-        payload["excluded_sections"] = list(self.excluded_sections)
         return payload
 
 
@@ -127,24 +121,6 @@ def has_explicit_no_solution_constraint(message: str) -> bool:
 
 def has_explicit_no_writing_constraint(message: str) -> bool:
     return any(pattern.search(message) for pattern in NO_WRITING_PATTERNS)
-
-
-def parse_excluded_writing_sections(message: str) -> tuple[str, ...]:
-    lowered = message.lower()
-    excluded = []
-    exclusion_phrases = re.findall(
-        r"\b(?:không|chưa)\s+viết\s+([^.,;!?]+)",
-        lowered,
-    )
-    section_markers = {
-        "introduction": ["introduction", "mở bài"],
-        "body": ["body", "thân bài"],
-        "conclusion": ["conclusion", "kết bài"],
-    }
-    for section, markers in section_markers.items():
-        if any(marker in phrase for phrase in exclusion_phrases for marker in markers):
-            excluded.append(section)
-    return tuple(excluded)
 
 
 def _looks_like_table_cell_lookup(text: str) -> bool:
@@ -200,8 +176,6 @@ def detect_query_intent_decision(
         reason: str,
         allow_solution: bool = False,
         visual_target: str | None = None,
-        writing_target: str | None = None,
-        excluded_sections: tuple[str, ...] = (),
     ) -> QueryIntentDecision:
         return QueryIntentDecision(
             intent=intent,
@@ -211,8 +185,6 @@ def detect_query_intent_decision(
             question_ranges=question_ranges,
             passage_number=passage_number,
             visual_target=visual_target,
-            writing_target=writing_target,
-            excluded_sections=excluded_sections,
         )
 
     if probe.get("is_overview") or looks_like_document_overview(message):
@@ -237,43 +209,15 @@ def detect_query_intent_decision(
     )
     asks_writing_prompt = any(marker in lowered for marker in ["yêu cầu", "đề bài", "prompt"])
     forbid_writing = has_explicit_no_writing_constraint(message)
-    excluded_sections = parse_excluded_writing_sections(message)
     asks_write_overview = "overview" in lowered and any(marker in lowered for marker in ["viết", "write"])
     if writing_reference and asks_writing_prompt and forbid_writing:
-        return decision(
-            "show_writing_prompt",
-            0.99,
-            "writing prompt request with explicit no-writing constraint",
-            writing_target="prompt",
-        )
-    if writing_reference and not forbid_solution and asks_write_overview:
-        return decision(
-            "writing_generation",
-            0.99,
-            "explicit writing overview request",
-            allow_solution=True,
-            writing_target="overview",
-            excluded_sections=excluded_sections,
-        )
-    if writing_reference and not forbid_solution and not forbid_writing and _has_any(
-        lowered,
-        WRITING_GENERATION_MARKERS,
+        return decision("show_writing_prompt", 0.99, "writing prompt request with explicit no-writing constraint")
+    if writing_reference and not forbid_solution and not forbid_writing and (
+        _has_any(lowered, WRITING_GENERATION_MARKERS) or asks_write_overview
     ):
-        return decision(
-            "writing_generation",
-            0.98,
-            "explicit writing generation request",
-            allow_solution=True,
-            writing_target="full_response",
-            excluded_sections=excluded_sections,
-        )
+        return decision("writing_generation", 0.98, "explicit writing generation request", allow_solution=True)
     if writing_reference and asks_writing_prompt:
-        return decision(
-            "show_writing_prompt",
-            0.95,
-            "writing prompt request without generation",
-            writing_target="prompt",
-        )
+        return decision("show_writing_prompt", 0.95, "writing prompt request without generation")
 
     if question_ranges:
         if forbid_solution:

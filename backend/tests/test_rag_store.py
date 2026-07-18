@@ -31,7 +31,6 @@ from app import rag
 from app.document_scope import resolve_document_scope
 from app.intent import (
     detect_query_intent,
-    detect_query_intent_decision,
     filter_sources_for_intent,
     has_explicit_no_solution_constraint,
 )
@@ -207,21 +206,10 @@ class LocalVectorStoreTests(unittest.TestCase):
                 "show_writing_prompt",
             ),
             ("Viết bài IELTS Writing Task 1 dài 170-190 từ dựa trên ảnh.", "writing_generation"),
-            (
-                "Viết riêng một đoạn overview cho bảng Writing trong ảnh, không viết introduction hoặc body.",
-                "writing_generation",
-            ),
         ]
         for message, expected in cases:
             with self.subTest(message=message):
                 self.assertEqual(detect_query_intent(message, probe), expected)
-
-        overview = detect_query_intent_decision(
-            "Viết riêng một đoạn overview cho bảng Writing trong ảnh, không viết introduction hoặc body.",
-            probe,
-        )
-        self.assertEqual(overview.writing_target, "overview")
-        self.assertEqual(overview.excluded_sections, ("introduction", "body"))
 
     def test_structured_table_operations_return_cell_calculation_and_comparison(self) -> None:
         table = {
