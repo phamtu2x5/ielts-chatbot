@@ -134,6 +134,8 @@ def table_summary_facts(table: dict[str, Any]) -> list[str]:
         if first_year == last_year:
             continue
         changes = []
+        paired_values = []
+        initial_values = []
         final_values = []
         for row in rows:
             if len(row) <= max(first_index, last_index):
@@ -144,20 +146,33 @@ def table_summary_facts(table: dict[str, Any]) -> list[str]:
                 continue
             label = str(row[0])
             changes.append((label, last - first))
+            paired_values.append((label, first, last, last - first))
+            initial_values.append((label, first))
             final_values.append((label, last))
         if not changes:
             continue
-        change_text = "; ".join(
-            f"{label} {format_signed(change)}" for label, change in changes
+        value_text = "; ".join(
+            f"{label} {format_number(first)} -> {format_number(last)} ({format_signed(change)})"
+            for label, first, last, change in paired_values
         )
         largest_label, largest_change = max(changes, key=lambda item: item[1])
         highest_label, highest_value = max(final_values, key=lambda item: item[1])
         metric_label = re.sub(r"\s+\d{4}\b.*$", "", first_label).strip() or first_label
+        initial_ranking = " > ".join(
+            f"{label} {format_number(value)}"
+            for label, value in sorted(initial_values, key=lambda item: item[1], reverse=True)
+        )
+        final_ranking = " > ".join(
+            f"{label} {format_number(value)}"
+            for label, value in sorted(final_values, key=lambda item: item[1], reverse=True)
+        )
         facts.append(
-            f"{metric_label}, change from {first_year} to {last_year}: {change_text}. "
+            f"{metric_label}, values from {first_year} to {last_year}: {value_text}. "
             f"Largest increase: {largest_label} ({format_signed(largest_change)})."
         )
         facts.append(
+            f"{metric_label} ranking in {first_year}: {initial_ranking}. "
+            f"Ranking in {last_year}: {final_ranking}. "
             f"Highest final value in {last_label}: {highest_label} ({format_number(highest_value)})."
         )
     return facts

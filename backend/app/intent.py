@@ -20,6 +20,14 @@ NO_SOLUTION_PATTERNS = [
     re.compile(r"\bchỉ\s+(?:hiển\s+thị|liệt\s+kê|trích\s+xuất)\b", re.IGNORECASE),
 ]
 
+NO_WRITING_PATTERNS = [
+    re.compile(r"\b(?:không|chưa)\s+viết(?:\s+(?:bài|đoạn|report|essay))?\b", re.IGNORECASE),
+    re.compile(
+        r"\bchỉ\s+(?:trình\s+bày|nêu|giải\s+thích|mô\s+tả)\s+(?:phần\s+)?(?:yêu\s+cầu|đề\s+bài|prompt)\b",
+        re.IGNORECASE,
+    ),
+]
+
 SHOW_MARKERS = [
     "hiển thị",
     "liệt kê",
@@ -111,6 +119,10 @@ def has_explicit_no_solution_constraint(message: str) -> bool:
     return any(pattern.search(message) for pattern in NO_SOLUTION_PATTERNS)
 
 
+def has_explicit_no_writing_constraint(message: str) -> bool:
+    return any(pattern.search(message) for pattern in NO_WRITING_PATTERNS)
+
+
 def _looks_like_table_cell_lookup(text: str) -> bool:
     asks_value = any(marker in text for marker in ["bao nhiêu", "giá trị", "tỷ lệ", "số liệu", "value", "figure"])
     has_year_or_number = bool(re.search(r"\b\d{4}\b", text))
@@ -195,12 +207,16 @@ def detect_query_intent_decision(
         marker in lowered
         for marker in ["writing", "task 1", "task 2", "ảnh", "hình", "image"]
     )
+    asks_writing_prompt = any(marker in lowered for marker in ["yêu cầu", "đề bài", "prompt"])
+    forbid_writing = has_explicit_no_writing_constraint(message)
     asks_write_overview = "overview" in lowered and any(marker in lowered for marker in ["viết", "write"])
-    if writing_reference and not forbid_solution and (
+    if writing_reference and asks_writing_prompt and forbid_writing:
+        return decision("show_writing_prompt", 0.99, "writing prompt request with explicit no-writing constraint")
+    if writing_reference and not forbid_solution and not forbid_writing and (
         _has_any(lowered, WRITING_GENERATION_MARKERS) or asks_write_overview
     ):
         return decision("writing_generation", 0.98, "explicit writing generation request", allow_solution=True)
-    if writing_reference and any(marker in lowered for marker in ["yêu cầu", "đề bài", "prompt"]):
+    if writing_reference and asks_writing_prompt:
         return decision("show_writing_prompt", 0.95, "writing prompt request without generation")
 
     if question_ranges:

@@ -31,11 +31,12 @@ from .llm import (
     no_solution_review_prompt,
     query_ollama,
     rag_prompt,
-    solve_review_prompt,
+    select_best_writing_output,
     stream_ollama,
     writing_output_contract,
     writing_output_issues,
-    writing_revision_prompt,
+    writing_output_penalty,
+    writing_retry_prompt,
 )
 from .rag import get_store
 from .schemas import ChatRequest, ChatResponse, SearchRequest, SearchResponse, StatsResponse, UploadResponse
@@ -217,6 +218,8 @@ def generation_fallback(prepared: "ChatPreparation") -> str:
 
 
 def generation_temperature(prepared: "ChatPreparation") -> float:
+    if is_writing_response(prepared):
+        return 0.1
     return 0.2 if prepared.route_used.startswith("vector_rag") else 0.7
 
 
@@ -224,28 +227,35 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
     prompt = prepared.prompt or ""
     answer = await query_ollama(prompt, temperature=generation_temperature(prepared))
 
-    if prepared.query_intent == "solve_questions":
-        answer = await query_ollama(
-            solve_review_prompt(prompt, answer),
-            temperature=0.0,
-        )
-    elif is_writing_response(prepared):
+    if is_writing_response(prepared):
         contract = writing_output_contract(message)
         issues = writing_output_issues(answer, contract)
-        prepared.debug.setdefault("generation", {})["writing_contract"] = {
+        generation_debug = prepared.debug.setdefault("generation", {})
+        generation_debug["writing_contract"] = {
             "language": contract.language,
             "min_words": contract.min_words,
             "max_words": contract.max_words,
+            "target_words": list(contract.target_words) if contract.target_words else None,
             "single_paragraph": contract.single_paragraph,
             "overview_only": contract.overview_only,
             "first_draft_issues": issues,
         }
         if issues:
-            answer = await query_ollama(
-                writing_revision_prompt(prompt, answer, contract, issues),
+            retry = await query_ollama(
+                writing_retry_prompt(prompt, contract),
                 temperature=0.1,
             )
-            prepared.debug["generation"]["final_issues"] = writing_output_issues(answer, contract)
+            selected = select_best_writing_output(answer, retry, contract)
+            generation_debug["retry_used"] = True
+            generation_debug["candidate_penalties"] = {
+                "first": list(writing_output_penalty(answer, contract)),
+                "retry": list(writing_output_penalty(retry, contract)),
+            }
+            generation_debug["selected_candidate"] = "first" if selected == answer else "retry"
+            answer = selected
+        else:
+            generation_debug["retry_used"] = False
+        generation_debug["final_issues"] = writing_output_issues(answer, contract)
     elif (
         has_explicit_no_solution_constraint(message)
         and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
@@ -259,7 +269,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
 
 
 def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> bool:
-    return prepared.query_intent == "solve_questions" or is_writing_response(prepared) or (
+    return is_writing_response(prepared) or (
         has_explicit_no_solution_constraint(message)
         and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
     )

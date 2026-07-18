@@ -38,8 +38,11 @@ from app.llm import (
     clean_response,
     likely_contains_solution,
     looks_like_prompt_echo,
+    rag_prompt,
+    select_best_writing_output,
     writing_output_contract,
     writing_output_issues,
+    writing_retry_prompt,
 )
 from app.structured_store import StructuredDocumentStore
 from app.table_operations import (
@@ -198,6 +201,11 @@ class LocalVectorStoreTests(unittest.TestCase):
             ("Giải thích Questions 27-32, không ghép đáp án A-H.", "explain_questions"),
             ("Từ bảng, quốc gia nào tăng nhiều nhất? Trình bày phép tính.", "table_calculation"),
             ("So sánh hai chỉ số của Country A từ bảng.", "table_comparison"),
+            (
+                "Đề Writing trong ảnh yêu cầu gì? Chỉ giải thích yêu cầu, chưa viết bài.",
+                "show_writing_prompt",
+            ),
+            ("Viết bài IELTS Writing Task 1 dài 170-190 từ dựa trên ảnh.", "writing_generation"),
         ]
         for message, expected in cases:
             with self.subTest(message=message):
@@ -239,8 +247,11 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         facts = table_summary_facts(table)
         self.assertIn("Largest increase: C (+33)", facts[0])
+        self.assertIn("A 78 -> 96 (+18)", facts[0])
+        self.assertIn("Ranking in 2024: A 96 > B 89 > C 75", facts[1])
         self.assertIn("Highest final value in Internet Access 2024 (%): A (96)", facts[1])
         self.assertIn("Largest increase: C (+35)", facts[2])
+        self.assertIn("Ranking in 2024: A 99 > B 94 > C 83", facts[3])
         self.assertIn("Highest final value in Smartphone Ownership 2024 (%): A (99)", facts[3])
 
     def test_document_scope_resolves_filename_and_reports_ambiguity(self) -> None:
@@ -389,6 +400,7 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertEqual(contract.language, "English")
         self.assertEqual((contract.min_words, contract.max_words), (170, 190))
+        self.assertEqual(contract.target_words, (178, 184))
         self.assertEqual(vietnamese_contract.language, "Vietnamese")
         self.assertTrue(vietnamese_contract.single_paragraph)
         self.assertTrue(vietnamese_contract.overview_only)
@@ -403,12 +415,38 @@ class LocalVectorStoreTests(unittest.TestCase):
             "The response is not written in Vietnamese.",
             writing_output_issues("The chart shows a consistent increase.", vietnamese_contract),
         )
+        self.assertIn(
+            "The response contains meta commentary instead of starting with the Writing content.",
+            writing_output_issues("Here is the revised essay: The chart increased.", contract),
+        )
+
+        retry_prompt = writing_retry_prompt("original grounded context", contract)
+        self.assertIn("original grounded context", retry_prompt)
+        self.assertNotIn("previous draft", retry_prompt.lower())
+        self.assertNotIn("below 170", retry_prompt.lower())
+
+        first = "Here is the revised essay: " + " ".join(["word"] * 175)
+        second = " ".join(["word"] * 169)
+        self.assertEqual(select_best_writing_output(first, second, contract), second)
+
+    def test_solve_prompt_requires_explicit_evidence_relationship(self) -> None:
+        prompt = rag_prompt(
+            "Trả lời Questions 1-4.",
+            "[Source: reading.pdf, page 1] passage evidence",
+            query_intent="solve_questions",
+            allow_solution=True,
+        )
+
+        self.assertIn("one short evidence quote and its relationship", prompt)
+        self.assertIn("supports -> TRUE; contradicts -> FALSE; absent -> NOT GIVEN", prompt)
 
     def test_no_solution_constraint_requires_an_explicit_marker(self) -> None:
         self.assertTrue(has_explicit_no_solution_constraint("Giải thích Questions 1-4, không chọn đáp án."))
         self.assertFalse(has_explicit_no_solution_constraint("Giải thích và trả lời Questions 1-4."))
         self.assertFalse(has_explicit_no_solution_constraint("Trả lời Question 1 nhưng không giải thích."))
         self.assertTrue(likely_contains_solution("Tóm lại:\n24: shade-grown\n25: full-sun"))
+        self.assertTrue(likely_contains_solution("Câu hỏi 24 → shade-grown"))
+        self.assertTrue(likely_contains_solution("Có thể loại trừ phương án B, chỉ còn A."))
         self.assertFalse(likely_contains_solution("Đối chiếu từng phát biểu với thông tin trong passage."))
 
     def test_writing_parent_context_keeps_one_task(self) -> None:

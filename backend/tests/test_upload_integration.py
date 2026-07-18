@@ -286,7 +286,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.solve_context_issue(incomplete), "missing_answer_options")
         self.assertIsNone(main.solve_context_issue(complete))
 
-    async def test_solve_generation_runs_an_evidence_review(self) -> None:
+    async def test_solve_generation_uses_one_grounded_model_call(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded solve prompt",
             static_response=None,
@@ -295,14 +295,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={"intent_decision": {"allow_solution": True}},
             query_intent="solve_questions",
         )
-        model = AsyncMock(side_effect=["B because it is preferred.", "C because it is explicitly discussed."])
+        model = AsyncMock(return_value="C because it is explicitly discussed.")
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Trả lời Question 11.")
 
         self.assertEqual(answer, "C because it is explicitly discussed.")
-        self.assertEqual(model.await_count, 2)
-        self.assertIn("verifying a candidate answer", model.await_args_list[1].args[0])
+        self.assertEqual(model.await_count, 1)
+        self.assertFalse(main.requires_reviewed_generation(prepared, "Trả lời Question 11."))
 
     async def test_writing_generation_rewrites_wrong_language_and_length(self) -> None:
         prepared = main.ChatPreparation(
@@ -330,6 +330,35 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer, corrected)
         self.assertEqual(model.await_count, 2)
         self.assertEqual(prepared.debug["generation"]["final_issues"], [])
+        retry_prompt = model.await_args_list[1].args[0]
+        self.assertNotIn("Bảng cho thấy", retry_prompt)
+        self.assertNotIn("previous draft", retry_prompt.lower())
+        self.assertNotIn("below 170", retry_prompt.lower())
+        self.assertEqual(prepared.debug["generation"]["selected_candidate"], "retry")
+
+    async def test_writing_generation_keeps_best_non_meta_candidate_after_retry(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded writing prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": True}},
+            query_intent="writing_generation",
+        )
+        first = " ".join(["word"] * 165)
+        retry = "Here is the revised essay: " + " ".join(["word"] * 175)
+        model = AsyncMock(side_effect=[first, retry])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Viết bài IELTS Writing Task 1 dài 170-190 từ.",
+            )
+
+        self.assertEqual(answer, first)
+        self.assertEqual(model.await_count, 2)
+        self.assertEqual(prepared.debug["generation"]["selected_candidate"], "first")
+        self.assertTrue(prepared.debug["generation"]["final_issues"])
 
     async def test_writing_semantic_answer_defaults_to_english(self) -> None:
         prepared = main.ChatPreparation(

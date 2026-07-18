@@ -42,6 +42,13 @@ WORD_RANGE_RE = re.compile(
     r"\b(\d{2,4})\s*(?:-|–|—|to|đến|tới)\s*(\d{2,4})\s*(?:words?|từ)\b",
     re.IGNORECASE,
 )
+WRITING_META_RE = re.compile(
+    r"^\s*(?:here(?:'s|\s+is)\s+(?:the|a)\s+(?:revised\s+)?(?:answer|essay|report)|"
+    r"below\s+is\s+(?:the|a)\s+(?:revised\s+)?(?:answer|essay|report)|"
+    r"đây\s+là\s+(?:bài|bản|đoạn)|dưới\s+đây\s+là\s+(?:bài|bản|đoạn)|"
+    r"(?:word\s+count|số\s+từ)\s*[:=-])",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,7 @@ class WritingOutputContract:
     language: str
     min_words: int | None
     max_words: int | None
+    target_words: tuple[int, int] | None
     single_paragraph: bool
     overview_only: bool = False
 
@@ -56,10 +64,20 @@ class WritingOutputContract:
         lines = [f"- Output language: {self.language}."]
         if self.min_words is not None and self.max_words is not None:
             lines.append(f"- Required length: {self.min_words}-{self.max_words} words.")
+        if self.target_words is not None:
+            lines.append(
+                f"- Aim for {self.target_words[0]}-{self.target_words[1]} words so the final response stays safely within the required range."
+            )
         if self.single_paragraph:
             lines.append("- Output exactly one paragraph without a heading.")
         if self.overview_only:
             lines.append("- Write only the overview. Do not add an introduction or body details.")
+        lines.extend(
+            [
+                "- Return only the final Writing content. Begin directly with the response.",
+                "- Do not add a heading, preface, word-count statement, revision note, or commentary about these instructions.",
+            ]
+        )
         return lines
 
 
@@ -109,13 +127,27 @@ def writing_output_contract(message: str) -> WritingOutputContract:
     )
     if overview_only and min_words is None:
         min_words, max_words = 40, 80
+    target_words = _writing_target_range(min_words, max_words)
     return WritingOutputContract(
         language="Vietnamese" if requests_vietnamese else "English",
         min_words=min_words,
         max_words=max_words,
+        target_words=target_words,
         single_paragraph=single_paragraph,
         overview_only=overview_only,
     )
+
+
+def _writing_target_range(
+    min_words: int | None,
+    max_words: int | None,
+) -> tuple[int, int] | None:
+    if min_words is None or max_words is None or max_words <= min_words:
+        return None
+    span = max_words - min_words
+    target_min = min_words + max(1, round(span * 0.4))
+    target_max = max_words - max(1, round(span * 0.3))
+    return (target_min, target_max) if target_min <= target_max else (min_words, max_words)
 
 
 def writing_output_issues(text: str, contract: WritingOutputContract) -> list[str]:
@@ -137,38 +169,49 @@ def writing_output_issues(text: str, contract: WritingOutputContract) -> list[st
         issues.append(f"The response has {len(words)} words, above {contract.max_words}.")
     if contract.single_paragraph and len(re.split(r"\n\s*\n", text.strip())) != 1:
         issues.append("The response is not exactly one paragraph.")
+    if WRITING_META_RE.search(text):
+        issues.append("The response contains meta commentary instead of starting with the Writing content.")
     return issues
 
 
-def writing_revision_prompt(
+def writing_retry_prompt(
     original_prompt: str,
-    draft: str,
     contract: WritingOutputContract,
-    issues: list[str],
 ) -> str:
+    contract_text = "\n".join(contract.prompt_lines())
     return f"""{original_prompt}
 
-The previous draft did not satisfy the requested Writing output contract:
-{chr(10).join(f'- {issue}' for issue in issues)}
+Generate a fresh response from the original study material context. Do not refer to any earlier draft, validation, correction, or word count.
 
-Previous draft:
-{draft}
+Final output contract:
+{contract_text}
 
-Rewrite the complete response. Preserve only facts supported by the original context and obey all output contract requirements exactly."""
+Begin the final response now."""
 
 
-def solve_review_prompt(original_prompt: str, draft: str) -> str:
-    return f"""{original_prompt}
+def writing_output_penalty(text: str, contract: WritingOutputContract) -> tuple[int, int, int, int]:
+    issues = writing_output_issues(text, contract)
+    word_count = len(re.findall(r"\b[\w'-]+\b", text, flags=re.UNICODE))
+    if contract.min_words is not None and word_count < contract.min_words:
+        word_distance = contract.min_words - word_count
+    elif contract.max_words is not None and word_count > contract.max_words:
+        word_distance = word_count - contract.max_words
+    else:
+        word_distance = 0
+    return (
+        int(any("meta commentary" in issue for issue in issues)),
+        int(any("not written in" in issue for issue in issues)),
+        int(any("paragraph" in issue for issue in issues)),
+        word_distance,
+    )
 
-You are now verifying a candidate answer before it is shown to the user.
-Ignore the candidate's conclusion and re-check the supplied question, every available option, and the passage evidence.
-For multiple choice, choose an option only when its meaning is directly supported better than every alternative.
-For short answers, copy the exact supported term when the instructions require words from the passage.
-Remove irrelevant evidence and unsupported inference.
-Return only the corrected concise answer with a short evidence quote or explanation.
 
-Candidate answer:
-{draft}"""
+def select_best_writing_output(
+    first: str,
+    second: str,
+    contract: WritingOutputContract,
+) -> str:
+    return min((first, second), key=lambda text: writing_output_penalty(text, contract))
 
 
 def no_solution_review_prompt(original_prompt: str, draft: str) -> str:
@@ -193,7 +236,13 @@ def likely_contains_solution(text: str) -> bool:
             r"(?im)^\s*(?:câu\s*)?\d{1,2}\s*[:=-]\s*(?:[a-h]\b|true\b|false\b|not\s+given\b|\S.{0,40}$)",
             text,
         )
+        or re.search(r"(?im)^\s*(?:câu(?:\s+hỏi)?\s*)?\d{1,2}\s*(?:→|->|=>)\s*\S+", text)
         or re.search(r"(?:→|->)\s*(?:[a-h]\b|true\b|false\b|not\s+given\b)", lowered)
+        or re.search(
+            r"\b(?:loại(?:\s+trừ)?\s+(?:phương\s+án\s+)?[a-h]|(?:không\s+thể|khó)\s+là\s+[a-h]|"
+            r"chỉ\s+còn\s+(?:phương\s+án\s+)?[a-h]|(?:phù\s+hợp|khả\s+năng)\s+(?:nhất\s+)?(?:là\s+)?[a-h])\b",
+            lowered,
+        )
     )
 
 
@@ -384,10 +433,10 @@ def rag_prompt(
         "If the context does not contain the requested content, say in Vietnamese that you cannot find it in the uploaded material. Do not give a generic IELTS answer.",
         "If the user asks what the whole document contains, summarize all distinct passages or sections visible in the context. Do not focus on only one passage when multiple passages are present.",
         "Question statements are prompts to be answered; they are not evidence from the passage.",
-        "Always cite the source file name and page marker when answering from context.",
-        "",
-        f"Study material context:\n{context}",
     ]
+    if query_intent != "writing_generation":
+        parts.append("Always cite the source file name and page marker when answering from context.")
+    parts.extend(["", f"Study material context:\n{context}"])
     if writing_context:
         parts.extend(
             [
@@ -438,6 +487,8 @@ def rag_prompt(
                 "- Mapping is strict: supports -> TRUE; contradicts -> FALSE; absent -> NOT GIVEN.",
                 "- Do not mark FALSE just because the passage lacks a reason, cause, date, comparison, or detail. If the required detail is absent, the answer is NOT GIVEN.",
                 "- If the context only contains question text and lacks passage evidence, say that there is not enough passage evidence to solve reliably.",
+                "- For each answer, output the answer first, followed by one short evidence quote and its relationship to the answer.",
+                "- Do not use a second conclusion or unsupported elimination. Keep the evidence check concise.",
             ]
         )
     elif query_intent == "document_overview":
@@ -450,7 +501,6 @@ def rag_prompt(
             ]
         )
     elif query_intent == "writing_generation":
-        contract = writing_output_contract(message)
         parts.extend(
             [
                 "Generation policy:",
@@ -461,7 +511,6 @@ def rag_prompt(
                 "- Treat deterministic table facts as authoritative calculations derived from the table.",
                 "- Distinguish the highest final value from the largest increase. They may belong to different categories.",
                 "- If the user requests only an overview, write only one concise overview paragraph without an introduction or body details.",
-                *contract.prompt_lines(),
             ]
         )
     elif not allow_solution:
@@ -474,5 +523,10 @@ def rag_prompt(
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Question:\n{message}")
-    parts.append("Answer naturally and clearly, but stay strictly grounded in the provided context.")
+    if query_intent == "writing_generation":
+        contract = writing_output_contract(message)
+        parts.append("Final output contract:\n" + "\n".join(contract.prompt_lines()))
+        parts.append("Begin the final Writing response immediately. Output nothing before or after it.")
+    else:
+        parts.append("Answer naturally and clearly, but stay strictly grounded in the provided context.")
     return "\n\n".join(parts)
