@@ -29,8 +29,18 @@ except ImportError:
 
 from app import rag
 from app.document_scope import resolve_document_scope
-from app.intent import detect_query_intent, filter_sources_for_intent
-from app.llm import clean_response, looks_like_prompt_echo
+from app.intent import (
+    detect_query_intent,
+    filter_sources_for_intent,
+    has_explicit_no_solution_constraint,
+)
+from app.llm import (
+    clean_response,
+    likely_contains_solution,
+    looks_like_prompt_echo,
+    writing_output_contract,
+    writing_output_issues,
+)
 from app.structured_store import StructuredDocumentStore
 from app.table_operations import (
     comparison_row,
@@ -433,6 +443,72 @@ class LocalVectorStoreTests(unittest.TestCase):
         cleaned = clean_response("✅ Kết quả: C tăng 33%. 👉 A → B vẫn giữ mũi tên.")
 
         self.assertEqual(cleaned, "Kết quả: C tăng 33%. A → B vẫn giữ mũi tên.")
+
+    def test_writing_output_contract_defaults_to_english_and_honors_word_range(self) -> None:
+        contract = writing_output_contract(
+            "Viết bài IELTS Writing Task 1 dài 170-190 từ dựa trên bảng."
+        )
+        vietnamese_contract = writing_output_contract(
+            "Viết overview bằng tiếng Việt."
+        )
+
+        self.assertEqual(contract.language, "English")
+        self.assertEqual((contract.min_words, contract.max_words), (170, 190))
+        self.assertEqual(vietnamese_contract.language, "Vietnamese")
+        self.assertTrue(vietnamese_contract.single_paragraph)
+        self.assertTrue(vietnamese_contract.overview_only)
+
+    def test_writing_output_validation_detects_language_and_length(self) -> None:
+        contract = writing_output_contract(
+            "Viết bài IELTS Writing Task 1 dài 170-190 từ."
+        )
+        issues = writing_output_issues(
+            "Bảng này cho thấy tỷ lệ tăng đáng kể ở cả ba quốc gia trong giai đoạn nghiên cứu.",
+            contract,
+        )
+
+        self.assertTrue(any("not written in English" in issue for issue in issues))
+        self.assertTrue(any("below 170" in issue for issue in issues))
+
+    def test_no_solution_constraint_requires_an_explicit_marker(self) -> None:
+        self.assertTrue(has_explicit_no_solution_constraint("Giải thích Questions 1-4, không chọn đáp án."))
+        self.assertFalse(has_explicit_no_solution_constraint("Giải thích và trả lời Questions 1-4."))
+        self.assertFalse(has_explicit_no_solution_constraint("Trả lời Question 1 nhưng không giải thích."))
+        self.assertTrue(likely_contains_solution("Tóm lại:\n24: shade-grown\n25: full-sun"))
+        self.assertFalse(likely_contains_solution("Đối chiếu từng phát biểu với thông tin trong passage."))
+
+    def test_writing_output_validation_enforces_explicit_vietnamese(self) -> None:
+        contract = writing_output_contract("Viết một đoạn bằng tiếng Việt.")
+
+        issues = writing_output_issues("The chart shows a consistent increase.", contract)
+
+        self.assertIn("The response is not written in Vietnamese.", issues)
+
+    def test_writing_parent_context_keeps_one_task(self) -> None:
+        docs = []
+        for task_number in (1, 2):
+            for unit_type in ("writing_task", "sample_answer"):
+                docs.append(
+                    {
+                        "chunk_id": f"task-{task_number}-{unit_type}",
+                        "document_id": "doc-writing",
+                        "source_file": "writing.pdf",
+                        "chunk_index": len(docs),
+                        "metadata": {
+                            "unit_type": unit_type,
+                            "parent_id": f"writing-task-{task_number}",
+                        },
+                    }
+                )
+        store = StructuredDocumentStore(lambda: docs)
+
+        hits = store.writing_context_for_sources([docs[2]], document_ids=["doc-writing"])
+
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(
+            {hit["metadata"]["parent_id"] for hit in hits},
+            {"writing-task-2"},
+        )
 
     def _chunk(self, chunk_id: str, source_file: str, text: str) -> dict:
         return {

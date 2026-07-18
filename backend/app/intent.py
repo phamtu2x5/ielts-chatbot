@@ -8,24 +8,16 @@ QUESTION_RANGE_RE = re.compile(
     re.IGNORECASE,
 )
 
-NO_SOLUTION_MARKERS = [
-    "không giải",
-    "chưa giải",
-    "không đưa đáp án",
-    "chưa đưa đáp án",
-    "chưa điền đáp án",
-    "không điền đáp án",
-    "giữ nguyên ô trống",
-    "chỉ hiển thị",
-    "chỉ liệt kê",
-    "chỉ trích xuất",
-    "không tự giải",
-    "không chọn",
-    "chưa chọn",
-    "không xác định đáp án",
-    "không ghép",
-    "chưa ghép",
-    "chưa viết",
+NO_SOLUTION_PATTERNS = [
+    re.compile(r"\b(?:không|chưa)\s+(?:tự\s+)?giải(?!\s*thích)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:không|chưa)\s+(?:đưa|điền|xác\s+định)\s+(?:ra\s+)?đáp\s+án\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:không|chưa)\s+chọn\s+(?:\S+\s+){0,3}?đáp\s+án\b", re.IGNORECASE),
+    re.compile(r"\b(?:không|chưa)\s+ghép\b", re.IGNORECASE),
+    re.compile(r"\bgiữ\s+nguyên\s+ô\s+trống\b", re.IGNORECASE),
+    re.compile(r"\bchỉ\s+(?:hiển\s+thị|liệt\s+kê|trích\s+xuất)\b", re.IGNORECASE),
 ]
 
 SHOW_MARKERS = [
@@ -60,7 +52,17 @@ SOLVE_MARKERS = [
 
 CALCULATION_MARKERS = ["tăng nhiều nhất", "giảm nhiều nhất", "phép tính", "chênh lệch", "difference"]
 COMPARISON_MARKERS = ["so sánh", "compare", "comparison"]
-WRITING_GENERATION_MARKERS = ["viết bài", "write an essay", "write a report", "170-190", "170–190"]
+WRITING_GENERATION_MARKERS = [
+    "viết bài",
+    "viết đoạn",
+    "write an essay",
+    "write a report",
+    "write a paragraph",
+    "write an introduction",
+    "write a body paragraph",
+    "170-190",
+    "170–190",
+]
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,10 @@ def _has_any(text: str, markers: list[str]) -> bool:
     return any(marker in text for marker in markers)
 
 
+def has_explicit_no_solution_constraint(message: str) -> bool:
+    return any(pattern.search(message) for pattern in NO_SOLUTION_PATTERNS)
+
+
 def _looks_like_table_cell_lookup(text: str) -> bool:
     asks_value = any(marker in text for marker in ["bao nhiêu", "giá trị", "tỷ lệ", "số liệu", "value", "figure"])
     has_year_or_number = bool(re.search(r"\b\d{4}\b", text))
@@ -142,7 +148,7 @@ def detect_query_intent_decision(
     lowered = message.lower()
     question_ranges = parse_question_ranges(message)
     passage_number = parse_passage_number(message)
-    forbid_solution = _has_any(lowered, NO_SOLUTION_MARKERS)
+    forbid_solution = has_explicit_no_solution_constraint(message)
     targets_table = _has_any(lowered, TABLE_MARKERS)
     targets_flowchart = _has_any(lowered, FLOWCHART_MARKERS)
     targets_diagram = _has_any(lowered, DIAGRAM_MARKERS)

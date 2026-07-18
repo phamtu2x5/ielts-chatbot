@@ -16,8 +16,27 @@ from fastapi.responses import StreamingResponse
 from .config import settings
 from .document_scope import DocumentScope, resolve_document_scope
 from .document_pipeline import DocumentProcessor
-from .intent import dedupe_sources, detect_query_intent_decision, filter_sources_for_intent
-from .llm import OLLAMA_MODEL, OLLAMA_NUM_PREDICT, classify_route, direct_prompt, query_ollama, rag_prompt, stream_ollama
+from .intent import (
+    dedupe_sources,
+    detect_query_intent_decision,
+    filter_sources_for_intent,
+    has_explicit_no_solution_constraint,
+)
+from .llm import (
+    OLLAMA_MODEL,
+    OLLAMA_NUM_PREDICT,
+    classify_route,
+    direct_prompt,
+    likely_contains_solution,
+    no_solution_review_prompt,
+    query_ollama,
+    rag_prompt,
+    solve_review_prompt,
+    stream_ollama,
+    writing_output_contract,
+    writing_output_issues,
+    writing_revision_prompt,
+)
 from .rag import get_store
 from .schemas import ChatRequest, ChatResponse, SearchRequest, SearchResponse, StatsResponse, UploadResponse
 from .table_operations import (
@@ -199,6 +218,61 @@ def generation_fallback(prepared: "ChatPreparation") -> str:
 
 def generation_temperature(prepared: "ChatPreparation") -> float:
     return 0.2 if prepared.route_used.startswith("vector_rag") else 0.7
+
+
+async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
+    prompt = prepared.prompt or ""
+    answer = await query_ollama(prompt, temperature=generation_temperature(prepared))
+
+    if prepared.query_intent == "solve_questions":
+        answer = await query_ollama(
+            solve_review_prompt(prompt, answer),
+            temperature=0.0,
+        )
+    elif is_writing_response(prepared):
+        contract = writing_output_contract(message)
+        issues = writing_output_issues(answer, contract)
+        prepared.debug.setdefault("generation", {})["writing_contract"] = {
+            "language": contract.language,
+            "min_words": contract.min_words,
+            "max_words": contract.max_words,
+            "single_paragraph": contract.single_paragraph,
+            "overview_only": contract.overview_only,
+            "first_draft_issues": issues,
+        }
+        if issues:
+            answer = await query_ollama(
+                writing_revision_prompt(prompt, answer, contract, issues),
+                temperature=0.1,
+            )
+            prepared.debug["generation"]["final_issues"] = writing_output_issues(answer, contract)
+    elif (
+        has_explicit_no_solution_constraint(message)
+        and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
+        and likely_contains_solution(answer)
+    ):
+        answer = await query_ollama(
+            no_solution_review_prompt(prompt, answer),
+            temperature=0.1,
+        )
+    return answer
+
+
+def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> bool:
+    return prepared.query_intent == "solve_questions" or is_writing_response(prepared) or (
+        has_explicit_no_solution_constraint(message)
+        and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
+    )
+
+
+def is_writing_response(prepared: "ChatPreparation") -> bool:
+    return prepared.query_intent == "writing_generation" or bool(
+        prepared.debug.get("retrieval", {}).get("writing_parent_id")
+    )
+
+
+def response_chunks(text: str, size: int = 180) -> list[str]:
+    return [text[index : index + size] for index in range(0, len(text), size)] or [""]
 
 
 def _markdown_table(table: dict[str, Any]) -> str:
@@ -543,6 +617,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     probe: dict[str, Any] = {"results": []}
     query_intent = "direct"
     intent_debug: dict[str, Any] = {}
+    writing_parent_id: str | None = None
 
     stats = await run_in_threadpool(store.stats)
     full_catalog = await run_in_threadpool(store.document_catalog)
@@ -683,6 +758,20 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             retrieval_method = "dense"
         before_filter_count = len(sources)
         sources = filter_sources_for_intent(sources, message, query_intent)
+        if query_intent in {"semantic_qa", "writing_generation"} and any(
+            source.get("metadata", {}).get("unit_type") in {"writing_task", "sample_answer"}
+            for source in sources
+        ):
+            writing_context = await run_in_threadpool(
+                store.writing_context_for_sources,
+                sources,
+                4,
+                scope_ids,
+            )
+            if writing_context:
+                sources = writing_context
+                writing_parent_id = sources[0].get("metadata", {}).get("parent_id")
+                retrieval_method = "writing_parent"
         if query_intent == "solve_questions" and sources:
             question_context = await run_in_threadpool(
                 store.question_context_for_sources,
@@ -747,6 +836,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "after_filter_count": len(sources),
             "evidence_candidate_count": evidence_candidate_count,
             "evidence_context_count": evidence_context_count,
+            "writing_parent_id": writing_parent_id,
             "final_context": compact_final_context_debug(sources),
         },
         "source_count": len(sources),
@@ -826,6 +916,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 req.conversation_history,
                 query_intent=query_intent,
                 allow_solution=bool(intent_debug.get("allow_solution")),
+                writing_context=query_intent == "writing_generation" or bool(writing_parent_id),
             ),
             static_response=None,
             route_used="vector_rag",
@@ -946,10 +1037,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     answer = prepared.static_response
     if answer is None and prepared.prompt is not None:
         try:
-            answer = await query_ollama(
-                prepared.prompt,
-                temperature=generation_temperature(prepared),
-            )
+            answer = await generate_answer(prepared, req.message)
             if not answer.strip():
                 answer = generation_fallback(prepared)
         except Exception as exc:
@@ -987,6 +1075,15 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 return
 
             yield stream_event("status", message="Đang soạn câu trả lời...")
+            if requires_reviewed_generation(prepared, req.message):
+                answer = await generate_answer(prepared, req.message)
+                if not answer.strip():
+                    answer = generation_fallback(prepared)
+                for token in response_chunks(answer):
+                    yield stream_event("token", token=token)
+                yield stream_event("done")
+                return
+
             has_token = False
             temperature = generation_temperature(prepared)
             async for token in stream_ollama(

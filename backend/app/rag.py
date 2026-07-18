@@ -331,6 +331,19 @@ class LocalVectorStore:
             document_ids=document_ids,
         )
 
+    @synchronized
+    def writing_context_for_sources(
+        self,
+        sources: List[Dict],
+        top_k: int = 4,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
+        return self.structured_store.writing_context_for_sources(
+            sources=sources,
+            top_k=top_k,
+            document_ids=document_ids,
+        )
+
     def _dense_search(
         self,
         query: str,

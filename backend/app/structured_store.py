@@ -235,6 +235,38 @@ class StructuredDocumentStore:
             counts[passage_key] = count + 1
         return results
 
+    def writing_context_for_sources(
+        self,
+        sources: List[Dict],
+        top_k: int = 4,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
+        target = next(
+            (
+                source
+                for source in sources
+                if source.get("metadata", {}).get("unit_type") in {"writing_task", "sample_answer"}
+                and source.get("metadata", {}).get("parent_id")
+            ),
+            None,
+        )
+        if target is None:
+            return []
+
+        document_id = target.get("document_id")
+        parent_id = target.get("metadata", {}).get("parent_id")
+        results = []
+        for doc in sorted(self._docs_in_scope(document_ids), key=lambda item: item.get("chunk_index", 0)):
+            metadata = doc.get("metadata", {})
+            if doc.get("document_id") != document_id or metadata.get("parent_id") != parent_id:
+                continue
+            if metadata.get("unit_type") not in {"writing_task", "sample_answer"}:
+                continue
+            results.append(self._mark_retrieval(doc, "writing_parent", 1.0))
+            if len(results) >= top_k:
+                break
+        return results
+
     def _question_lookup(
         self,
         ranges: List[tuple[int, int]],

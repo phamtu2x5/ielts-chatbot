@@ -1,6 +1,7 @@
 import json
 import re
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import List, Optional
 
 import httpx
@@ -32,6 +33,34 @@ Do not add emojis, generic encouragement, or invitations to ask another question
 DECORATIVE_ICON_RE = re.compile(
     "[ \\t]*[\u2600-\u27bf\U0001f300-\U0001faff]+[\ufe0f\u200d]*[ \\t]*"
 )
+VIETNAMESE_CHARACTER_RE = re.compile(
+    r"[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩị"
+    r"óòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]",
+    re.IGNORECASE,
+)
+WORD_RANGE_RE = re.compile(
+    r"\b(\d{2,4})\s*(?:-|–|—|to|đến|tới)\s*(\d{2,4})\s*(?:words?|từ)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class WritingOutputContract:
+    language: str
+    min_words: int | None
+    max_words: int | None
+    single_paragraph: bool
+    overview_only: bool = False
+
+    def prompt_lines(self) -> list[str]:
+        lines = [f"- Output language: {self.language}."]
+        if self.min_words is not None and self.max_words is not None:
+            lines.append(f"- Required length: {self.min_words}-{self.max_words} words.")
+        if self.single_paragraph:
+            lines.append("- Output exactly one paragraph without a heading.")
+        if self.overview_only:
+            lines.append("- Write only the overview. Do not add an introduction or body details.")
+        return lines
 
 
 def format_history(history: Optional[List[ChatMessage]]) -> str:
@@ -54,6 +83,118 @@ def clean_response(text: str) -> str:
         text,
     )
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
+
+
+def writing_output_contract(message: str) -> WritingOutputContract:
+    lowered = message.lower()
+    requests_vietnamese = bool(
+        re.search(
+            r"(?:dịch|bằng|sang|viết|trả\s+lời)\s+(?:ra\s+)?tiếng\s+việt|in\s+vietnamese",
+            lowered,
+        )
+    )
+    range_match = WORD_RANGE_RE.search(message)
+    min_words = int(range_match.group(1)) if range_match else None
+    max_words = int(range_match.group(2)) if range_match else None
+    overview_only = "overview" in lowered and any(marker in lowered for marker in ["viết", "write"])
+    single_paragraph = overview_only or any(
+        marker in lowered
+        for marker in [
+            "viết đoạn",
+            "một đoạn",
+            "write a paragraph",
+            "write an introduction",
+            "write a body paragraph",
+        ]
+    )
+    if overview_only and min_words is None:
+        min_words, max_words = 40, 80
+    return WritingOutputContract(
+        language="Vietnamese" if requests_vietnamese else "English",
+        min_words=min_words,
+        max_words=max_words,
+        single_paragraph=single_paragraph,
+        overview_only=overview_only,
+    )
+
+
+def writing_output_issues(text: str, contract: WritingOutputContract) -> list[str]:
+    issues: list[str] = []
+    words = re.findall(r"\b[\w'-]+\b", text, flags=re.UNICODE)
+    letters = re.findall(r"[^\W\d_]", text, flags=re.UNICODE)
+    vietnamese_characters = VIETNAMESE_CHARACTER_RE.findall(text)
+    if (
+        contract.language == "English"
+        and len(vietnamese_characters) >= 5
+        and len(vietnamese_characters) / max(1, len(letters)) >= 0.02
+    ):
+        issues.append("The response is not written in English.")
+    if contract.language == "Vietnamese" and len(vietnamese_characters) < 2:
+        issues.append("The response is not written in Vietnamese.")
+    if contract.min_words is not None and len(words) < contract.min_words:
+        issues.append(f"The response has {len(words)} words, below {contract.min_words}.")
+    if contract.max_words is not None and len(words) > contract.max_words:
+        issues.append(f"The response has {len(words)} words, above {contract.max_words}.")
+    if contract.single_paragraph and len(re.split(r"\n\s*\n", text.strip())) != 1:
+        issues.append("The response is not exactly one paragraph.")
+    return issues
+
+
+def writing_revision_prompt(
+    original_prompt: str,
+    draft: str,
+    contract: WritingOutputContract,
+    issues: list[str],
+) -> str:
+    return f"""{original_prompt}
+
+The previous draft did not satisfy the requested Writing output contract:
+{chr(10).join(f'- {issue}' for issue in issues)}
+
+Previous draft:
+{draft}
+
+Rewrite the complete response. Preserve only facts supported by the original context and obey all output contract requirements exactly."""
+
+
+def solve_review_prompt(original_prompt: str, draft: str) -> str:
+    return f"""{original_prompt}
+
+You are now verifying a candidate answer before it is shown to the user.
+Ignore the candidate's conclusion and re-check the supplied question, every available option, and the passage evidence.
+For multiple choice, choose an option only when its meaning is directly supported better than every alternative.
+For short answers, copy the exact supported term when the instructions require words from the passage.
+Remove irrelevant evidence and unsupported inference.
+Return only the corrected concise answer with a short evidence quote or explanation.
+
+Candidate answer:
+{draft}"""
+
+
+def no_solution_review_prompt(original_prompt: str, draft: str) -> str:
+    return f"""{original_prompt}
+
+The user explicitly asked not to solve or select answers.
+Rewrite the candidate response so it only explains the instructions, question format, vocabulary, or solving strategy.
+Remove answer mappings, selected labels, inferred answers, eliminations, and hints that narrow a question to particular options.
+Keep useful question statements or option text only when needed to explain the format.
+Return only the revised response.
+
+Candidate response:
+{draft}"""
+
+
+def likely_contains_solution(text: str) -> bool:
+    lowered = text.lower()
+    if any(marker in lowered for marker in ["đáp án là", "đáp án đúng", "answer is", "correct answer"]):
+        return True
+    return bool(
+        re.search(
+            r"(?im)^\s*(?:câu\s*)?\d{1,2}\s*[:=-]\s*(?:[a-h]\b|true\b|false\b|not\s+given\b|\S.{0,40}$)",
+            text,
+        )
+        or re.search(r"(?:→|->)\s*(?:[a-h]\b|true\b|false\b|not\s+given\b)", lowered)
+    )
 
 
 def looks_like_prompt_echo(text: str, prompt: str) -> bool:
@@ -231,6 +372,7 @@ def rag_prompt(
     history: Optional[List[ChatMessage]] = None,
     query_intent: str = "semantic_qa",
     allow_solution: bool = False,
+    writing_context: bool = False,
 ) -> str:
     history_text = format_history(history)
     if query_intent in {"show_questions", "translate_questions"}:
@@ -246,6 +388,14 @@ def rag_prompt(
         "",
         f"Study material context:\n{context}",
     ]
+    if writing_context:
+        parts.extend(
+            [
+                "Writing response language policy:",
+                "- Answer in English by default because the selected material is an IELTS Writing task or sample answer.",
+                "- Use Vietnamese only when the user explicitly asks for Vietnamese or requests a translation into Vietnamese.",
+            ]
+        )
     if query_intent == "show_questions":
         parts.extend(
             [
@@ -300,15 +450,18 @@ def rag_prompt(
             ]
         )
     elif query_intent == "writing_generation":
+        contract = writing_output_contract(message)
         parts.extend(
             [
                 "Generation policy:",
                 "- The user explicitly requested a Writing response based on the supplied prompt or structured visual data.",
+                "- Write IELTS Writing content in English by default. Use Vietnamese only when the user explicitly requests Vietnamese or a translation into Vietnamese.",
                 "- Use only values, labels, periods, categories, and instructions present in the context.",
                 "- Do not substitute a different chart, topic, country, date, or measurement.",
                 "- Treat deterministic table facts as authoritative calculations derived from the table.",
                 "- Distinguish the highest final value from the largest increase. They may belong to different categories.",
                 "- If the user requests only an overview, write only one concise overview paragraph without an introduction or body details.",
+                *contract.prompt_lines(),
             ]
         )
     elif not allow_solution:

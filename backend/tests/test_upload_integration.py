@@ -4,7 +4,7 @@ import types
 import unittest
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from starlette.datastructures import Headers, UploadFile
 
@@ -285,6 +285,117 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(main.solve_context_issue(incomplete), "missing_answer_options")
         self.assertIsNone(main.solve_context_issue(complete))
+
+    async def test_solve_generation_runs_an_evidence_review(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded solve prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": True}},
+            query_intent="solve_questions",
+        )
+        model = AsyncMock(side_effect=["B because it is preferred.", "C because it is explicitly discussed."])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "Trả lời Question 11.")
+
+        self.assertEqual(answer, "C because it is explicitly discussed.")
+        self.assertEqual(model.await_count, 2)
+        self.assertIn("verifying a candidate answer", model.await_args_list[1].args[0])
+
+    async def test_writing_generation_rewrites_wrong_language_and_length(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded writing prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": True}},
+            query_intent="writing_generation",
+        )
+        corrected = " ".join(["word"] * 175)
+        model = AsyncMock(
+            side_effect=[
+                "Bảng cho thấy các quốc gia đều tăng đáng kể.",
+                corrected,
+            ]
+        )
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Viết bài IELTS Writing Task 1 dài 170-190 từ.",
+            )
+
+        self.assertEqual(answer, corrected)
+        self.assertEqual(model.await_count, 2)
+        self.assertEqual(prepared.debug["generation"]["final_issues"], [])
+
+    async def test_writing_semantic_answer_defaults_to_english(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded writing analysis prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={
+                "intent_decision": {"allow_solution": True},
+                "retrieval": {"writing_parent_id": "writing-task-2"},
+            },
+            query_intent="semantic_qa",
+        )
+        model = AsyncMock(
+            side_effect=[
+                "Bài viết mô tả xu hướng tăng rõ rệt trong giai đoạn này.",
+                "The paragraph describes a clear upward trend over the period.",
+            ]
+        )
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "Describe the main trend in this Writing task.")
+
+        self.assertEqual(answer, "The paragraph describes a clear upward trend over the period.")
+        self.assertEqual(model.await_count, 2)
+
+    async def test_explicit_no_solution_request_is_rewritten_without_blocking(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded explanation prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": False}},
+            query_intent="explain_questions",
+        )
+        model = AsyncMock(side_effect=["24: A", "Đối chiếu từng phát biểu với mô tả của hai phương pháp."])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Giải thích Questions 24-27 nhưng không chọn đáp án.",
+            )
+
+        self.assertEqual(answer, "Đối chiếu từng phát biểu với mô tả của hai phương pháp.")
+        self.assertEqual(model.await_count, 2)
+        self.assertIn("explicitly asked not to solve", model.await_args_list[1].args[0])
+
+    async def test_compliant_no_solution_response_is_not_generated_twice(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded explanation prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": False}},
+            query_intent="explain_questions",
+        )
+        model = AsyncMock(return_value="Đối chiếu từng phát biểu với thông tin trong passage.")
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Giải thích Questions 24-27 nhưng không chọn đáp án.",
+            )
+
+        self.assertEqual(answer, "Đối chiếu từng phát biểu với thông tin trong passage.")
+        self.assertEqual(model.await_count, 1)
 
 
 if __name__ == "__main__":
