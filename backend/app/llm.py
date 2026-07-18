@@ -240,7 +240,13 @@ def likely_contains_solution(text: str) -> bool:
         or re.search(r"(?:→|->)\s*(?:[a-h]\b|true\b|false\b|not\s+given\b)", lowered)
         or re.search(
             r"\b(?:loại(?:\s+trừ)?\s+(?:phương\s+án\s+)?[a-h]|(?:không\s+thể|khó)\s+là\s+[a-h]|"
-            r"chỉ\s+còn\s+(?:phương\s+án\s+)?[a-h]|(?:phù\s+hợp|khả\s+năng)\s+(?:nhất\s+)?(?:là\s+)?[a-h])\b",
+            r"chỉ\s+còn\s+(?:phương\s+án\s+)?[a-h]|phù\s+hợp\s+với\s+(?:phương\s+án\s+)?[a-h]|"
+            r"(?:phù\s+hợp|khả\s+năng)\s+(?:nhất\s+)?(?:là\s+)?[a-h])\b",
+            lowered,
+        )
+        or re.search(
+            r"(?is)(?:câu(?:\s+hỏi)?\s*)?\d{1,2}.{0,180}?"
+            r"(?:không\s+thể\s+(?:xác\s+định|phân\s+loại)|không\s+đủ\s+thông\s+tin)",
             lowered,
         )
     )

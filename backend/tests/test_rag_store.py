@@ -205,6 +205,10 @@ class LocalVectorStoreTests(unittest.TestCase):
                 "Đề Writing trong ảnh yêu cầu gì? Chỉ giải thích yêu cầu, chưa viết bài.",
                 "show_writing_prompt",
             ),
+            (
+                "Viết riêng một đoạn overview cho bảng Writing, không viết introduction hoặc body.",
+                "writing_generation",
+            ),
             ("Viết bài IELTS Writing Task 1 dài 170-190 từ dựa trên ảnh.", "writing_generation"),
         ]
         for message, expected in cases:
@@ -446,6 +450,10 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertFalse(has_explicit_no_solution_constraint("Trả lời Question 1 nhưng không giải thích."))
         self.assertTrue(likely_contains_solution("Tóm lại:\n24: shade-grown\n25: full-sun"))
         self.assertTrue(likely_contains_solution("Câu hỏi 24 → shade-grown"))
+        self.assertTrue(likely_contains_solution("Câu 36 phù hợp với A Levitin."))
+        self.assertTrue(
+            likely_contains_solution("Câu hỏi 24: nội dung này không thể phân loại từ passage.")
+        )
         self.assertTrue(likely_contains_solution("Có thể loại trừ phương án B, chỉ còn A."))
         self.assertFalse(likely_contains_solution("Đối chiếu từng phát biểu với thông tin trong passage."))
 

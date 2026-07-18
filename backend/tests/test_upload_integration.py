@@ -406,6 +406,34 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_count, 2)
         self.assertIn("explicitly asked not to solve", model.await_args_list[1].args[0])
 
+    async def test_no_solution_matching_answer_is_rewritten(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded explanation prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": False}},
+            query_intent="explain_questions",
+        )
+        model = AsyncMock(
+            side_effect=[
+                "Câu 36 phù hợp với A Levitin.",
+                "Đối chiếu từ khóa trong từng phát biểu với quan điểm của mỗi nhà khoa học.",
+            ]
+        )
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Giải thích cách làm Questions 36-40 nhưng không giải.",
+            )
+
+        self.assertEqual(
+            answer,
+            "Đối chiếu từ khóa trong từng phát biểu với quan điểm của mỗi nhà khoa học.",
+        )
+        self.assertEqual(model.await_count, 2)
+
     async def test_compliant_no_solution_response_is_not_generated_twice(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded explanation prompt",

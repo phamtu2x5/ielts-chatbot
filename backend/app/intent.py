@@ -21,7 +21,8 @@ NO_SOLUTION_PATTERNS = [
 ]
 
 NO_WRITING_PATTERNS = [
-    re.compile(r"\b(?:không|chưa)\s+viết(?:\s+(?:bài|đoạn|report|essay))?\b", re.IGNORECASE),
+    re.compile(r"\b(?:không|chưa)\s+viết\s+(?:bài|đoạn|report|essay)\b", re.IGNORECASE),
+    re.compile(r"\b(?:không|chưa)\s+viết\s*(?:[.!?]|$)", re.IGNORECASE),
     re.compile(
         r"\bchỉ\s+(?:trình\s+bày|nêu|giải\s+thích|mô\s+tả)\s+(?:phần\s+)?(?:yêu\s+cầu|đề\s+bài|prompt)\b",
         re.IGNORECASE,
