@@ -14,6 +14,7 @@ if str(REPO_DIR) not in sys.path:
 from backend.tools.chat_evaluation import (
     capture_case,
     compact_upload_result,
+    merge_document_catalog,
     select_cases,
     verify_corpus,
 )
@@ -177,6 +178,15 @@ class ChatEvaluationManifestTests(unittest.TestCase):
     def test_case_selection_rejects_unknown_ids(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown case IDs"):
             select_cases(self.manifest, ["not-a-real-case"])
+
+    def test_document_catalog_is_merged_across_scoped_cases(self) -> None:
+        catalog = {}
+        merge_document_catalog(catalog, [{"source_file": "a.pdf", "chunks": 3}])
+        merge_document_catalog(catalog, [{"source_file": "b.pdf", "chunks": 4}])
+        merge_document_catalog(catalog, [{"source_file": "a.pdf", "chunks": 5}])
+
+        self.assertEqual(set(catalog), {"a.pdf", "b.pdf"})
+        self.assertEqual(catalog["a.pdf"]["chunks"], 5)
 
 
 if __name__ == "__main__":

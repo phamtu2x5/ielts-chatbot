@@ -96,7 +96,9 @@ def resolve_document_scope(
         for item in catalog
         if any(document_id in allowed for document_id in item.get("document_ids", []))
     ]
-    grounded = is_document_grounded_query(message, allowed_entries or catalog)
+    # An explicit client scope means the answer must stay grounded even when
+    # the query itself only names a section title or topic.
+    grounded = bool(requested) or is_document_grounded_query(message, allowed_entries or catalog)
     if requested and not allowed:
         return DocumentScope(
             requested,

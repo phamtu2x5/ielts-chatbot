@@ -32,7 +32,12 @@ from app.document_scope import resolve_document_scope
 from app.intent import detect_query_intent, filter_sources_for_intent
 from app.llm import looks_like_prompt_echo
 from app.structured_store import StructuredDocumentStore
-from app.table_operations import comparison_row, table_cell_value, table_change_calculations
+from app.table_operations import (
+    comparison_row,
+    table_cell_value,
+    table_change_calculations,
+    table_summary_facts,
+)
 
 
 class FakeVectorStore(rag.LocalVectorStore):
@@ -287,6 +292,12 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual(calculation["winner"]["label"], "C")
         self.assertEqual(row, ["A", 78, 96, 82, 99])
 
+        facts = table_summary_facts(table)
+        self.assertIn("Largest increase: C (+33)", facts[0])
+        self.assertIn("Highest final value in Internet Access 2024 (%): A (96)", facts[1])
+        self.assertIn("Largest increase: C (+35)", facts[2])
+        self.assertIn("Highest final value in Smartphone Ownership 2024 (%): A (99)", facts[3])
+
     def test_document_scope_resolves_filename_and_reports_ambiguity(self) -> None:
         catalog = [
             {
@@ -307,6 +318,24 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual(resolved.resolved_document_ids, ["doc-2"])
         self.assertFalse(resolved.ambiguous)
         self.assertTrue(ambiguous.ambiguous)
+
+    def test_explicit_document_scope_is_always_grounded(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-reading"],
+                "mime_types": ["application/pdf"],
+            }
+        ]
+
+        scope = resolve_document_scope(
+            "How did the fence affect kangaroos?",
+            catalog,
+            ["doc-reading"],
+        )
+
+        self.assertTrue(scope.document_grounded)
+        self.assertEqual(scope.resolved_document_ids, ["doc-reading"])
 
     def test_structured_lookup_filters_duplicate_question_ranges_by_document(self) -> None:
         store = FakeVectorStore()

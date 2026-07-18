@@ -16,14 +16,14 @@ OLLAMA_NUM_PREDICT = settings.ollama_num_predict
 
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
 Default to Vietnamese unless the user clearly asks for another language or is practicing an English answer.
-Write in a warm, natural, and coherent tutoring style.
-Open with a brief, friendly sentence when appropriate, then answer directly and explain the reasoning or steps in a logical order.
+Write in a concise, neutral, and coherent tutoring style.
+Answer directly and explain the reasoning or steps in a logical order.
 Avoid robotic, abrupt, or overly terse phrasing.
 Use simple Markdown only when it improves readability: short headings, numbered lists, or bullet points.
 Use Markdown tables when the user asks for a schedule, comparison, rubric, or other structured information.
 Keep Markdown tables simple: no nested bullet lists, no HTML, and no multi-paragraph content inside table cells.
 Never output raw HTML tags such as <ul>, <li>, <br>, or <table>; use Markdown instead.
-A small number of helpful emojis are acceptable when they make the answer easier to read."""
+Do not add emojis, generic encouragement, or invitations to ask another question."""
 
 
 def format_history(history: Optional[List[ChatMessage]]) -> str:
@@ -258,6 +258,7 @@ def rag_prompt(
                 "Generation policy:",
                 "- Present or explain the requested questions only.",
                 "- You may explain the task type, instructions, vocabulary, and Vietnamese meaning.",
+                "- Name the task type only when it is explicitly supported by the question instructions in the context. Otherwise describe the instruction without guessing a type.",
                 "- Do not solve the questions, do not provide True/False/Not Given labels, do not choose A/B/C/D, and do not infer answers.",
                 "- Do not treat the question statements themselves as passage evidence.",
             ]
@@ -268,6 +269,8 @@ def rag_prompt(
                 "Generation policy:",
                 "- The user is asking to solve questions.",
                 "- Use passage evidence from the context before giving an answer.",
+                "- For multiple-choice questions, compare every supplied option with explicit passage evidence. Do not treat indirect preference, popularity, or possibility as proof of an option.",
+                "- If the question refers to a list or answer choices that are missing from context, do not invent a replacement answer or title.",
                 "- For True/False/Not Given questions, first classify the relationship between the statement and passage evidence as supports, contradicts, or absent.",
                 "- Mapping is strict: supports -> TRUE; contradicts -> FALSE; absent -> NOT GIVEN.",
                 "- Do not mark FALSE just because the passage lacks a reason, cause, date, comparison, or detail. If the required detail is absent, the answer is NOT GIVEN.",
@@ -290,6 +293,9 @@ def rag_prompt(
                 "- The user explicitly requested a Writing response based on the supplied prompt or structured visual data.",
                 "- Use only values, labels, periods, categories, and instructions present in the context.",
                 "- Do not substitute a different chart, topic, country, date, or measurement.",
+                "- Treat deterministic table facts as authoritative calculations derived from the table.",
+                "- Distinguish the highest final value from the largest increase. They may belong to different categories.",
+                "- If the user requests only an overview, write only one concise overview paragraph without an introduction or body details.",
             ]
         )
     elif not allow_solution:

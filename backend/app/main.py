@@ -25,6 +25,7 @@ from .table_operations import (
     format_number,
     table_cell_value,
     table_change_calculations,
+    table_summary_facts,
 )
 
 
@@ -152,6 +153,11 @@ AMBIGUOUS_DOCUMENT_RESPONSE = (
     "Vui lòng nêu tên file hoặc đính kèm lại đúng tài liệu cần hỏi."
 )
 
+INCOMPLETE_QUESTION_RESPONSE = (
+    "Mình đã tìm thấy câu hỏi nhưng phần lựa chọn hoặc dữ liệu cần thiết để giải chưa được "
+    "trích xuất đầy đủ. Vì vậy mình chưa thể xác định đáp án đáng tin cậy từ tài liệu hiện có."
+)
+
 
 def document_extraction_failure_detail(document: Any) -> str:
     metadata = document.metadata or {}
@@ -189,6 +195,10 @@ def generation_fallback(prepared: "ChatPreparation") -> str:
     if prepared.route_used.startswith("vector_rag"):
         return NO_RAG_MATCH_RESPONSE
     return "Mình chưa nhận được nội dung trả lời từ model. Vui lòng thử lại."
+
+
+def generation_temperature(prepared: "ChatPreparation") -> float:
+    return 0.2 if prepared.route_used.startswith("vector_rag") else 0.7
 
 
 def _markdown_table(table: dict[str, Any]) -> str:
@@ -363,6 +373,35 @@ def _render_writing_inventory(sources: list[dict[str, Any]]) -> str | None:
         lines.append(f"- Trang {', '.join(str(page) for page in source.get('pages') or [])}: {title} ({sample_label})")
     lines.append(f"\nNguồn: {_source_label(tasks[0])}.")
     return "\n".join(lines)
+
+
+def solve_context_issue(sources: list[dict[str, Any]]) -> str | None:
+    question_text = "\n".join(
+        (source.get("display_text") or source.get("text") or "").strip()
+        for source in sources
+        if source.get("metadata", {}).get("unit_type") in {"question", "question_group"}
+    )
+    if not question_text:
+        return "missing_question"
+    requires_options = bool(
+        re.search(
+            r"(?:from\s+the\s+list\s+below|choose\s+(?:the\s+)?(?:correct\s+)?letter|"
+            r"which\s+of\s+the\s+following)",
+            question_text,
+            flags=re.IGNORECASE,
+        )
+    )
+    option_labels = set(
+        re.findall(r"(?:^|\s)([A-H])(?:[.)]|\s+(?=\S))", question_text)
+    )
+    if requires_options and len(option_labels) < 2:
+        return "missing_answer_options"
+    return None
+
+
+def writing_table_facts(sources: list[dict[str, Any]]) -> list[str]:
+    selected = _full_table_source(sources)
+    return table_summary_facts(selected[0]) if selected else []
 
 
 def static_response_for_sources(message: str, query_intent: str, sources: list[dict[str, Any]]) -> str | None:
@@ -636,6 +675,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         elif probe.get("has_strong_hits"):
             sources = (probe.get("results") or [])[: settings.rag_top_k]
             retrieval_method = "probe"
+        elif scope.document_grounded:
+            sources = []
+            retrieval_method = "no_strong_document_match"
         else:
             sources = await run_in_threadpool(store.search, message, settings.rag_top_k, scope_ids)
             retrieval_method = "dense"
@@ -711,6 +753,18 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     }
 
     if sources:
+        if query_intent == "solve_questions":
+            context_issue = solve_context_issue(sources)
+            if context_issue:
+                debug["no_match_guard"] = context_issue
+                return ChatPreparation(
+                    prompt=None,
+                    static_response=INCOMPLETE_QUESTION_RESPONSE,
+                    route_used="vector_rag_no_match",
+                    sources=sources,
+                    debug=debug,
+                    query_intent=query_intent,
+                )
         if is_presence_check_query(message) and not has_lexical_source_hit(sources):
             debug["no_match_guard"] = "presence_check_without_lexical_hit"
             return ChatPreparation(
@@ -758,6 +812,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             if probe.get("is_overview")
             else format_context(sources)
         )
+        if query_intent == "writing_generation":
+            facts = writing_table_facts(sources)
+            if facts:
+                debug["retrieval"]["deterministic_table_facts"] = facts
+                context += "\n\n[Deterministic table facts]\n" + "\n".join(
+                    f"- {fact}" for fact in facts
+                )
         return ChatPreparation(
             prompt=rag_prompt(
                 message,
@@ -885,7 +946,10 @@ async def chat(req: ChatRequest) -> ChatResponse:
     answer = prepared.static_response
     if answer is None and prepared.prompt is not None:
         try:
-            answer = await query_ollama(prepared.prompt)
+            answer = await query_ollama(
+                prepared.prompt,
+                temperature=generation_temperature(prepared),
+            )
             if not answer.strip():
                 answer = generation_fallback(prepared)
         except Exception as exc:
@@ -924,12 +988,19 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             yield stream_event("status", message="Đang soạn câu trả lời...")
             has_token = False
-            async for token in stream_ollama(prepared.prompt or ""):
+            temperature = generation_temperature(prepared)
+            async for token in stream_ollama(
+                prepared.prompt or "",
+                temperature=temperature,
+            ):
                 has_token = True
                 yield stream_event("token", token=token)
             if not has_token:
                 logger.warning("Ollama stream completed without visible tokens; retrying with non-stream request")
-                fallback_answer = await query_ollama(prepared.prompt or "")
+                fallback_answer = await query_ollama(
+                    prepared.prompt or "",
+                    temperature=temperature,
+                )
                 if not fallback_answer.strip():
                     fallback_answer = generation_fallback(prepared)
                 yield stream_event("token", token=fallback_answer)

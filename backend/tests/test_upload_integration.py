@@ -193,6 +193,26 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(prepared.prompt)
         self.assertEqual(prepared.static_response, main.NO_RAG_MATCH_RESPONSE)
 
+    async def test_explicit_document_scope_never_routes_semantic_query_to_base_model(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-1"],
+                "mime_types": ["application/pdf"],
+            }
+        ]
+        with patch.object(main, "get_store", return_value=_FakeChatStore(catalog)):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="How did the fence affect kangaroos?",
+                    document_ids=["doc-1"],
+                )
+            )
+
+        self.assertEqual(prepared.route_used, "vector_rag_no_match")
+        self.assertNotEqual(prepared.query_intent, "direct")
+        self.assertTrue(prepared.debug["target_resolution"]["document_grounded"])
+
     async def test_ambiguous_question_range_requests_a_document_choice(self) -> None:
         catalog = [
             {"source_file": "reading-2.pdf", "document_ids": ["doc-2"], "mime_types": ["application/pdf"]},
@@ -248,6 +268,23 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("B: 89 - 61 = 28", calculation)
         self.assertIn("C: 75 - 42 = 33", calculation)
         self.assertIn("| A | 78 | 96 | 82 | 99 |", comparison)
+
+    def test_solve_context_rejects_missing_multiple_choice_options(self) -> None:
+        incomplete = [
+            {
+                "text": "From the list below choose the most suitable title.",
+                "metadata": {"unit_type": "question"},
+            }
+        ]
+        complete = [
+            {
+                "text": "Choose the correct letter. A first title B second title C third title D fourth title",
+                "metadata": {"unit_type": "question"},
+            }
+        ]
+
+        self.assertEqual(main.solve_context_issue(incomplete), "missing_answer_options")
+        self.assertIsNone(main.solve_context_issue(complete))
 
 
 if __name__ == "__main__":

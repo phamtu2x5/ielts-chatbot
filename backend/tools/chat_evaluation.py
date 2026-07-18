@@ -249,6 +249,16 @@ def select_cases(manifest: dict[str, Any], case_ids: list[str]) -> list[dict[str
     return selected
 
 
+def merge_document_catalog(
+    catalog_by_file: dict[str, dict[str, Any]],
+    entries: list[dict[str, Any]],
+) -> None:
+    for entry in entries:
+        source_file = str(entry.get("source_file") or "")
+        if source_file:
+            catalog_by_file[source_file] = entry
+
+
 def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     manifest = load_manifest(args.manifest)
     corpus_files = verify_corpus(manifest, args.corpus_dir)
@@ -273,7 +283,7 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
 
     case_results: list[dict[str, Any]] = []
     source_index: dict[str, dict[str, Any]] = {}
-    document_catalog: list[dict[str, Any]] = []
+    document_catalog_by_file: dict[str, dict[str, Any]] = {}
     for case in select_cases(manifest, args.case):
         blocked_files = sorted(set(case.get("target_files", [])) & failed_upload_files)
         if blocked_files:
@@ -311,8 +321,10 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
                 "error": repr(exc),
             }
         response_debug = (raw_result.get("response") or {}).get("debug") or {}
-        if not document_catalog and response_debug.get("catalog"):
-            document_catalog = response_debug["catalog"]
+        merge_document_catalog(
+            document_catalog_by_file,
+            response_debug.get("catalog") or [],
+        )
         case_results.append(
             capture_case(
                 case,
@@ -334,7 +346,7 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         "base_url": base_url,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "uploads": [compact_upload_result(result) for result in upload_results],
-        "document_catalog": document_catalog,
+        "document_catalog": list(document_catalog_by_file.values()),
         "source_index": list(source_index.values()),
         "summary": {
             "total_questions": len(case_results),
