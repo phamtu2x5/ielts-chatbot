@@ -1,8 +1,9 @@
 import json
+import logging
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import httpx
 
@@ -13,6 +14,77 @@ from .schemas import ChatMessage
 OLLAMA_API_URL = settings.ollama_api_url
 OLLAMA_MODEL = settings.ollama_model
 OLLAMA_NUM_PREDICT = settings.ollama_num_predict
+logger = logging.getLogger(__name__)
+
+
+class OllamaRequestError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_body: str | None = None,
+        attempts: int = 1,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_body = response_body
+        self.attempts = attempts
+
+    def to_debug(self) -> dict[str, Any]:
+        return {
+            "type": type(self).__name__,
+            "message": str(self),
+            "status_code": self.status_code,
+            "response_body": (self.response_body or "")[:500] or None,
+            "attempts": self.attempts,
+        }
+
+
+GROUNDED_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "answers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question_number": {"type": ["integer", "null"]},
+                    "answer": {"type": "string"},
+                    "relationship": {
+                        "type": "string",
+                        "enum": ["supports", "contradicts", "absent"],
+                    },
+                    "evidence_quote": {"type": "string"},
+                    "reasoning": {"type": "string"},
+                    "option_checks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "option": {"type": "string"},
+                                "relationship": {
+                                    "type": "string",
+                                    "enum": ["supported", "contradicted", "not_supported"],
+                                },
+                            },
+                            "required": ["option", "relationship"],
+                        },
+                    },
+                },
+                "required": [
+                    "question_number",
+                    "answer",
+                    "relationship",
+                    "evidence_quote",
+                    "reasoning",
+                    "option_checks",
+                ],
+            },
+        }
+    },
+    "required": ["answers"],
+}
 
 
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
@@ -246,6 +318,36 @@ def likely_contains_solution(text: str) -> bool:
     )
 
 
+def grounded_response_prompt(original_prompt: str, *, solve_questions: bool) -> str:
+    task_policy = (
+        "For multiple choice, evaluate every supplied option in option_checks before selecting one. "
+        "For TRUE/FALSE/NOT GIVEN, use supports, contradicts, or absent before mapping the label."
+        if solve_questions
+        else "Answer the factual question directly and keep the reasoning concise."
+    )
+    return f"""{original_prompt}
+
+Return the grounded result as JSON matching the supplied response schema.
+{task_policy}
+Use an exact, short quote copied from passage or sample-answer evidence. Question statements and answer options are not evidence.
+If the requested conclusion is not directly supported, use relationship "absent", leave evidence_quote empty, and say that the material is insufficient.
+Do not add Markdown or text outside the JSON object."""
+
+
+def parse_grounded_response(text: str) -> list[dict[str, Any]]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE)
+    try:
+        payload = json.loads(cleaned)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    answers = payload.get("answers") if isinstance(payload, dict) else None
+    if not isinstance(answers, list):
+        return []
+    return [item for item in answers if isinstance(item, dict)]
+
+
 def looks_like_prompt_echo(text: str, prompt: str) -> bool:
     cleaned_text = " ".join((text or "").split()).lower()
     cleaned_prompt = " ".join((prompt or "").split()).lower()
@@ -268,8 +370,9 @@ def _ollama_payload(
     stream: bool,
     temperature: float,
     num_predict: Optional[int],
+    response_format: dict[str, Any] | str | None = None,
 ) -> dict:
-    return {
+    payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": stream,
@@ -282,23 +385,76 @@ def _ollama_payload(
             "repeat_penalty": 1.1,
         },
     }
+    if response_format is not None:
+        payload["format"] = response_format
+    return payload
 
 
-async def query_ollama(prompt: str, temperature: float = 0.7, num_predict: Optional[int] = None) -> str:
-    payload = _ollama_payload(prompt, stream=False, temperature=temperature, num_predict=num_predict)
-
-    async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
-        response = await client.post(OLLAMA_API_URL, json=payload)
-        response.raise_for_status()
-        data = response.json()
-
-    text = data.get("response") or data.get("thinking") or ""
-    text = clean_response(text)
-    if looks_like_prompt_echo(text, prompt):
-        return ""
-    if not text:
-        return "Mình sẵn sàng hỗ trợ bạn luyện IELTS. Bạn có thể hỏi cụ thể về Reading, Listening, Writing hoặc Speaking nhé."
-    return text
+async def query_ollama(
+    prompt: str,
+    temperature: float = 0.7,
+    num_predict: Optional[int] = None,
+    response_format: dict[str, Any] | str | None = None,
+    allow_empty: bool = False,
+) -> str:
+    payload = _ollama_payload(
+        prompt,
+        stream=False,
+        temperature=temperature,
+        num_predict=num_predict,
+        response_format=response_format,
+    )
+    max_attempts = 2
+    last_error: OllamaRequestError | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
+                response = await client.post(OLLAMA_API_URL, json=payload)
+            if response.status_code >= 400:
+                error = OllamaRequestError(
+                    f"Ollama returned HTTP {response.status_code}.",
+                    status_code=response.status_code,
+                    response_body=response.text,
+                    attempts=attempt,
+                )
+                if response.status_code < 500 or attempt == max_attempts:
+                    raise error
+                last_error = error
+                logger.warning("Transient Ollama HTTP error; retrying once: status=%s", response.status_code)
+                continue
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise OllamaRequestError(
+                    "Ollama returned an invalid JSON response.",
+                    status_code=response.status_code,
+                    response_body=response.text,
+                    attempts=attempt,
+                ) from exc
+            text = clean_response(data.get("response") or data.get("thinking") or "")
+            if looks_like_prompt_echo(text, prompt):
+                text = ""
+            if text or allow_empty:
+                return text
+            if attempt < max_attempts:
+                logger.warning("Ollama returned an empty response; retrying once")
+                continue
+            raise OllamaRequestError(
+                "Ollama returned an empty response.",
+                status_code=response.status_code,
+                attempts=attempt,
+            )
+        except OllamaRequestError:
+            raise
+        except httpx.RequestError as exc:
+            last_error = OllamaRequestError(
+                f"Ollama request failed: {exc}",
+                attempts=attempt,
+            )
+            if attempt == max_attempts:
+                raise last_error from exc
+            logger.warning("Transient Ollama connection error; retrying once: %s", exc)
+    raise last_error or OllamaRequestError("Ollama request failed.", attempts=max_attempts)
 
 
 async def stream_ollama(
@@ -460,6 +616,7 @@ def rag_prompt(
             [
                 "Generation policy:",
                 "- Translate only the requested question instructions and question statements.",
+                "- Translate every ordinary English word into Vietnamese; retain English only for proper names, fixed IELTS labels, codes, or answer-choice letters.",
                 "- Do not mention passage evidence, do not evaluate the statements, and do not solve.",
                 "- Do not provide TRUE/FALSE/NOT GIVEN labels or answer choices.",
             ]
@@ -471,7 +628,9 @@ def rag_prompt(
                 "- Present or explain the requested questions only.",
                 "- You may explain the task type, instructions, vocabulary, and Vietnamese meaning.",
                 "- Name the task type only when it is explicitly supported by the question instructions in the context. Otherwise describe the instruction without guessing a type.",
+                "- Explain the shared method for the question group. Do not analyze the plausibility of individual options or statements question by question.",
                 "- Do not solve the questions, do not provide True/False/Not Given labels, do not choose A/B/C/D, and do not infer answers.",
+                "- Do not eliminate options or mention which option appears more likely.",
                 "- Do not treat the question statements themselves as passage evidence.",
             ]
         )

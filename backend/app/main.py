@@ -23,12 +23,16 @@ from .intent import (
     has_explicit_no_solution_constraint,
 )
 from .llm import (
+    GROUNDED_RESPONSE_SCHEMA,
     OLLAMA_MODEL,
     OLLAMA_NUM_PREDICT,
+    OllamaRequestError,
     classify_route,
     direct_prompt,
+    grounded_response_prompt,
     likely_contains_solution,
     no_solution_review_prompt,
+    parse_grounded_response,
     query_ollama,
     rag_prompt,
     select_best_writing_output,
@@ -217,14 +221,196 @@ def generation_fallback(prepared: "ChatPreparation") -> str:
     return "Mình chưa nhận được nội dung trả lời từ model. Vui lòng thử lại."
 
 
+def generation_error_debug(
+    prepared: "ChatPreparation",
+    exc: Exception,
+    started: float,
+) -> dict[str, Any]:
+    error = (
+        exc.to_debug()
+        if isinstance(exc, OllamaRequestError)
+        else {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "status_code": None,
+            "response_body": None,
+            "attempts": 1,
+        }
+    )
+    payload = {
+        "stage": "generation",
+        "duration_seconds": round(time.perf_counter() - started, 3),
+        **error,
+    }
+    prepared.debug.setdefault("generation", {})["error"] = payload
+    return payload
+
+
 def generation_temperature(prepared: "ChatPreparation") -> float:
     if is_writing_response(prepared):
         return 0.1
     return 0.2 if prepared.route_used.startswith("vector_rag") else 0.7
 
 
+def _normalized_evidence(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _evidence_source(quote: str, sources: list[dict[str, Any]]) -> dict[str, Any] | None:
+    normalized_quote = _normalized_evidence(quote)
+    if len(normalized_quote) < 8:
+        return None
+    for source in sources:
+        if source.get("metadata", {}).get("unit_type") in {
+            "document_outline",
+            "question",
+            "question_group",
+        }:
+            continue
+        source_text = source.get("display_text") or source.get("text") or ""
+        if normalized_quote in _normalized_evidence(source_text):
+            return source
+    return None
+
+
+def _question_option_labels(sources: list[dict[str, Any]]) -> set[str]:
+    question_text = "\n".join(
+        source.get("display_text") or source.get("text") or ""
+        for source in sources
+        if source.get("metadata", {}).get("unit_type") in {"question", "question_group"}
+    )
+    labels = set(re.findall(r"(?:^|\s)([A-H])(?:[.)]|\s+(?=\S))", question_text))
+    return labels if len(labels) >= 2 else set()
+
+
+def _validate_grounded_item(
+    item: dict[str, Any],
+    sources: list[dict[str, Any]],
+    option_labels: set[str],
+) -> tuple[dict[str, Any] | None, str | None]:
+    answer = str(item.get("answer") or "").strip()
+    relationship = str(item.get("relationship") or "").strip().lower()
+    quote = str(item.get("evidence_quote") or "").strip()
+    if not answer or relationship not in {"supports", "contradicts", "absent"}:
+        return None, "missing_answer_or_relationship"
+
+    normalized_answer = answer.upper().replace(" ", "_")
+    strict_mapping = {
+        "TRUE": "supports",
+        "FALSE": "contradicts",
+        "NOT_GIVEN": "absent",
+    }
+    if normalized_answer in strict_mapping and strict_mapping[normalized_answer] != relationship:
+        return None, "invalid_true_false_not_given_mapping"
+    if relationship == "absent" and normalized_answer != "NOT_GIVEN":
+        return None, "insufficient_evidence_for_answer"
+
+    source = None
+    if relationship != "absent":
+        source = _evidence_source(quote, sources)
+        if source is None:
+            return None, "evidence_quote_not_found"
+
+    selected_option = answer.upper() if re.fullmatch(r"[A-H]", answer.upper()) else None
+    if option_labels and selected_option:
+        checks = item.get("option_checks")
+        if not isinstance(checks, list):
+            return None, "missing_option_checks"
+        check_map = {
+            str(check.get("option") or "").strip().upper(): str(check.get("relationship") or "").strip()
+            for check in checks
+            if isinstance(check, dict)
+        }
+        if not option_labels.issubset(check_map) or check_map.get(selected_option) != "supported":
+            return None, "incomplete_or_inconsistent_option_checks"
+
+    return {
+        "question_number": item.get("question_number"),
+        "answer": answer,
+        "relationship": relationship,
+        "evidence_quote": quote,
+        "reasoning": str(item.get("reasoning") or "").strip(),
+        "source": source,
+    }, None
+
+
+def _render_grounded_answers(items: list[dict[str, Any]]) -> str:
+    lines = []
+    multiple = len(items) > 1 or any(item.get("question_number") is not None for item in items)
+    for item in items:
+        prefix = f"Câu {item['question_number']}: " if item.get("question_number") is not None else ""
+        answer_line = f"{prefix}**{item['answer']}**" if multiple else item["answer"]
+        reasoning = item.get("reasoning")
+        if reasoning:
+            answer_line += f" — {reasoning}"
+        lines.append(answer_line)
+        source = item.get("source")
+        quote = item.get("evidence_quote")
+        if source and quote:
+            lines.append(f"Bằng chứng: “{quote}” ({_source_label(source)}).")
+        elif item.get("relationship") == "absent":
+            lines.append("Bằng chứng: không tìm thấy thông tin trực tiếp trong context đã truy xuất.")
+    return "\n\n".join(lines)
+
+
+async def generate_grounded_answer(prepared: "ChatPreparation") -> str:
+    raw = await query_ollama(
+        grounded_response_prompt(
+            prepared.prompt or "",
+            solve_questions=prepared.query_intent == "solve_questions",
+        ),
+        temperature=0.0,
+        response_format=GROUNDED_RESPONSE_SCHEMA,
+    )
+    parsed = parse_grounded_response(raw)
+    option_labels = _question_option_labels(prepared.sources)
+    validated = []
+    rejected = []
+    for item in parsed:
+        result, issue = _validate_grounded_item(item, prepared.sources, option_labels)
+        if result is not None:
+            validated.append(result)
+        else:
+            rejected.append(
+                {
+                    "question_number": item.get("question_number"),
+                    "issue": issue,
+                }
+            )
+    expected_questions = {
+        number
+        for question_range in prepared.debug.get("intent_decision", {}).get("question_ranges", [])
+        if isinstance(question_range, list) and len(question_range) == 2
+        for number in range(int(question_range[0]), int(question_range[1]) + 1)
+    }
+    validated_questions = {
+        int(item["question_number"])
+        for item in validated
+        if isinstance(item.get("question_number"), int)
+    }
+    missing_questions = sorted(expected_questions - validated_questions)
+    prepared.debug.setdefault("generation", {})["grounding"] = {
+        "parsed_answers": len(parsed),
+        "validated_answers": len(validated),
+        "rejected_answers": rejected,
+        "option_labels": sorted(option_labels),
+        "expected_questions": sorted(expected_questions),
+        "missing_questions": missing_questions,
+    }
+    if not validated or (prepared.query_intent == "solve_questions" and missing_questions):
+        return (
+            INCOMPLETE_QUESTION_RESPONSE
+            if prepared.query_intent == "solve_questions"
+            else NO_RAG_MATCH_RESPONSE
+        )
+    return _render_grounded_answers(validated)
+
+
 async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
     prompt = prepared.prompt or ""
+    if prepared.query_intent in {"solve_questions", "semantic_qa"}:
+        return await generate_grounded_answer(prepared)
+
     answer = await query_ollama(prompt, temperature=generation_temperature(prepared))
 
     if is_writing_response(prepared):
@@ -269,16 +455,14 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
 
 
 def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> bool:
-    return is_writing_response(prepared) or (
+    return prepared.query_intent in {"solve_questions", "semantic_qa"} or is_writing_response(prepared) or (
         has_explicit_no_solution_constraint(message)
         and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
     )
 
 
 def is_writing_response(prepared: "ChatPreparation") -> bool:
-    return prepared.query_intent == "writing_generation" or bool(
-        prepared.debug.get("retrieval", {}).get("writing_parent_id")
-    )
+    return prepared.query_intent == "writing_generation"
 
 
 def response_chunks(text: str, size: int = 180) -> list[str]:
@@ -319,6 +503,28 @@ def _source_label(source: dict[str, Any]) -> str:
     if not pages:
         return source_file
     return f"{source_file}, trang {', '.join(str(page) for page in pages)}"
+
+
+def _sources_label(sources: list[dict[str, Any]]) -> str:
+    grouped: dict[str, set[int]] = {}
+    for source in sources:
+        source_file = str(source.get("source_file") or "unknown")
+        grouped.setdefault(source_file, set()).update(
+            int(page) for page in (source.get("pages") or []) if isinstance(page, int)
+        )
+    labels = []
+    for source_file, pages in grouped.items():
+        page_label = f", trang {', '.join(str(page) for page in sorted(pages))}" if pages else ""
+        labels.append(f"{source_file}{page_label}")
+    return "; ".join(labels)
+
+
+def _clean_display_title(title: str) -> str:
+    cleaned = title.strip()
+    pairs = {"{": "}", "[": "]", "(": ")"}
+    while len(cleaned) >= 2 and cleaned[0] in pairs and cleaned[-1] == pairs[cleaned[0]]:
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
 
 
 def _table_from_source(source: dict[str, Any]) -> dict[str, Any] | None:
@@ -451,11 +657,13 @@ def _render_writing_inventory(sources: list[dict[str, Any]]) -> str | None:
     lines = ["Các đề và bài mẫu trong tài liệu:"]
     for source in sorted(tasks, key=lambda item: (min(item.get("pages") or [999]), item.get("chunk_index", 0))):
         text = (source.get("display_text") or source.get("text") or "").strip()
-        title = next((line.strip() for line in text.splitlines() if line.strip()), "Writing task")
+        title = _clean_display_title(
+            next((line.strip() for line in text.splitlines() if line.strip()), "Writing task")
+        )
         section_key = str(source.get("metadata", {}).get("section_id", "")).removesuffix("-task")
         sample_label = "có bài mẫu" if section_key in answer_keys else "chưa thấy bài mẫu"
         lines.append(f"- Trang {', '.join(str(page) for page in source.get('pages') or [])}: {title} ({sample_label})")
-    lines.append(f"\nNguồn: {_source_label(tasks[0])}.")
+    lines.append(f"\nNguồn: {_sources_label(sources)}.")
     return "\n".join(lines)
 
 
@@ -824,6 +1032,20 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 )
             evidence_context_count = len(evidence_context)
             sources = dedupe_sources(sources + question_context + evidence_context)
+        no_solution_evidence_removed = 0
+        if (
+            has_explicit_no_solution_constraint(message)
+            and not intent_debug.get("allow_solution", False)
+            and query_intent in {"show_questions", "translate_questions", "explain_questions"}
+        ):
+            allowed_units = {"question", "question_group", "instructions"}
+            before_no_solution_filter = len(sources)
+            sources = [
+                source
+                for source in sources
+                if source.get("metadata", {}).get("unit_type") in allowed_units
+            ]
+            no_solution_evidence_removed = before_no_solution_filter - len(sources)
         sources = dedupe_sources(sources)
     else:
         structured_sources = []
@@ -831,6 +1053,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         before_filter_count = 0
         evidence_candidate_count = 0
         evidence_context_count = 0
+        no_solution_evidence_removed = 0
 
     debug = {
         "route_decision": route,
@@ -846,6 +1069,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "after_filter_count": len(sources),
             "evidence_candidate_count": evidence_candidate_count,
             "evidence_context_count": evidence_context_count,
+            "no_solution_evidence_removed": no_solution_evidence_removed,
             "writing_parent_id": writing_parent_id,
             "final_context": compact_final_context_debug(sources),
         },
@@ -1046,15 +1270,23 @@ async def chat(req: ChatRequest) -> ChatResponse:
     prepared = await prepare_chat(req)
     answer = prepared.static_response
     if answer is None and prepared.prompt is not None:
+        generation_started = time.perf_counter()
         try:
             answer = await generate_answer(prepared, req.message)
             if not answer.strip():
                 answer = generation_fallback(prepared)
         except Exception as exc:
             logger.exception("Chat generation failed")
+            error_debug = generation_error_debug(prepared, exc, generation_started)
             raise HTTPException(
                 status_code=502,
-                detail="Không thể kết nối hoặc nhận câu trả lời từ Ollama.",
+                detail={
+                    "message": "Không thể kết nối hoặc nhận câu trả lời từ Ollama.",
+                    "generation_error": error_debug,
+                    "route_used": prepared.route_used,
+                    "query_intent": prepared.query_intent,
+                    "debug": prepared.debug,
+                },
             ) from exc
     return ChatResponse(
         response=answer or "",
@@ -1070,6 +1302,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung câu hỏi")
 
     async def generate():
+        prepared: ChatPreparation | None = None
+        generation_started = time.perf_counter()
         try:
             yield stream_event("status", message="Đang phân tích câu hỏi...")
             prepared = await prepare_chat(req)
@@ -1112,9 +1346,23 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     fallback_answer = generation_fallback(prepared)
                 yield stream_event("token", token=fallback_answer)
             yield stream_event("done")
-        except Exception:
+        except Exception as exc:
             logger.exception("Streaming chat failed")
-            yield stream_event("error", message="Không thể tạo câu trả lời lúc này. Vui lòng thử lại.")
+            error_debug = (
+                generation_error_debug(prepared, exc, generation_started)
+                if prepared is not None
+                else {
+                    "stage": "preparation",
+                    "duration_seconds": round(time.perf_counter() - generation_started, 3),
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                }
+            )
+            yield stream_event(
+                "error",
+                message="Không thể tạo câu trả lời lúc này. Vui lòng thử lại.",
+                debug=error_debug,
+            )
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
