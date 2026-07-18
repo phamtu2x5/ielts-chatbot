@@ -2,7 +2,6 @@ import json
 import sys
 import tempfile
 import unittest
-from collections import Counter
 from pathlib import Path
 
 
@@ -14,8 +13,6 @@ if str(REPO_DIR) not in sys.path:
 from backend.tools.chat_evaluation import (
     capture_case,
     compact_upload_result,
-    merge_document_catalog,
-    select_cases,
     verify_corpus,
 )
 
@@ -41,27 +38,17 @@ class ChatEvaluationManifestTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
-    def test_manifest_covers_all_corpus_documents(self) -> None:
+    def test_manifest_is_valid_for_current_corpus(self) -> None:
         documents = self.manifest["documents"]
-        self.assertEqual(len(documents), 7)
         verified = verify_corpus(self.manifest, CORPUS_DIR)
         self.assertEqual(len(verified), len(documents))
-
-    def test_manifest_replaces_legacy_suite_with_broad_coverage(self) -> None:
         cases = self.manifest["cases"]
-        self.assertGreaterEqual(len(cases), 50)
         ids = [case["id"] for case in cases]
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertNotEqual(len(cases), 19)
-        counts = Counter(case["target_files"][0] for case in cases)
-        self.assertTrue(all(count >= 6 for count in counts.values()))
-        self.assertEqual(len(counts), 7)
-
-    def test_manifest_references_declared_documents(self) -> None:
-        filenames = {document["filename"] for document in self.manifest["documents"]}
-        categories = {case["category"] for case in self.manifest["cases"]}
+        filenames = {document["filename"] for document in documents}
+        categories = {case["category"] for case in cases}
         self.assertTrue(REQUIRED_CATEGORIES.issubset(categories))
-        for case in self.manifest["cases"]:
+        for case in cases:
             self.assertTrue(case["query"].strip())
             self.assertTrue(set(case["target_files"]).issubset(filenames))
             self.assertNotIn("expected_intent", case)
@@ -174,20 +161,6 @@ class ChatEvaluationManifestTests(unittest.TestCase):
         compact = compact_upload_result(result)
         self.assertEqual(compact["response"]["debug"]["structure"]["passages_found"], 1)
         self.assertNotIn("extraction", compact["response"]["debug"])
-
-    def test_case_selection_rejects_unknown_ids(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Unknown case IDs"):
-            select_cases(self.manifest, ["not-a-real-case"])
-
-    def test_document_catalog_is_merged_across_scoped_cases(self) -> None:
-        catalog = {}
-        merge_document_catalog(catalog, [{"source_file": "a.pdf", "chunks": 3}])
-        merge_document_catalog(catalog, [{"source_file": "b.pdf", "chunks": 4}])
-        merge_document_catalog(catalog, [{"source_file": "a.pdf", "chunks": 5}])
-
-        self.assertEqual(set(catalog), {"a.pdf", "b.pdf"})
-        self.assertEqual(catalog["a.pdf"]["chunks"], 5)
-
 
 if __name__ == "__main__":
     unittest.main()

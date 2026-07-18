@@ -184,89 +184,24 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual([item["chunk_id"] for item in probe["results"]], ["outline", "passage-1", "passage-2"])
         self.assertTrue(all(item["probe_overview_score"] == 1.0 for item in probe["results"]))
 
-    def test_answer_question_range_is_solve_intent(self) -> None:
-        intent = detect_query_intent(
-            "trả lời question 1 đến question 4",
-            {"is_overview": False, "has_document_intent": True},
-        )
-
-        self.assertEqual(intent, "solve_questions")
-
-    def test_vietnamese_from_to_question_range_is_solve_intent(self) -> None:
-        intent = detect_query_intent(
-            "trả lời câu hỏi từ 1 đến 4 trong tài liệu trên",
-            {"is_overview": False, "has_document_intent": True},
-        )
-
-        self.assertEqual(intent, "solve_questions")
-
-    def test_no_solution_constraint_wins_over_question_markers(self) -> None:
-        intent = detect_query_intent(
-            "Hiển thị lại toàn bộ bảng của Questions 5-10, giữ đúng ô trống. Không giải bài.",
-            {"is_overview": False, "has_document_intent": True},
-        )
-
-        self.assertEqual(intent, "show_table")
-
-    def test_flowchart_no_fill_is_show_flowchart_intent(self) -> None:
-        intent = detect_query_intent(
-            "Hiển thị cấu trúc flowchart của Questions 18-23, chưa điền đáp án.",
-            {"is_overview": False, "has_document_intent": True},
-        )
-
-        self.assertEqual(intent, "show_flowchart")
-
-    def test_exact_table_cell_query_has_table_cell_intent(self) -> None:
-        intent = detect_query_intent(
-            "Tỷ lệ sở hữu smartphone của nước B năm 2024 là bao nhiêu?",
-            {"is_overview": False, "has_document_intent": True},
-        )
-
-        self.assertEqual(intent, "table_cell")
-
-    def test_explicit_answer_wins_over_explanation_marker(self) -> None:
-        intent = detect_query_intent(
-            "Trả lời Question 40 và giải thích vì sao đáp án phù hợp.",
-            {"is_overview": False, "has_document_intent": True},
-        )
-
-        self.assertEqual(intent, "solve_questions")
-
-    def test_no_choice_constraint_prevents_solving(self) -> None:
-        intent = detect_query_intent(
-            "Hiển thị Questions 20-22, không chọn ba đáp án.",
-            {"is_overview": False, "has_document_intent": True},
-        )
-
-        self.assertEqual(intent, "show_questions")
-
-    def test_blank_notes_are_questions_not_a_table_without_table_marker(self) -> None:
-        intent = detect_query_intent(
-            "Liệt kê Questions 28-29 cùng phần hướng dẫn và các ô trống, chưa điền đáp án.",
-            {"is_overview": False, "has_document_intent": True},
-        )
-
-        self.assertEqual(intent, "show_questions")
-
-    def test_no_matching_constraint_keeps_explain_intent(self) -> None:
-        intent = detect_query_intent(
-            "Giải thích Questions 27-32, không ghép đáp án A-H.",
-            {"is_overview": False, "has_document_intent": True},
-        )
-
-        self.assertEqual(intent, "explain_questions")
-
-    def test_table_operations_have_distinct_intents(self) -> None:
+    def test_document_intent_matrix(self) -> None:
         probe = {"is_overview": False, "has_document_intent": True}
-
-        self.assertEqual(
-            detect_query_intent("Từ bảng, quốc gia nào tăng nhiều nhất? Trình bày phép tính.", probe),
-            "table_calculation",
-        )
-        self.assertEqual(
-            detect_query_intent("So sánh hai chỉ số của Country A từ bảng.", probe),
-            "table_comparison",
-        )
+        cases = [
+            ("trả lời question 1 đến question 4", "solve_questions"),
+            ("trả lời câu hỏi từ 1 đến 4 trong tài liệu trên", "solve_questions"),
+            ("Hiển thị lại toàn bộ bảng của Questions 5-10, giữ đúng ô trống. Không giải bài.", "show_table"),
+            ("Hiển thị cấu trúc flowchart của Questions 18-23, chưa điền đáp án.", "show_flowchart"),
+            ("Tỷ lệ sở hữu smartphone của nước B năm 2024 là bao nhiêu?", "table_cell"),
+            ("Trả lời Question 40 và giải thích vì sao đáp án phù hợp.", "solve_questions"),
+            ("Hiển thị Questions 20-22, không chọn ba đáp án.", "show_questions"),
+            ("Liệt kê Questions 28-29 cùng phần hướng dẫn và các ô trống, chưa điền đáp án.", "show_questions"),
+            ("Giải thích Questions 27-32, không ghép đáp án A-H.", "explain_questions"),
+            ("Từ bảng, quốc gia nào tăng nhiều nhất? Trình bày phép tính.", "table_calculation"),
+            ("So sánh hai chỉ số của Country A từ bảng.", "table_comparison"),
+        ]
+        for message, expected in cases:
+            with self.subTest(message=message):
+                self.assertEqual(detect_query_intent(message, probe), expected)
 
     def test_structured_table_operations_return_cell_calculation_and_comparison(self) -> None:
         table = {
@@ -444,7 +379,7 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertEqual(cleaned, "Kết quả: C tăng 33%. A → B vẫn giữ mũi tên.")
 
-    def test_writing_output_contract_defaults_to_english_and_honors_word_range(self) -> None:
+    def test_writing_output_contract_and_validation(self) -> None:
         contract = writing_output_contract(
             "Viết bài IELTS Writing Task 1 dài 170-190 từ dựa trên bảng."
         )
@@ -457,11 +392,6 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual(vietnamese_contract.language, "Vietnamese")
         self.assertTrue(vietnamese_contract.single_paragraph)
         self.assertTrue(vietnamese_contract.overview_only)
-
-    def test_writing_output_validation_detects_language_and_length(self) -> None:
-        contract = writing_output_contract(
-            "Viết bài IELTS Writing Task 1 dài 170-190 từ."
-        )
         issues = writing_output_issues(
             "Bảng này cho thấy tỷ lệ tăng đáng kể ở cả ba quốc gia trong giai đoạn nghiên cứu.",
             contract,
@@ -469,6 +399,10 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertTrue(any("not written in English" in issue for issue in issues))
         self.assertTrue(any("below 170" in issue for issue in issues))
+        self.assertIn(
+            "The response is not written in Vietnamese.",
+            writing_output_issues("The chart shows a consistent increase.", vietnamese_contract),
+        )
 
     def test_no_solution_constraint_requires_an_explicit_marker(self) -> None:
         self.assertTrue(has_explicit_no_solution_constraint("Giải thích Questions 1-4, không chọn đáp án."))
@@ -476,13 +410,6 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertFalse(has_explicit_no_solution_constraint("Trả lời Question 1 nhưng không giải thích."))
         self.assertTrue(likely_contains_solution("Tóm lại:\n24: shade-grown\n25: full-sun"))
         self.assertFalse(likely_contains_solution("Đối chiếu từng phát biểu với thông tin trong passage."))
-
-    def test_writing_output_validation_enforces_explicit_vietnamese(self) -> None:
-        contract = writing_output_contract("Viết một đoạn bằng tiếng Việt.")
-
-        issues = writing_output_issues("The chart shows a consistent increase.", contract)
-
-        self.assertIn("The response is not written in Vietnamese.", issues)
 
     def test_writing_parent_context_keeps_one_task(self) -> None:
         docs = []

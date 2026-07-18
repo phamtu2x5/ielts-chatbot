@@ -112,20 +112,16 @@ class FileRoutingTests(unittest.TestCase):
 
 
 class OCRProcessorTests(unittest.TestCase):
-    def test_ocr_engine_must_be_rapidocr(self) -> None:
-        with patch.dict(os.environ, {"OCR_ENGINE": "easyocr"}):
-            with self.assertRaisesRegex(ValueError, "OCR_ENGINE must be rapidocr"):
-                DocumentPipelineConfig()
-
-    def test_ocr_runtime_must_be_torch(self) -> None:
-        with patch.dict(os.environ, {"OCR_RUNTIME": "onnxruntime"}):
-            with self.assertRaisesRegex(ValueError, "OCR_RUNTIME must be torch"):
-                DocumentPipelineConfig()
-
-    def test_ocr_device_must_be_cuda(self) -> None:
-        with patch.dict(os.environ, {"OCR_DEVICE": "cpu"}):
-            with self.assertRaisesRegex(ValueError, "OCR_DEVICE must be cuda"):
-                DocumentPipelineConfig()
+    def test_ocr_runtime_configuration_is_strict(self) -> None:
+        invalid_settings = [
+            ({"OCR_ENGINE": "easyocr"}, "OCR_ENGINE must be rapidocr"),
+            ({"OCR_RUNTIME": "onnxruntime"}, "OCR_RUNTIME must be torch"),
+            ({"OCR_DEVICE": "cpu"}, "OCR_DEVICE must be cuda"),
+        ]
+        for environment, error in invalid_settings:
+            with self.subTest(environment=environment), patch.dict(os.environ, environment):
+                with self.assertRaisesRegex(ValueError, error):
+                    DocumentPipelineConfig()
 
     def test_cuda_device_id_is_parsed_from_config(self) -> None:
         processor = OCRProcessor(DocumentPipelineConfig(ocr_device="cuda:2"))
