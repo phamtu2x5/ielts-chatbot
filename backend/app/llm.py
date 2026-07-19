@@ -13,6 +13,7 @@ from .schemas import ChatMessage
 OLLAMA_API_URL = settings.ollama_api_url
 OLLAMA_MODEL = settings.ollama_model
 OLLAMA_NUM_PREDICT = settings.ollama_num_predict
+RAG_ROUTE_SENTINEL = "[[USE_RAG]]"
 
 
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
@@ -528,30 +529,46 @@ async def stream_ollama(
             raise OllamaRequestError("transport", f"{type(exc).__name__}: {exc}") from exc
 
 
-def direct_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
+def route_or_answer_prompt(
+    message: str,
+    history: Optional[List[ChatMessage]] = None,
+    document_context: str = "",
+) -> str:
     history_text = format_history(history)
+    parts = [
+        ASSISTANT_STYLE,
+        "You are the first-stage gateway for an IELTS chatbot that may have uploaded study materials.",
+        "If the current request requires any fact, passage, question, table, image, answer, or evidence from uploaded material, output exactly [[USE_RAG]] and nothing else.",
+        "If the request is independent of uploaded material, answer it fully now. The text you return will be shown directly to the user, so do not output a route label.",
+        "General greetings, study advice, grammar help, and IELTS strategy questions are independent unless the user explicitly ties them to uploaded material.",
+        "Document metadata and retrieval previews below are routing hints only. Never answer a document-grounded request from those previews.",
+    ]
+    if document_context:
+        parts.append(f"Uploaded material routing context:\n{document_context}")
     if history_text:
-        return f"""{ASSISTANT_STYLE}
+        parts.append(f"Previous conversation:\n{history_text}")
+    parts.extend(
+        [
+            f"Current user message:\n{message}",
+            "Either return the complete direct answer, or return exactly [[USE_RAG]].",
+        ]
+    )
+    return "\n\n".join(parts)
 
-If the user asks about uploaded files, documents, PDFs, page content, question numbers, tables, flow charts, or "nội dung trong tài liệu", do not invent document content. Ask the backend/user to use the uploaded document context instead.
 
-Previous conversation:
-{history_text}
-
-Current question:
-{message}
-
-Answer naturally and keep the conversation context in mind."""
-
-    return f"""{ASSISTANT_STYLE}
-
-Help students with IELTS Reading, Listening, Writing, and Speaking.
-If the user asks about uploaded files, documents, PDFs, page content, question numbers, tables, flow charts, or "nội dung trong tài liệu", do not invent document content. Say that the answer needs the uploaded document context.
-
-Question:
-{message}
-
-Answer naturally and clearly."""
+async def route_or_answer(
+    message: str,
+    history: Optional[List[ChatMessage]] = None,
+    document_context: str = "",
+) -> tuple[str, str | None]:
+    response = await query_ollama(
+        route_or_answer_prompt(message, history, document_context),
+        temperature=0.2,
+    )
+    normalized = re.sub(r"^assistant\s*", "", response.strip(), flags=re.IGNORECASE).strip()
+    if normalized.upper() == RAG_ROUTE_SENTINEL:
+        return "rag", None
+    return "direct", response
 
 
 def rag_prompt(

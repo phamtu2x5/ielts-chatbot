@@ -4,7 +4,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import numpy as np
@@ -284,7 +284,7 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertFalse(resolved.ambiguous)
         self.assertTrue(ambiguous.ambiguous)
 
-    def test_explicit_document_scope_is_always_grounded(self) -> None:
+    def test_explicit_document_scope_only_limits_allowed_documents(self) -> None:
         catalog = [
             {
                 "source_file": "reading.pdf",
@@ -299,8 +299,15 @@ class LocalVectorStoreTests(unittest.TestCase):
             ["doc-reading"],
         )
 
-        self.assertTrue(scope.document_grounded)
+        self.assertFalse(scope.document_grounded)
         self.assertEqual(scope.resolved_document_ids, ["doc-reading"])
+
+        general_writing = resolve_document_scope(
+            "Give me three IELTS Writing tips.",
+            catalog,
+            ["doc-reading"],
+        )
+        self.assertFalse(general_writing.document_grounded)
 
     def test_structured_lookup_filters_duplicate_question_ranges_by_document(self) -> None:
         store = FakeVectorStore()
@@ -582,6 +589,28 @@ class LocalVectorStoreTests(unittest.TestCase):
 
 
 class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_route_or_answer_uses_direct_model_output(self) -> None:
+        with patch.object(
+            llm,
+            "query_ollama",
+            AsyncMock(return_value="Use a clear beginning, middle, and end."),
+        ):
+            route, answer = await llm.route_or_answer("Give me one Speaking Part 2 tip.")
+
+        self.assertEqual(route, "direct")
+        self.assertEqual(answer, "Use a clear beginning, middle, and end.")
+
+    async def test_route_or_answer_uses_explicit_rag_sentinel(self) -> None:
+        with patch.object(
+            llm,
+            "query_ollama",
+            AsyncMock(return_value="assistant\n[[USE_RAG]]"),
+        ):
+            route, answer = await llm.route_or_answer("What is Question 4 in the file?")
+
+        self.assertEqual(route, "rag")
+        self.assertIsNone(answer)
+
     async def test_non_stream_request_retries_one_server_error(self) -> None:
         attempts = 0
 

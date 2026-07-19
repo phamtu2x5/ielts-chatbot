@@ -26,13 +26,13 @@ from .llm import (
     OLLAMA_MODEL,
     OLLAMA_NUM_PREDICT,
     OllamaRequestError,
-    direct_prompt,
     query_ollama,
     rag_prompt,
     response_output_contract,
     response_output_issues,
     response_output_penalty,
     response_retry_prompt,
+    route_or_answer,
     select_best_writing_output,
     stream_ollama,
     writing_output_contract,
@@ -114,6 +114,34 @@ def format_context(sources: list[dict], max_chars_per_source: int | None = None)
             f"{text}"
         )
     return "\n\n".join(parts)
+
+
+def format_gateway_document_context(catalog: list[dict], probe: dict) -> str:
+    lines: list[str] = []
+    if catalog:
+        lines.append("Available uploaded documents:")
+        for item in catalog:
+            lines.append(
+                f"- {item.get('source_file', 'unknown')} | "
+                f"document_types={item.get('document_types') or []} | "
+                f"unit_types={item.get('unit_types') or []}"
+            )
+    else:
+        lines.append("Available uploaded documents: none")
+
+    lines.append(
+        "Retrieval probe: "
+        + ("strong" if probe.get("has_strong_hits") else "weak_or_none")
+    )
+    for result in (probe.get("results") or [])[:3]:
+        preview = " ".join(
+            (result.get("display_text") or result.get("text") or "").split()
+        )[:180]
+        lines.append(
+            f"- {result.get('source_file', 'unknown')} | "
+            f"unit={result.get('metadata', {}).get('unit_type')} | preview={preview}"
+        )
+    return "\n".join(lines)
 
 
 def evidence_query_for_sources(sources: list[dict[str, Any]], fallback: str) -> str:
@@ -691,6 +719,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     intent_debug: dict[str, Any] = {}
     writing_parent_id: str | None = None
     evidence_query: str | None = None
+    direct_answer: str | None = None
+    gateway_debug: dict[str, Any] = {"used": False}
 
     stats = await run_in_threadpool(store.stats)
     full_catalog = await run_in_threadpool(store.document_catalog)
@@ -755,25 +785,31 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             probe_top_k,
             scope_ids,
         )
-        if scope.document_grounded:
-            probe["has_document_intent"] = True
         intent_decision = detect_query_intent_decision(
             message,
             probe,
-            document_grounded=scope.document_grounded or probe.get("has_document_intent", False),
+            document_grounded=False,
         )
         query_intent = intent_decision.intent
         intent_debug = intent_decision.to_debug()
 
-        if scope.document_grounded or probe.get("has_document_intent"):
-            route = "rag"
-        else:
-            route = "direct"
-
-        if route == "direct" and (
-            probe.get("is_overview") or probe.get("top_question_score", 0.0) >= 1
+        if (
+            query_intent != "direct"
+            or probe.get("is_overview")
+            or probe.get("top_question_score", 0.0) >= 1
         ):
             route = "rag"
+        else:
+            route, direct_answer = await route_or_answer(
+                message,
+                req.conversation_history,
+                format_gateway_document_context(catalog, probe),
+            )
+            gateway_debug = {
+                "used": True,
+                "decision": route,
+                "returned_direct_answer": direct_answer is not None,
+            }
         if route == "rag" and query_intent == "direct":
             intent_decision = detect_query_intent_decision(
                 message,
@@ -786,11 +822,23 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         intent_decision = detect_query_intent_decision(
             message,
             probe,
-            document_grounded=scope.document_grounded,
+            document_grounded=False,
         )
         query_intent = intent_decision.intent
         intent_debug = intent_decision.to_debug()
-        route = "rag" if scope.document_grounded else "direct"
+        if query_intent != "direct" or scope.document_grounded:
+            route = "rag"
+        else:
+            route, direct_answer = await route_or_answer(
+                message,
+                req.conversation_history,
+                "Available uploaded documents: none",
+            )
+            gateway_debug = {
+                "used": True,
+                "decision": route,
+                "returned_direct_answer": direct_answer is not None,
+            }
 
     if route == "rag":
         evidence_candidate_count = 0
@@ -888,6 +936,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         "route_decision": route,
         "query_intent": query_intent,
         "intent_decision": intent_debug,
+        "gateway": gateway_debug,
         "target_resolution": scope.to_debug(),
         "catalog": catalog,
         "probe": compact_probe_debug(probe),
@@ -999,8 +1048,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         )
 
     return ChatPreparation(
-        prompt=direct_prompt(message, req.conversation_history),
-        static_response=None,
+        prompt=None,
+        static_response=direct_answer,
         route_used="base_model",
         sources=[],
         debug=debug,

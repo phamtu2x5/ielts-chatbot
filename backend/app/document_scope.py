@@ -14,10 +14,6 @@ DOCUMENT_MARKERS = [
     "docx",
     "trong bài",
     "bài đọc",
-    "passage",
-    "question",
-    "questions",
-    "câu hỏi",
     "trang",
     "page",
     "bảng",
@@ -29,9 +25,6 @@ DOCUMENT_MARKERS = [
     "ảnh",
     "hình",
     "image",
-    "writing",
-    "task 1",
-    "task 2",
     "đề trên",
     "đã tải",
     "uploaded",
@@ -72,6 +65,11 @@ def is_document_grounded_query(message: str, catalog: list[dict[str, Any]] | Non
     normalized = normalize_reference(message)
     if any(_contains_phrase(lowered, marker.casefold()) for marker in DOCUMENT_MARKERS):
         return True
+    if re.search(
+        r"\b(?:reading\s+passage|passage|questions?|câu(?:\s+hỏi)?)\s*\d{1,3}\b",
+        lowered,
+    ):
+        return True
     return any(_filename_match_score(normalized, item.get("source_file", "")) > 0 for item in catalog or [])
 
 
@@ -96,9 +94,9 @@ def resolve_document_scope(
         for item in catalog
         if any(document_id in allowed for document_id in item.get("document_ids", []))
     ]
-    # An explicit client scope means the answer must stay grounded even when
-    # the query itself only names a section title or topic.
-    grounded = bool(requested) or is_document_grounded_query(message, allowed_entries or catalog)
+    # Client-provided IDs constrain which documents may be searched. They do
+    # not by themselves mean that a general chat message requires RAG.
+    grounded = is_document_grounded_query(message, allowed_entries or catalog)
     if requested and not allowed:
         return DocumentScope(
             requested,

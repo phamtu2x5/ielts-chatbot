@@ -240,20 +240,34 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "mime_types": ["application/pdf"],
             }
         ]
-        store = _FakeChatStore(catalog, has_document_intent=False)
+        store = _FakeChatStore(catalog, has_document_intent=True)
 
-        with patch.object(main, "get_store", return_value=store):
-            greeting = await main.prepare_chat(main.ChatRequest(message="xin chào"))
+        with (
+            patch.object(main, "get_store", return_value=store),
+            patch.object(
+                main,
+                "route_or_answer",
+                AsyncMock(side_effect=[("direct", "Xin chào!"), ("direct", "Three tips.")]),
+            ),
+        ):
+            greeting = await main.prepare_chat(
+                main.ChatRequest(message="xin chào", document_ids=["doc-1"])
+            )
             advice = await main.prepare_chat(
-                main.ChatRequest(message="Give me 3 IELTS Speaking Part 2 tips.")
+                main.ChatRequest(
+                    message="Give me 3 IELTS Speaking Part 2 tips.",
+                    document_ids=["doc-1"],
+                )
             )
 
         self.assertEqual(greeting.route_used, "base_model")
         self.assertEqual(greeting.query_intent, "direct")
+        self.assertEqual(greeting.static_response, "Xin chào!")
         self.assertEqual(advice.route_used, "base_model")
         self.assertEqual(advice.query_intent, "direct")
+        self.assertEqual(advice.static_response, "Three tips.")
 
-    async def test_explicit_document_scope_never_routes_semantic_query_to_base_model(self) -> None:
+    async def test_gateway_can_request_rag_with_an_explicit_document_scope(self) -> None:
         catalog = [
             {
                 "source_file": "reading.pdf",
@@ -261,7 +275,15 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "mime_types": ["application/pdf"],
             }
         ]
-        with patch.object(main, "get_store", return_value=_FakeChatStore(catalog)):
+        store = _FakeChatStore(catalog, has_document_intent=False)
+        with (
+            patch.object(main, "get_store", return_value=store),
+            patch.object(
+                main,
+                "route_or_answer",
+                AsyncMock(return_value=("rag", None)),
+            ),
+        ):
             prepared = await main.prepare_chat(
                 main.ChatRequest(
                     message="How did the fence affect kangaroos?",
@@ -271,7 +293,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(prepared.route_used, "vector_rag_no_match")
         self.assertNotEqual(prepared.query_intent, "direct")
-        self.assertTrue(prepared.debug["target_resolution"]["document_grounded"])
+        self.assertFalse(prepared.debug["target_resolution"]["document_grounded"])
+        self.assertEqual(prepared.debug["gateway"]["decision"], "rag")
 
     async def test_ambiguous_question_range_requests_a_document_choice(self) -> None:
         catalog = [
