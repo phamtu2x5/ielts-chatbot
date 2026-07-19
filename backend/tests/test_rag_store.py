@@ -408,6 +408,70 @@ class LocalVectorStoreTests(unittest.TestCase):
         )
         self.assertFalse(general_writing.document_grounded)
 
+    def test_generic_ielts_terms_do_not_select_uploaded_documents(self) -> None:
+        catalog = [
+            {
+                "source_file": "IELTS READING TEST 2.pdf",
+                "document_ids": ["doc-reading"],
+                "mime_types": ["application/pdf"],
+            },
+            {
+                "source_file": "IELTS Task 1 Essay.pdf",
+                "document_ids": ["doc-writing"],
+                "mime_types": ["application/pdf"],
+            },
+        ]
+
+        for message in [
+            "Give me three IELTS Speaking Part 2 tips.",
+            "How can I improve my IELTS Reading speed?",
+            "Explain TRUE/FALSE/NOT GIVEN in IELTS Reading.",
+            "Give me an IELTS Writing Task 2 discussion essay structure.",
+        ]:
+            with self.subTest(message=message):
+                scope = resolve_document_scope(message, catalog)
+                self.assertFalse(scope.document_grounded)
+                self.assertFalse(scope.ambiguous)
+                self.assertEqual(scope.resolved_document_ids, [])
+
+        overview = resolve_document_scope("Nội dung tài liệu là gì?", catalog)
+        self.assertTrue(overview.document_grounded)
+        self.assertTrue(overview.ambiguous)
+
+    def test_structured_section_title_selects_one_document(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading-a.pdf",
+                "document_ids": ["doc-a"],
+                "section_titles": ["Snow-makers"],
+            },
+            {
+                "source_file": "reading-b.pdf",
+                "document_ids": ["doc-b"],
+                "section_titles": ["IELTS Essay Task 1: Age Groups and Cinema Attendance"],
+            },
+        ]
+
+        scope = resolve_document_scope("Summarize Age Groups and Cinema Attendance.", catalog)
+
+        self.assertTrue(scope.document_grounded)
+        self.assertFalse(scope.ambiguous)
+        self.assertEqual(scope.resolved_document_ids, ["doc-b"])
+
+    def test_document_catalog_exposes_structured_section_titles(self) -> None:
+        store = FakeVectorStore()
+        passage = self._chunk("passage", "reading.pdf", "Passage body")
+        passage["document_id"] = "doc-reading"
+        passage["metadata"] = {
+            "unit_type": "passage",
+            "passage_title": "A General Passage Title",
+        }
+        store.upsert([passage], "reading.pdf")
+
+        catalog = store.document_catalog()
+
+        self.assertEqual(catalog[0]["section_titles"], ["A General Passage Title"])
+
     def test_structured_lookup_filters_duplicate_question_ranges_by_document(self) -> None:
         store = FakeVectorStore()
         first = self._chunk("doc-a-questions", "a.pdf", "Questions 1-4")
@@ -734,6 +798,10 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route, "direct")
         self.assertEqual(answer, "Hello! How can I help with IELTS?")
         self.assertEqual(model.await_count, 2)
+        first_prompt = model.await_args_list[0].args[0]
+        retry_prompt = model.await_args_list[1].args[0]
+        self.assertIn("first-stage gateway", first_prompt)
+        self.assertEqual(retry_prompt, llm.compact_route_or_answer_prompt("Hello"))
 
     async def test_non_stream_request_retries_one_server_error(self) -> None:
         attempts = 0

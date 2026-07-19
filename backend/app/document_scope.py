@@ -7,27 +7,17 @@ from pathlib import Path
 from typing import Any
 
 
-DOCUMENT_MARKERS = [
-    "tài liệu",
-    "file",
-    "pdf",
-    "docx",
-    "trong bài",
-    "bài đọc",
-    "trang",
-    "page",
-    "bảng",
-    "table",
-    "flowchart",
-    "flow chart",
-    "sơ đồ",
-    "diagram",
-    "ảnh",
-    "hình",
-    "image",
-    "đề trên",
-    "đã tải",
-    "uploaded",
+DOCUMENT_REFERENCE_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"\btrong\s+(?:tài liệu|file|pdf|docx|bài đọc|ảnh|hình|bảng|sơ đồ)\b",
+        r"\b(?:tài liệu|file|pdf|docx|bài đọc|ảnh|hình|bảng|sơ đồ)\s+(?:này|trên|đó|đã tải)\b",
+        r"\b(?:uploaded|attached)\s+(?:material|document|file|pdf|image)\b",
+        r"\b(?:in|from)\s+(?:the\s+)?(?:document|file|pdf|image|table|diagram)\b",
+        r"\b(?:page|trang)\s*\d{1,4}\b",
+        r"\b(?:nội dung|tóm tắt|tổng quan)\s+(?:của\s+)?(?:tài liệu|file|pdf)\b",
+        r"\b(?:tài liệu|file|pdf)\s+(?:gồm|chứa|nhắc|nói về)\b",
+    ]
 ]
 
 COLLECTION_MARKERS = [
@@ -63,14 +53,19 @@ def normalize_reference(value: str) -> str:
 def is_document_grounded_query(message: str, catalog: list[dict[str, Any]] | None = None) -> bool:
     lowered = message.casefold()
     normalized = normalize_reference(message)
-    if any(_contains_phrase(lowered, marker.casefold()) for marker in DOCUMENT_MARKERS):
+    if any(pattern.search(message) for pattern in DOCUMENT_REFERENCE_PATTERNS):
         return True
     if re.search(
         r"\b(?:reading\s+passage|passage|questions?|câu(?:\s+hỏi)?)\s*\d{1,3}\b",
         lowered,
     ):
         return True
-    return any(_filename_match_score(normalized, item.get("source_file", "")) > 0 for item in catalog or [])
+    matches = [
+        item
+        for item in catalog or []
+        if _catalog_match_score(normalized, lowered, item) > 0
+    ]
+    return len(matches) == 1
 
 
 def resolve_document_scope(
@@ -96,7 +91,7 @@ def resolve_document_scope(
     ]
     # Client-provided IDs constrain which documents may be searched. They do
     # not by themselves mean that a general chat message requires RAG.
-    grounded = is_document_grounded_query(message, allowed_entries or catalog)
+    grounded = is_document_grounded_query(message)
     if requested and not allowed:
         return DocumentScope(
             requested,
@@ -127,8 +122,7 @@ def resolve_document_scope(
     normalized_query = normalize_reference(message)
     scored: list[tuple[float, dict[str, Any]]] = []
     for entry in allowed_entries:
-        score = _filename_match_score(normalized_query, entry.get("source_file", ""))
-        score += _modality_match_score(message, entry)
+        score = _catalog_match_score(normalized_query, message.casefold(), entry)
         if score > 0:
             scored.append((score, entry))
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -147,8 +141,8 @@ def resolve_document_scope(
             [entry.get("source_file", "unknown")],
             "catalog_reference",
             False,
-            grounded,
-            "The query uniquely matched a file name or document modality.",
+            True,
+            "The query uniquely matched a file name, section title, or explicit document modality.",
         )
 
     if any(normalize_reference(marker) in normalized_query for marker in COLLECTION_MARKERS):
@@ -224,8 +218,6 @@ def _filename_match_score(normalized_query: str, source_file: str) -> float:
     if query_numbers and file_numbers and not query_numbers.intersection(file_numbers):
         return 0.0
     overlap = query_terms.intersection(file_terms)
-    if len(overlap) < 2:
-        return 0.0
     longest_phrase = 0
     normalized_padded = f" {normalized_query} "
     for length in range(2, len(file_sequence) + 1):
@@ -234,6 +226,8 @@ def _filename_match_score(normalized_query: str, source_file: str) -> float:
             for start in range(0, len(file_sequence) - length + 1)
         ):
             longest_phrase = length
+    if longest_phrase < 3:
+        return 0.0
     return (
         float(len(overlap))
         + len(overlap) / max(1, len(file_terms))
@@ -241,13 +235,63 @@ def _filename_match_score(normalized_query: str, source_file: str) -> float:
     )
 
 
-def _modality_match_score(message: str, entry: dict[str, Any]) -> float:
-    lowered = message.casefold()
-    mime_types = entry.get("mime_types", [])
-    if any(_contains_phrase(lowered, marker) for marker in ["ảnh", "hình", "image", "screenshot"]):
-        return 30.0 if any(str(mime).startswith("image/") for mime in mime_types) else 0.0
+def _section_title_match_score(normalized_query: str, titles: list[str]) -> float:
+    query_terms = normalized_query.split()
+    query_numbers = {term for term in query_terms if term.isdigit()}
+    for title in titles:
+        normalized_title = normalize_reference(str(title))
+        title_terms = normalized_title.split()
+        if not normalized_title:
+            continue
+        title_numbers = {term for term in title_terms if term.isdigit()}
+        if query_numbers and title_numbers and not query_numbers.intersection(title_numbers):
+            continue
+        if normalized_title in normalized_query and (
+            len(title_terms) >= 2 or len(normalized_title) >= 5
+        ):
+            return 120.0 + len(title_terms)
+        longest_phrase = _longest_contiguous_match(query_terms, title_terms)
+        if longest_phrase >= 3:
+            return 100.0 + longest_phrase
     return 0.0
 
 
-def _contains_phrase(text: str, phrase: str) -> bool:
-    return bool(re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text))
+def _longest_contiguous_match(first: list[str], second: list[str]) -> int:
+    longest = 0
+    for first_start in range(len(first)):
+        for second_start in range(len(second)):
+            length = 0
+            while (
+                first_start + length < len(first)
+                and second_start + length < len(second)
+                and first[first_start + length] == second[second_start + length]
+            ):
+                length += 1
+            longest = max(longest, length)
+    return longest
+
+
+def _catalog_match_score(
+    normalized_query: str,
+    lowered_message: str,
+    entry: dict[str, Any],
+) -> float:
+    return (
+        _filename_match_score(normalized_query, entry.get("source_file", ""))
+        + _section_title_match_score(normalized_query, entry.get("section_titles") or [])
+        + _modality_match_score(lowered_message, entry)
+    )
+
+
+def _modality_match_score(message: str, entry: dict[str, Any]) -> float:
+    mime_types = entry.get("mime_types", [])
+    image_reference = any(
+        re.search(pattern, message, flags=re.IGNORECASE)
+        for pattern in [
+            r"\btrong\s+(?:ảnh|hình|image|screenshot)\b",
+            r"\b(?:ảnh|hình|image|screenshot)\s+(?:này|trên|đó|đã tải)\b",
+        ]
+    )
+    if image_reference:
+        return 30.0 if any(str(mime).startswith("image/") for mime in mime_types) else 0.0
+    return 0.0

@@ -574,6 +574,17 @@ def route_or_answer_prompt(
     return "\n\n".join(parts)
 
 
+def compact_route_or_answer_prompt(message: str) -> str:
+    return "\n\n".join(
+        [
+            "Route one IELTS chatbot request.",
+            "Return exactly [[USE_RAG]] only when the request needs facts from uploaded material.",
+            "Otherwise answer the user directly and do not mention routing.",
+            f"User message:\n{message}",
+        ]
+    )
+
+
 async def route_or_answer(
     message: str,
     history: Optional[List[ChatMessage]] = None,
@@ -582,7 +593,8 @@ async def route_or_answer(
     prompt = route_or_answer_prompt(message, history, document_context)
     for attempt in range(2):
         try:
-            response = await query_ollama(prompt, temperature=0.2)
+            current_prompt = prompt if attempt == 0 else compact_route_or_answer_prompt(message)
+            response = await query_ollama(current_prompt, temperature=0.2)
             break
         except OllamaRequestError as exc:
             if attempt == 0 and exc.kind in {"empty_response", "prompt_echo"}:

@@ -125,7 +125,8 @@ def format_gateway_document_context(catalog: list[dict], probe: dict) -> str:
             lines.append(
                 f"- {item.get('source_file', 'unknown')} | "
                 f"document_types={item.get('document_types') or []} | "
-                f"unit_types={item.get('unit_types') or []}"
+                f"unit_types={item.get('unit_types') or []} | "
+                f"section_titles={item.get('section_titles') or []}"
             )
     else:
         lines.append("Available uploaded documents: none")
@@ -771,56 +772,6 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     scope_ids = scope.resolved_document_ids or scope.allowed_document_ids
     retrieval_query = affinity_retrieval_query(req, scope)
 
-    if scope.ambiguous:
-        debug = {
-            "route_decision": "rag",
-            "query_intent": "ambiguous_document",
-            "target_resolution": scope.to_debug(),
-            "catalog": full_catalog,
-            "probe": compact_probe_debug(probe),
-            "retrieval": {
-                "method": None,
-                "structured_hits": 0,
-                "before_filter_count": 0,
-                "after_filter_count": 0,
-                "final_context": [],
-            },
-            "source_count": 0,
-        }
-        return ChatPreparation(
-            prompt=None,
-            static_response=ambiguous_document_response(scope),
-            route_used="vector_rag_ambiguous_document",
-            sources=[],
-            debug=debug,
-            query_intent="ambiguous_document",
-        )
-
-    if scope.document_grounded and req.document_ids and not scope_ids:
-        debug = {
-            "route_decision": "rag",
-            "query_intent": "document_no_match",
-            "target_resolution": scope.to_debug(),
-            "catalog": full_catalog,
-            "probe": compact_probe_debug(probe),
-            "retrieval": {
-                "method": None,
-                "structured_hits": 0,
-                "before_filter_count": 0,
-                "after_filter_count": 0,
-                "final_context": [],
-            },
-            "source_count": 0,
-        }
-        return ChatPreparation(
-            prompt=None,
-            static_response=NO_RAG_MATCH_RESPONSE,
-            route_used="vector_rag_no_match",
-            sources=[],
-            debug=debug,
-            query_intent="document_no_match",
-        )
-
     probe_top_k = max(settings.rag_probe_top_k, settings.rag_top_k)
     gateway_context = "Available uploaded documents: none"
     if stats["chunks"] > 0:
@@ -861,6 +812,60 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         }
     else:
         route = "rag"
+
+    if route == "rag" and scope.ambiguous:
+        debug = {
+            "route_decision": "rag",
+            "query_intent": "ambiguous_document",
+            "intent_decision": intent_debug,
+            "gateway": gateway_debug,
+            "target_resolution": scope.to_debug(),
+            "catalog": full_catalog,
+            "probe": compact_probe_debug(probe),
+            "retrieval": {
+                "method": None,
+                "structured_hits": 0,
+                "before_filter_count": 0,
+                "after_filter_count": 0,
+                "final_context": [],
+            },
+            "source_count": 0,
+        }
+        return ChatPreparation(
+            prompt=None,
+            static_response=ambiguous_document_response(scope),
+            route_used="vector_rag_ambiguous_document",
+            sources=[],
+            debug=debug,
+            query_intent="ambiguous_document",
+        )
+
+    if route == "rag" and scope.document_grounded and req.document_ids and not scope_ids:
+        debug = {
+            "route_decision": "rag",
+            "query_intent": "document_no_match",
+            "intent_decision": intent_debug,
+            "gateway": gateway_debug,
+            "target_resolution": scope.to_debug(),
+            "catalog": full_catalog,
+            "probe": compact_probe_debug(probe),
+            "retrieval": {
+                "method": None,
+                "structured_hits": 0,
+                "before_filter_count": 0,
+                "after_filter_count": 0,
+                "final_context": [],
+            },
+            "source_count": 0,
+        }
+        return ChatPreparation(
+            prompt=None,
+            static_response=NO_RAG_MATCH_RESPONSE,
+            route_used="vector_rag_no_match",
+            sources=[],
+            debug=debug,
+            query_intent="document_no_match",
+        )
 
     if stats["chunks"] > 0 and route == "rag" and query_intent in {"direct", "semantic_qa"}:
         probe, catalog = await run_in_threadpool(

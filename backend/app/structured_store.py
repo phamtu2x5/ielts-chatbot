@@ -136,6 +136,7 @@ class StructuredDocumentStore:
                     "passage_numbers": set(),
                     "document_types": set(),
                     "task_types": set(),
+                    "section_titles": set(),
                 },
             )
             entry["chunks"] += 1
@@ -153,6 +154,10 @@ class StructuredDocumentStore:
                 value = metadata.get(metadata_key)
                 if value:
                     entry[catalog_key].add(value)
+            for title_key in ("passage_title", "task_title"):
+                title = metadata.get(title_key)
+                if title:
+                    entry["section_titles"].add(str(title))
 
         return [
             {
@@ -165,6 +170,7 @@ class StructuredDocumentStore:
                 "passage_numbers": sorted(item["passage_numbers"]),
                 "document_types": sorted(item["document_types"]),
                 "task_types": sorted(item["task_types"]),
+                "section_titles": sorted(item["section_titles"]),
             }
             for item in catalog.values()
         ]

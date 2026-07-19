@@ -371,6 +371,79 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(advice.static_response, "Three tips.")
         self.assertEqual(store.probe_dense_flags, [False, False])
 
+    async def test_generic_ielts_categories_do_not_trigger_document_ambiguity(self) -> None:
+        catalog = [
+            {
+                "source_file": "IELTS READING TEST 2.pdf",
+                "document_ids": ["doc-reading"],
+                "mime_types": ["application/pdf"],
+            },
+            {
+                "source_file": "IELTS Task 1 Essay.pdf",
+                "document_ids": ["doc-writing"],
+                "mime_types": ["application/pdf"],
+            },
+        ]
+        store = _FakeChatStore(catalog, has_document_intent=True)
+        gateway = AsyncMock(return_value=("direct", "General IELTS guidance."))
+
+        with (
+            patch.object(main, "get_store", return_value=store),
+            patch.object(main, "route_or_answer", gateway),
+        ):
+            for message in [
+                "How can I improve my IELTS Reading speed?",
+                "Explain TRUE/FALSE/NOT GIVEN in IELTS Reading.",
+                "Give me an IELTS Writing Task 2 discussion essay structure.",
+            ]:
+                prepared = await main.prepare_chat(
+                    main.ChatRequest(
+                        message=message,
+                        document_ids=["doc-reading", "doc-writing"],
+                    )
+                )
+                self.assertEqual(prepared.route_used, "base_model")
+                self.assertEqual(prepared.static_response, "General IELTS guidance.")
+                self.assertFalse(prepared.debug["target_resolution"]["ambiguous"])
+
+        self.assertEqual(gateway.await_count, 3)
+
+    async def test_structured_title_query_selects_document_without_gateway(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading-a.pdf",
+                "document_ids": ["doc-a"],
+                "mime_types": ["application/pdf"],
+                "section_titles": ["Snow-makers"],
+            },
+            {
+                "source_file": "reading-b.pdf",
+                "document_ids": ["doc-b"],
+                "mime_types": ["application/pdf"],
+                "section_titles": ["Painters of Time"],
+            },
+        ]
+        store = _FakeChatStore(catalog, has_document_intent=True)
+        gateway = AsyncMock(return_value=("direct", "Wrong direct answer."))
+
+        with (
+            patch.object(main, "get_store", return_value=store),
+            patch.object(main, "route_or_answer", gateway),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="What is Snow-makers about?",
+                    document_ids=["doc-a", "doc-b"],
+                )
+            )
+
+        gateway.assert_not_awaited()
+        self.assertEqual(prepared.route_used, "vector_rag_no_match")
+        self.assertEqual(
+            prepared.debug["target_resolution"]["resolved_document_ids"],
+            ["doc-a"],
+        )
+
     async def test_follow_up_affinity_limits_retrieval_to_previous_document(self) -> None:
         catalog = [
             {"source_file": "reading-2.pdf", "document_ids": ["doc-2"], "mime_types": ["application/pdf"]},
