@@ -25,7 +25,6 @@ from .intent import (
 from .llm import (
     OLLAMA_MODEL,
     OLLAMA_NUM_PREDICT,
-    RAG_ROUTE_SENTINEL,
     OllamaRequestError,
     query_ollama,
     rag_prompt,
@@ -34,7 +33,6 @@ from .llm import (
     response_output_penalty,
     response_retry_prompt,
     route_or_answer,
-    route_or_answer_prompt,
     select_best_writing_output,
     stream_ollama,
     writing_output_contract,
@@ -703,25 +701,6 @@ class ChatPreparation:
     sources: list[dict[str, Any]]
     debug: dict[str, Any]
     query_intent: str = "direct"
-    gateway_prompt: str | None = None
-
-
-def gateway_stream_decision(buffer: str) -> str:
-    normalized = re.sub(r"^assistant\s*", "", buffer.strip(), flags=re.IGNORECASE).strip()
-    normalized = normalized.removeprefix("```").strip()
-    upper = normalized.upper()
-    if RAG_ROUTE_SENTINEL in upper:
-        return "rag"
-    if not normalized:
-        return "pending"
-    if RAG_ROUTE_SENTINEL.startswith(upper):
-        return "pending"
-    return "direct"
-
-
-def gateway_visible_buffer(buffer: str) -> str:
-    visible = re.sub(r"^\s*assistant\s*", "", buffer, flags=re.IGNORECASE)
-    return re.sub(r"^\s*```(?:markdown|text)?\s*", "", visible, flags=re.IGNORECASE)
 
 
 def affinity_retrieval_query(req: ChatRequest, scope: DocumentScope) -> str:
@@ -767,12 +746,7 @@ def ambiguous_document_response(scope: DocumentScope) -> str:
     return f"{AMBIGUOUS_DOCUMENT_RESPONSE}\n\nCác file có thể liên quan:\n{choices}"
 
 
-async def prepare_chat(
-    req: ChatRequest,
-    *,
-    defer_gateway: bool = False,
-    gateway_result: tuple[str, str | None] | None = None,
-) -> ChatPreparation:
+async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     message = req.message.strip()
     store = get_store()
     route = "direct"
@@ -784,7 +758,6 @@ async def prepare_chat(
     writing_parent_id: str | None = None
     evidence_query: str | None = None
     direct_answer: str | None = None
-    gateway_prompt: str | None = None
     gateway_debug: dict[str, Any] = {"used": False}
 
     stats = await run_in_threadpool(store.stats)
@@ -848,8 +821,9 @@ async def prepare_chat(
             query_intent="document_no_match",
         )
 
+    probe_top_k = max(settings.rag_probe_top_k, settings.rag_top_k)
+    gateway_context = "Available uploaded documents: none"
     if stats["chunks"] > 0:
-        probe_top_k = max(settings.rag_probe_top_k, settings.rag_top_k)
         probe, catalog = await run_in_threadpool(
             store.probe_with_catalog,
             message,
@@ -864,52 +838,7 @@ async def prepare_chat(
         )
         query_intent = intent_decision.intent
         intent_debug = intent_decision.to_debug()
-
-        if (
-            query_intent != "direct"
-            or probe.get("is_overview")
-            or probe.get("top_question_score", 0.0) >= 1
-        ):
-            route = "rag"
-        else:
-            gateway_context = format_gateway_document_context(catalog, probe)
-            if gateway_result is not None:
-                route, direct_answer = gateway_result
-            elif defer_gateway:
-                route = "gateway_pending"
-                gateway_prompt = route_or_answer_prompt(
-                    message,
-                    req.conversation_history,
-                    gateway_context,
-                )
-            else:
-                route, direct_answer = await route_or_answer(
-                    message,
-                    req.conversation_history,
-                    gateway_context,
-                )
-            gateway_debug = {
-                "used": True,
-                "decision": route,
-                "returned_direct_answer": direct_answer is not None,
-                "stream_deferred": gateway_prompt is not None,
-            }
-        if route == "rag" and (query_intent in {"direct", "semantic_qa"}):
-            probe, catalog = await run_in_threadpool(
-                store.probe_with_catalog,
-                retrieval_query,
-                probe_top_k,
-                scope_ids,
-                True,
-            )
-        if route == "rag" and query_intent == "direct":
-            intent_decision = detect_query_intent_decision(
-                message,
-                probe,
-                document_grounded=True,
-            )
-            query_intent = intent_decision.intent
-            intent_debug = intent_decision.to_debug()
+        gateway_context = format_gateway_document_context(catalog, probe)
     else:
         intent_decision = detect_query_intent_decision(
             message,
@@ -918,30 +847,37 @@ async def prepare_chat(
         )
         query_intent = intent_decision.intent
         intent_debug = intent_decision.to_debug()
-        if query_intent != "direct" or scope.document_grounded:
-            route = "rag"
-        else:
-            if gateway_result is not None:
-                route, direct_answer = gateway_result
-            elif defer_gateway:
-                route = "gateway_pending"
-                gateway_prompt = route_or_answer_prompt(
-                    message,
-                    req.conversation_history,
-                    "Available uploaded documents: none",
-                )
-            else:
-                route, direct_answer = await route_or_answer(
-                    message,
-                    req.conversation_history,
-                    "Available uploaded documents: none",
-                )
-            gateway_debug = {
-                "used": True,
-                "decision": route,
-                "returned_direct_answer": direct_answer is not None,
-                "stream_deferred": gateway_prompt is not None,
-            }
+
+    if query_intent == "direct":
+        route, direct_answer = await route_or_answer(
+            message,
+            req.conversation_history,
+            gateway_context,
+        )
+        gateway_debug = {
+            "used": True,
+            "decision": route,
+            "returned_direct_answer": direct_answer is not None,
+        }
+    else:
+        route = "rag"
+
+    if stats["chunks"] > 0 and route == "rag" and query_intent in {"direct", "semantic_qa"}:
+        probe, catalog = await run_in_threadpool(
+            store.probe_with_catalog,
+            retrieval_query,
+            probe_top_k,
+            scope_ids,
+            True,
+        )
+    if route == "rag" and query_intent == "direct":
+        intent_decision = detect_query_intent_decision(
+            message,
+            probe,
+            document_grounded=True,
+        )
+        query_intent = intent_decision.intent
+        intent_debug = intent_decision.to_debug()
 
     if route == "rag":
         evidence_candidate_count = 0
@@ -1178,7 +1114,6 @@ async def prepare_chat(
         sources=[],
         debug=debug,
         query_intent=query_intent,
-        gateway_prompt=gateway_prompt,
     )
 
 
@@ -1312,76 +1247,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     async def generate():
         try:
             yield stream_event("status", message="Đang phân tích câu hỏi...")
-            prepared = await prepare_chat(req, defer_gateway=True)
-            if prepared.gateway_prompt:
-                gateway_buffer = ""
-                gateway_decision = "pending"
-                direct_stream_started = False
-                async for token in stream_ollama(prepared.gateway_prompt, temperature=0.2):
-                    if direct_stream_started:
-                        yield stream_event("token", token=token)
-                        continue
-
-                    gateway_buffer += token
-                    gateway_decision = gateway_stream_decision(gateway_buffer)
-                    if gateway_decision == "rag":
-                        break
-                    if gateway_decision == "direct":
-                        prepared.debug["route_decision"] = "direct"
-                        prepared.debug["gateway"].update(
-                            {"decision": "direct", "stream_deferred": False}
-                        )
-                        yield stream_event(
-                            "metadata",
-                            route_used="base_model",
-                            sources=[],
-                            debug=prepared.debug,
-                        )
-                        yield stream_event("token", token=gateway_visible_buffer(gateway_buffer))
-                        gateway_buffer = ""
-                        direct_stream_started = True
-
-                if direct_stream_started:
-                    yield stream_event("done")
-                    return
-
-                if gateway_decision == "pending":
-                    gateway_decision = gateway_stream_decision(gateway_buffer)
-                if gateway_decision == "direct" and gateway_buffer.strip():
-                    prepared.debug["route_decision"] = "direct"
-                    prepared.debug["gateway"].update(
-                        {"decision": "direct", "stream_deferred": False}
-                    )
-                    yield stream_event(
-                        "metadata",
-                        route_used="base_model",
-                        sources=[],
-                        debug=prepared.debug,
-                    )
-                    yield stream_event("token", token=gateway_visible_buffer(gateway_buffer))
-                    yield stream_event("done")
-                    return
-
-                if gateway_decision != "rag":
-                    gateway_answer = await query_ollama(prepared.gateway_prompt, temperature=0.2)
-                    if RAG_ROUTE_SENTINEL not in gateway_answer.upper():
-                        prepared.debug["route_decision"] = "direct"
-                        prepared.debug["gateway"].update(
-                            {"decision": "direct", "stream_deferred": False, "fallback": True}
-                        )
-                        yield stream_event(
-                            "metadata",
-                            route_used="base_model",
-                            sources=[],
-                            debug=prepared.debug,
-                        )
-                        yield stream_event("token", token=gateway_answer)
-                        yield stream_event("done")
-                        return
-                    gateway_decision = "rag"
-
-                prepared = await prepare_chat(req, gateway_result=("rag", None))
-
+            prepared = await prepare_chat(req)
             yield stream_event(
                 "metadata",
                 route_used=prepared.route_used,
