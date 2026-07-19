@@ -752,6 +752,12 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer, "Ready")
         self.assertEqual(attempts, 2)
 
+    def test_ollama_payload_disables_thinking_at_top_level(self) -> None:
+        payload = llm._ollama_payload("Say ready", False, 0.0, 32)
+
+        self.assertIs(payload["think"], False)
+        self.assertNotIn("think", payload["options"])
+
     async def test_non_stream_request_does_not_expose_thinking_as_answer(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"response": "", "thinking": "private reasoning"}, request=request)
@@ -762,6 +768,8 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
                 await llm.query_ollama("Say ready", temperature=0.0)
 
         self.assertEqual(raised.exception.kind, "empty_response")
+        self.assertEqual(raised.exception.metadata["thinking_length"], len("private reasoning"))
+        self.assertEqual(raised.exception.metadata["response_length"], 0)
 
     async def test_non_stream_error_keeps_status_and_response_body(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

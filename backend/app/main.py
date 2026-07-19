@@ -1146,7 +1146,7 @@ async def warmup() -> dict:
             response = await query_ollama(
                 "Warm up the IELTS assistant. Reply with exactly: ready",
                 temperature=0.0,
-                num_predict=8,
+                num_predict=32,
             )
             results["llm"] = {
                 "ok": True,
@@ -1155,7 +1155,11 @@ async def warmup() -> dict:
                 "sample": response[:120],
             }
         except Exception as exc:
-            results["llm"] = {"ok": False, "error": str(exc)}
+            results["llm"] = {
+                "ok": False,
+                "error": str(exc),
+                "diagnostic": ollama_failure_detail(exc).get("ollama"),
+            }
     else:
         results["llm"] = {"skipped": True}
 

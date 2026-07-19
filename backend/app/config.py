@@ -44,6 +44,7 @@ class AppSettings:
     ollama_timeout_seconds: float = field(
         default_factory=lambda: float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
     )
+    ollama_think: bool = field(default_factory=lambda: _env_bool("OLLAMA_THINK", False))
 
     embedding_model_name: str = field(
         default_factory=lambda: os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")

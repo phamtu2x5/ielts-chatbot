@@ -127,12 +127,14 @@ class OllamaRequestError(RuntimeError):
         status_code: int | None = None,
         response_body: str | None = None,
         attempts: int = 1,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.status_code = status_code
         self.response_body = response_body
         self.attempts = attempts
+        self.metadata = metadata or {}
 
     def debug_detail(self) -> dict[str, object]:
         return {
@@ -141,6 +143,7 @@ class OllamaRequestError(RuntimeError):
             "status_code": self.status_code,
             "response_body": self.response_body,
             "attempts": self.attempts,
+            "metadata": self.metadata,
         }
 
 
@@ -413,6 +416,7 @@ def _ollama_payload(
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": stream,
+        "think": settings.ollama_think,
         "options": {
             "temperature": temperature,
             "top_p": 0.9,
@@ -463,12 +467,26 @@ async def query_ollama(prompt: str, temperature: float = 0.7, num_predict: Optio
                     attempts=attempt,
                 ) from exc
 
-    text = data.get("response") or ""
-    text = clean_response(text)
+    raw_text = data.get("response") or ""
+    text = clean_response(raw_text)
     if looks_like_prompt_echo(text, prompt):
         raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt instead of answering.")
     if not text:
-        raise OllamaRequestError("empty_response", "Ollama returned an empty response.")
+        thinking = data.get("thinking") or ""
+        raise OllamaRequestError(
+            "empty_response",
+            "Ollama returned an empty visible response.",
+            metadata={
+                "response_keys": sorted(data.keys()),
+                "done": data.get("done"),
+                "done_reason": data.get("done_reason"),
+                "prompt_eval_count": data.get("prompt_eval_count"),
+                "eval_count": data.get("eval_count"),
+                "response_length": len(raw_text),
+                "thinking_length": len(thinking),
+                "think_requested": settings.ollama_think,
+            },
+        )
     return text
 
 
