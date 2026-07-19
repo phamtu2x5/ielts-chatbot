@@ -57,6 +57,7 @@ logger = logging.getLogger(__name__)
 UPLOAD_DIR = settings.upload_dir
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DOCUMENT_PROCESSOR = DocumentProcessor()
+LAST_WARMUP_STATUS: dict[str, Any] | None = None
 
 app = FastAPI(title="Standalone IELTS Chatbot", version="1.1.0")
 
@@ -134,12 +135,9 @@ def format_gateway_document_context(catalog: list[dict], probe: dict) -> str:
         + ("strong" if probe.get("has_strong_hits") else "weak_or_none")
     )
     for result in (probe.get("results") or [])[:3]:
-        preview = " ".join(
-            (result.get("display_text") or result.get("text") or "").split()
-        )[:180]
         lines.append(
             f"- {result.get('source_file', 'unknown')} | "
-            f"unit={result.get('metadata', {}).get('unit_type')} | preview={preview}"
+            f"unit={result.get('metadata', {}).get('unit_type')}"
         )
     return "\n".join(lines)
 
@@ -589,7 +587,12 @@ def static_response_for_sources(message: str, query_intent: str, sources: list[d
         return _render_writing_prompt(sources)
     if query_intent == "document_overview":
         inventory = _render_writing_inventory(sources)
-        if inventory:
+        has_non_writing_sections = any(
+            source.get("metadata", {}).get("unit_type")
+            in {"document_outline", "passage", "passage_summary", "question_group"}
+            for source in sources
+        )
+        if inventory and not has_non_writing_sections:
             return inventory
 
     if query_intent == "show_questions":
@@ -784,11 +787,12 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             message,
             probe_top_k,
             scope_ids,
+            False,
         )
         intent_decision = detect_query_intent_decision(
             message,
             probe,
-            document_grounded=False,
+            document_grounded=scope.document_grounded,
         )
         query_intent = intent_decision.intent
         intent_debug = intent_decision.to_debug()
@@ -810,6 +814,14 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 "decision": route,
                 "returned_direct_answer": direct_answer is not None,
             }
+        if route == "rag" and (query_intent in {"direct", "semantic_qa"}):
+            probe, catalog = await run_in_threadpool(
+                store.probe_with_catalog,
+                message,
+                probe_top_k,
+                scope_ids,
+                True,
+            )
         if route == "rag" and query_intent == "direct":
             intent_decision = detect_query_intent_decision(
                 message,
@@ -822,7 +834,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         intent_decision = detect_query_intent_decision(
             message,
             probe,
-            document_grounded=False,
+            document_grounded=scope.document_grounded,
         )
         query_intent = intent_decision.intent
         intent_debug = intent_decision.to_debug()
@@ -900,19 +912,24 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 scope_ids,
             )
             target_passages = {
-                source.get("metadata", {}).get("passage_number")
+                (source.get("document_id"), source.get("metadata", {}).get("passage_number"))
                 for source in sources + question_context
-                if source.get("metadata", {}).get("passage_number")
+                if source.get("document_id")
+                and source.get("metadata", {}).get("passage_number")
             }
             evidence_query = evidence_query_for_sources(sources + question_context, message)
-            evidence_candidates = await run_in_threadpool(
-                store.hybrid_search,
-                evidence_query,
-                max(settings.rag_top_k * 3, 12),
-                scope_ids,
-                ["passage"],
-                sorted(target_passages),
-            )
+            evidence_candidates = []
+            for document_id, passage_number in sorted(target_passages):
+                pair_candidates = await run_in_threadpool(
+                    store.hybrid_search,
+                    evidence_query,
+                    max(settings.rag_top_k * 3, 12),
+                    [document_id],
+                    ["passage"],
+                    [passage_number],
+                )
+                evidence_candidates.extend(pair_candidates)
+            evidence_candidates = dedupe_sources(evidence_candidates)
             evidence_candidate_count = len(evidence_candidates)
             evidence_context = evidence_candidates[:3]
             if not evidence_context:
@@ -1062,6 +1079,8 @@ async def health() -> dict:
     stats = await run_in_threadpool(get_store().stats)
     return {
         "status": "ok",
+        "runtime_status": (LAST_WARMUP_STATUS or {}).get("status", "not_warmed"),
+        "model_readiness": (LAST_WARMUP_STATUS or {}).get("components", {}),
         "document_rag_documents": stats["documents"],
         "document_rag_chunks": stats["chunks"],
         "pdf_rag_documents": stats["documents"],
@@ -1074,6 +1093,7 @@ async def health() -> dict:
 
 @app.post("/warmup")
 async def warmup() -> dict:
+    global LAST_WARMUP_STATUS
     started = time.perf_counter()
     results = {}
 
@@ -1133,8 +1153,16 @@ async def warmup() -> dict:
         results["ocr"] = {"ok": False, "error": str(exc)}
 
     ok = all(component.get("ok", True) for component in results.values())
+    status = "ok" if ok else "partial"
+    LAST_WARMUP_STATUS = {
+        "status": status,
+        "components": {
+            name: bool(result.get("ok", result.get("skipped", False)))
+            for name, result in results.items()
+        },
+    }
     return {
-        "status": "ok" if ok else "partial",
+        "status": status,
         "duration_seconds": round(time.perf_counter() - started, 2),
         "results": results,
     }
@@ -1145,19 +1173,21 @@ async def chat(req: ChatRequest) -> ChatResponse:
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung câu hỏi")
 
-    prepared = await prepare_chat(req)
-    answer = prepared.static_response
-    if answer is None and prepared.prompt is not None:
-        try:
+    try:
+        prepared = await prepare_chat(req)
+        answer = prepared.static_response
+        if answer is None and prepared.prompt is not None:
             answer = await generate_answer(prepared, req.message)
             if not answer.strip():
                 answer = generation_fallback(prepared)
-        except Exception as exc:
-            logger.exception("Chat generation failed")
-            raise HTTPException(
-                status_code=502,
-                detail=ollama_failure_detail(exc),
-            ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Chat request failed")
+        raise HTTPException(
+            status_code=502,
+            detail=ollama_failure_detail(exc),
+        ) from exc
     return ChatResponse(
         response=answer or "",
         route_used=prepared.route_used,
@@ -1329,7 +1359,12 @@ async def search(req: SearchRequest) -> SearchResponse:
     query = req.query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung tìm kiếm")
-    results = await run_in_threadpool(get_store().search, query, req.top_k)
+    results = await run_in_threadpool(
+        get_store().search,
+        query,
+        req.top_k,
+        req.document_ids,
+    )
     return SearchResponse(query=query, results=results)
 
 

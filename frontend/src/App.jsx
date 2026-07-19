@@ -22,7 +22,9 @@ const API_BASE = import.meta.env.VITE_CHATBOT_API_URL || "/api";
 const routeLabels = {
   base_model: "Model chính",
   vector_rag: "Tài liệu RAG",
+  vector_rag_static: "Tài liệu RAG",
   vector_rag_no_match: "Tài liệu RAG",
+  vector_rag_ambiguous_document: "Tài liệu RAG",
   upload: "Tài liệu",
   error: "Lỗi",
 };

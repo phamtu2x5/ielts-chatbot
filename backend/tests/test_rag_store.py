@@ -92,6 +92,76 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual(store._docs[0]["chunk_id"], "a-2")
         self.assertEqual(store._embeddings.shape, (1, 2))
 
+    def test_same_filename_documents_are_isolated_by_document_id(self) -> None:
+        store = FakeVectorStore()
+        first = self._chunk("a-1", "reading.pdf", "first")
+        first["document_id"] = "doc-a"
+        second = self._chunk("b-1", "reading.pdf", "second")
+        second["document_id"] = "doc-b"
+
+        store.upsert([first], "reading.pdf")
+        store.upsert([second], "reading.pdf")
+
+        self.assertEqual(store.stats()["documents"], 2)
+        self.assertEqual({doc["document_id"] for doc in store._docs}, {"doc-a", "doc-b"})
+        self.assertEqual(len(store.document_catalog()), 2)
+
+    def test_reupload_replaces_only_matching_document_id(self) -> None:
+        store = FakeVectorStore()
+        first = self._chunk("a-1", "reading.pdf", "first")
+        first["document_id"] = "doc-a"
+        other = self._chunk("b-1", "reading.pdf", "other")
+        other["document_id"] = "doc-b"
+        replacement = self._chunk("a-2", "reading.pdf", "replacement")
+        replacement["document_id"] = "doc-a"
+
+        store.upsert([first], "reading.pdf")
+        store.upsert([other], "reading.pdf")
+        store.upsert([replacement], "reading.pdf")
+
+        self.assertEqual({doc["chunk_id"] for doc in store._docs}, {"a-2", "b-1"})
+
+    def test_explicit_empty_document_scope_returns_no_results(self) -> None:
+        store = FakeVectorStore()
+        chunk = self._chunk("a-1", "reading.pdf", "first")
+        chunk["document_id"] = "doc-a"
+        store.upsert([chunk], "reading.pdf")
+        store.fail_embedding = True
+
+        self.assertEqual(store.search("first", document_ids=[]), [])
+        self.assertEqual(store.hybrid_search("first", document_ids=[]), [])
+        self.assertEqual(store.structured_lookup("Questions 1-4", "show_questions", document_ids=[]), [])
+        self.assertEqual(store.document_catalog(document_ids=[]), [])
+
+    def test_overview_keeps_same_passage_number_from_different_documents(self) -> None:
+        docs = []
+        for document_id in ("doc-a", "doc-b"):
+            docs.extend(
+                [
+                    {
+                        "chunk_id": f"{document_id}-outline",
+                        "document_id": document_id,
+                        "source_file": f"{document_id}.pdf",
+                        "chunk_index": len(docs),
+                        "metadata": {"unit_type": "document_outline"},
+                    },
+                    {
+                        "chunk_id": f"{document_id}-passage-1",
+                        "document_id": document_id,
+                        "source_file": f"{document_id}.pdf",
+                        "chunk_index": len(docs) + 1,
+                        "metadata": {"unit_type": "passage", "passage_number": 1},
+                    },
+                ]
+            )
+
+        hits = StructuredDocumentStore(lambda: docs).overview(top_k=4)
+
+        self.assertEqual(
+            {hit["document_id"] for hit in hits if hit["metadata"]["unit_type"] == "passage"},
+            {"doc-a", "doc-b"},
+        )
+
     def test_structured_lookup_is_owned_by_structured_store(self) -> None:
         store = FakeVectorStore()
 
@@ -205,7 +275,15 @@ class LocalVectorStoreTests(unittest.TestCase):
             ("Liệt kê Questions 28-29 cùng phần hướng dẫn và các ô trống, chưa điền đáp án.", "show_questions"),
             ("Giải thích Questions 27-32, không ghép đáp án A-H.", "explain_questions"),
             ("Từ bảng, quốc gia nào tăng nhiều nhất? Trình bày phép tính.", "table_calculation"),
+            (
+                "Quốc gia nào có mức tăng Internet Access lớn nhất từ 2019 đến 2024? Trình bày phép tính.",
+                "table_calculation",
+            ),
             ("So sánh hai chỉ số của Country A từ bảng.", "table_comparison"),
+            ("Chỉ liệt kê đáp án Questions 1-4.", "solve_questions"),
+            ("Giải thích dạng T/F/NG cho Questions 1-4.", "explain_questions"),
+            ("Tôi không xác định đáp án được, hãy trả lời Questions 1-4.", "solve_questions"),
+            ("Tóm tắt tài liệu và trả lời Question 1.", "solve_questions"),
             (
                 "Đề Writing trong ảnh yêu cầu gì? Chỉ giải thích yêu cầu, chưa viết bài.",
                 "show_writing_prompt",
@@ -219,6 +297,18 @@ class LocalVectorStoreTests(unittest.TestCase):
         for message, expected in cases:
             with self.subTest(message=message):
                 self.assertEqual(detect_query_intent(message, probe), expected)
+
+    def test_keyword_only_probe_does_not_load_embedding_model(self) -> None:
+        store = FakeVectorStore()
+        chunk = self._chunk("a-1", "reading.pdf", "That Vision Thing")
+        chunk["document_id"] = "doc-a"
+        store.upsert([chunk], "reading.pdf")
+        store.fail_embedding = True
+
+        probe = store.probe("That Vision Thing", include_dense=False)
+
+        self.assertTrue(probe["has_hits"])
+        self.assertEqual(probe["results"][0]["probe_dense_score"], 0.0)
 
     def test_structured_table_operations_return_cell_calculation_and_comparison(self) -> None:
         table = {
@@ -611,6 +701,31 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route, "rag")
         self.assertIsNone(answer)
 
+    async def test_route_or_answer_never_exposes_rag_sentinel_with_extra_text(self) -> None:
+        with patch.object(
+            llm,
+            "query_ollama",
+            AsyncMock(return_value="I should retrieve this. [[USE_RAG]]"),
+        ):
+            route, answer = await llm.route_or_answer("What does the uploaded file say?")
+
+        self.assertEqual(route, "rag")
+        self.assertIsNone(answer)
+
+    async def test_route_or_answer_retries_one_empty_gateway_response(self) -> None:
+        model = AsyncMock(
+            side_effect=[
+                llm.OllamaRequestError("empty_response", "empty"),
+                "Hello! How can I help with IELTS?",
+            ]
+        )
+        with patch.object(llm, "query_ollama", model):
+            route, answer = await llm.route_or_answer("Hello")
+
+        self.assertEqual(route, "direct")
+        self.assertEqual(answer, "Hello! How can I help with IELTS?")
+        self.assertEqual(model.await_count, 2)
+
     async def test_non_stream_request_retries_one_server_error(self) -> None:
         attempts = 0
 
@@ -627,6 +742,17 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(answer, "Ready")
         self.assertEqual(attempts, 2)
+
+    async def test_non_stream_request_does_not_expose_thinking_as_answer(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"response": "", "thinking": "private reasoning"}, request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(llm.httpx, "AsyncClient", return_value=client):
+            with self.assertRaises(llm.OllamaRequestError) as raised:
+                await llm.query_ollama("Say ready", temperature=0.0)
+
+        self.assertEqual(raised.exception.kind, "empty_response")
 
     async def test_non_stream_error_keeps_status_and_response_body(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:

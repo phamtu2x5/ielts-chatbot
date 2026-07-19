@@ -114,7 +114,20 @@ class LocalVectorStore:
         embedding_seconds = self._elapsed(embedding_started)
         with self._lock:
             merge_started = time.perf_counter()
-            keep_indices = [idx for idx, doc in enumerate(self._docs) if doc.get("source_file") != source_file]
+            incoming_document_ids = {
+                str(chunk.get("document_id"))
+                for chunk in chunks
+                if chunk.get("document_id")
+            }
+            keep_indices = [
+                idx
+                for idx, doc in enumerate(self._docs)
+                if (
+                    doc.get("document_id") not in incoming_document_ids
+                    if incoming_document_ids
+                    else doc.get("source_file") != source_file
+                )
+            ]
             kept_docs = [self._docs[idx] for idx in keep_indices]
             kept_embeddings = (
                 self._embeddings[keep_indices]
@@ -154,6 +167,8 @@ class LocalVectorStore:
         top_k: int = 5,
         document_ids: List[str] | None = None,
     ) -> List[Dict]:
+        if document_ids is not None and not document_ids:
+            return []
         if not self._docs or self._embeddings.size == 0:
             return []
 
@@ -173,6 +188,8 @@ class LocalVectorStore:
         unit_types: List[str] | None = None,
         passage_numbers: List[int] | None = None,
     ) -> List[Dict]:
+        if document_ids is not None and not document_ids:
+            return []
         if not self._docs:
             return []
 
@@ -210,7 +227,16 @@ class LocalVectorStore:
         query: str,
         top_k: int = 3,
         document_ids: List[str] | None = None,
+        include_dense: bool = True,
     ) -> Dict:
+        if document_ids is not None and not document_ids:
+            return {
+                "results": [],
+                "has_hits": False,
+                "has_strong_hits": False,
+                "has_document_intent": self._has_document_intent(query),
+                "is_overview": self._is_document_overview_query(query),
+            }
         if not self._docs:
             return {"results": [], "has_hits": False, "has_strong_hits": False}
 
@@ -247,7 +273,7 @@ class LocalVectorStore:
                 min_score=probe_min_dense,
                 document_ids=document_ids,
             )
-            if self._embeddings.size
+            if include_dense and self._embeddings.size
             else []
         )
         keyword_results = self._keyword_search(query, top_k=top_k, document_ids=document_ids)
@@ -285,8 +311,12 @@ class LocalVectorStore:
         query: str,
         top_k: int = 3,
         document_ids: List[str] | None = None,
+        include_dense: bool = True,
     ) -> tuple[Dict, List[Dict]]:
-        return self.probe(query, top_k, document_ids), self.document_catalog(document_ids)
+        return (
+            self.probe(query, top_k, document_ids, include_dense),
+            self.document_catalog(document_ids),
+        )
 
     @synchronized
     def overview(self, top_k: int = 8, document_ids: List[str] | None = None) -> List[Dict]:
@@ -423,6 +453,8 @@ class LocalVectorStore:
         unit_types: List[str] | None = None,
         passage_numbers: List[int] | None = None,
     ) -> List[int]:
+        if document_ids is not None and not document_ids:
+            return []
         allowed_documents = set(document_ids or [])
         allowed_units = set(unit_types or [])
         allowed_passages = set(passage_numbers or [])
@@ -494,6 +526,8 @@ class LocalVectorStore:
 
         header_results = []
         numeric_results = []
+        if document_ids is not None and not document_ids:
+            return []
         allowed = set(document_ids or [])
         for doc in self._docs:
             if allowed and doc.get("document_id") not in allowed:
@@ -694,7 +728,12 @@ class LocalVectorStore:
     @synchronized
     def stats(self) -> Dict:
         return {
-            "documents": len({doc.get("source_file") for doc in self._docs}),
+            "documents": len(
+                {
+                    doc.get("document_id") or doc.get("source_file")
+                    for doc in self._docs
+                }
+            ),
             "chunks": len(self._docs),
             "embedding_model": self.model_name,
         }

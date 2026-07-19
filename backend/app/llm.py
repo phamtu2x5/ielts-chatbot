@@ -463,7 +463,7 @@ async def query_ollama(prompt: str, temperature: float = 0.7, num_predict: Optio
                     attempts=attempt,
                 ) from exc
 
-    text = data.get("response") or data.get("thinking") or ""
+    text = data.get("response") or ""
     text = clean_response(text)
     if looks_like_prompt_echo(text, prompt):
         raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt instead of answering.")
@@ -561,12 +561,17 @@ async def route_or_answer(
     history: Optional[List[ChatMessage]] = None,
     document_context: str = "",
 ) -> tuple[str, str | None]:
-    response = await query_ollama(
-        route_or_answer_prompt(message, history, document_context),
-        temperature=0.2,
-    )
+    prompt = route_or_answer_prompt(message, history, document_context)
+    for attempt in range(2):
+        try:
+            response = await query_ollama(prompt, temperature=0.2)
+            break
+        except OllamaRequestError as exc:
+            if attempt == 0 and exc.kind in {"empty_response", "prompt_echo"}:
+                continue
+            raise
     normalized = re.sub(r"^assistant\s*", "", response.strip(), flags=re.IGNORECASE).strip()
-    if normalized.upper() == RAG_ROUTE_SENTINEL:
+    if RAG_ROUTE_SENTINEL in normalized.upper():
         return "rag", None
     return "direct", response
 

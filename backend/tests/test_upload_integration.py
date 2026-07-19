@@ -119,12 +119,13 @@ class _FakeChatStore:
     def __init__(self, catalog: list[dict], *, has_document_intent: bool = True) -> None:
         self.catalog = catalog
         self.has_document_intent = has_document_intent
+        self.probe_dense_flags: list[bool] = []
 
     def stats(self) -> dict:
         return {"documents": len(self.catalog), "chunks": len(self.catalog), "embedding_model": "test"}
 
     def document_catalog(self, document_ids=None) -> list[dict]:
-        if not document_ids:
+        if document_ids is None:
             return self.catalog
         allowed = set(document_ids)
         return [
@@ -133,7 +134,8 @@ class _FakeChatStore:
             if allowed.intersection(item.get("document_ids", []))
         ]
 
-    def probe_with_catalog(self, query, top_k, document_ids=None):
+    def probe_with_catalog(self, query, top_k, document_ids=None, include_dense=True):
+        self.probe_dense_flags.append(include_dense)
         return (
             {
                 "results": [],
@@ -153,6 +155,24 @@ class _FakeChatStore:
 
 
 class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chat_converts_gateway_failure_to_502(self) -> None:
+        failure = main.OllamaRequestError("empty_response", "router returned no content")
+        with patch.object(main, "prepare_chat", AsyncMock(side_effect=failure)):
+            with self.assertRaises(main.HTTPException) as raised:
+                await main.chat(main.ChatRequest(message="xin chào"))
+
+        self.assertEqual(raised.exception.status_code, 502)
+        self.assertEqual(raised.exception.detail["ollama"]["kind"], "empty_response")
+
+    async def test_chat_preserves_explicit_http_errors(self) -> None:
+        failure = main.HTTPException(status_code=409, detail="conflict")
+        with patch.object(main, "prepare_chat", AsyncMock(side_effect=failure)):
+            with self.assertRaises(main.HTTPException) as raised:
+                await main.chat(main.ChatRequest(message="xin chào"))
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail, "conflict")
+
     def test_evidence_query_prefers_child_question_and_removes_options(self) -> None:
         sources = [
             {
@@ -190,6 +210,30 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--- QUESTION 1 ---", context)
         self.assertIn("--- PASSAGE EVIDENCE 2 ---", context)
         self.assertNotIn("[Source", context)
+
+    def test_mixed_document_overview_is_not_reduced_to_writing_inventory(self) -> None:
+        sources = [
+            {
+                "document_id": "reading-doc",
+                "source_file": "reading.pdf",
+                "text": "Passage 1",
+                "metadata": {"unit_type": "passage", "passage_number": 1},
+            },
+            {
+                "document_id": "writing-doc",
+                "source_file": "writing.pdf",
+                "text": "IELTS Writing Task 1",
+                "metadata": {"unit_type": "writing_task", "section_id": "task-1-task"},
+            },
+        ]
+
+        response = main.static_response_for_sources(
+            "Tóm tắt toàn bộ tài liệu đã tải.",
+            "document_overview",
+            sources,
+        )
+
+        self.assertIsNone(response)
 
     async def test_upload_connects_processor_chunks_and_store(self) -> None:
         store = _FakeStore()
@@ -232,6 +276,29 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(prepared.prompt)
         self.assertEqual(prepared.static_response, main.NO_RAG_MATCH_RESPONSE)
 
+    async def test_explicit_document_query_bypasses_llm_gateway(self) -> None:
+        catalog = [
+            {
+                "source_file": "sample.pdf",
+                "document_ids": ["doc-1"],
+                "mime_types": ["application/pdf"],
+            }
+        ]
+        gateway = AsyncMock(return_value=("direct", "hallucinated"))
+        with (
+            patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
+            patch.object(main, "route_or_answer", gateway),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Trong tài liệu có nói gì về Mars?",
+                    document_ids=["doc-1"],
+                )
+            )
+
+        self.assertEqual(prepared.route_used, "vector_rag_no_match")
+        gateway.assert_not_awaited()
+
     async def test_general_question_without_document_scope_routes_directly(self) -> None:
         catalog = [
             {
@@ -266,6 +333,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(advice.route_used, "base_model")
         self.assertEqual(advice.query_intent, "direct")
         self.assertEqual(advice.static_response, "Three tips.")
+        self.assertEqual(store.probe_dense_flags, [False, False])
 
     async def test_gateway_can_request_rag_with_an_explicit_document_scope(self) -> None:
         catalog = [
@@ -295,6 +363,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(prepared.query_intent, "direct")
         self.assertFalse(prepared.debug["target_resolution"]["document_grounded"])
         self.assertEqual(prepared.debug["gateway"]["decision"], "rag")
+        self.assertEqual(store.probe_dense_flags, [False, True])
 
     async def test_ambiguous_question_range_requests_a_document_choice(self) -> None:
         catalog = [

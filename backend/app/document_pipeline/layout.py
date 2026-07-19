@@ -60,7 +60,7 @@ class DocLayoutDetector:
             return {"skipped": True, "engine": self.config.layout_engine}
 
         try:
-            self._get_model()
+            result = self.detect(Image.new("RGB", (64, 64), "white"))
         except Exception as exc:
             return {
                 "engine": self.config.layout_engine,
@@ -73,11 +73,19 @@ class DocLayoutDetector:
                     "device": self.config.layout_device,
                 },
             }
+        if not result.ok:
+            return {
+                "engine": self.config.layout_engine,
+                "ok": False,
+                "metadata": result.metadata,
+            }
         return {
             "engine": self.config.layout_engine,
             "ok": True,
             "metadata": {
                 "model_loaded": True,
+                "inference_ok": True,
+                "warmup_region_count": len(result.regions),
                 "model_repo": self.config.layout_model_repo,
                 "model_filename": self.config.layout_model_filename,
                 "model_path": self.config.layout_model_path or None,

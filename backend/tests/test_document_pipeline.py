@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image, ImageDraw
 
@@ -19,7 +19,7 @@ from app.document_pipeline.connectors import RasterConnectorDetector
 from app.document_pipeline.chunking import SemanticChunker
 from app.document_pipeline.extractors.text import TextExtractor
 from app.document_pipeline.ielts import IELTSStructureParser, StructuredChunker
-from app.document_pipeline.layout import DocLayoutDetector
+from app.document_pipeline.layout import DocLayoutDetector, LayoutResult
 from app.document_pipeline.models import DocumentElement, ProcessedDocument, ProcessedPage
 from app.document_pipeline.ocr import OCRProcessor, OCRResult
 from app.document_pipeline.reconciliation import NativeOCRReconciler
@@ -201,6 +201,23 @@ class OCRProcessorTests(unittest.TestCase):
 
 
 class DocLayoutDetectorTests(unittest.TestCase):
+    def test_warmup_requires_successful_inference(self) -> None:
+        config = DocumentPipelineConfig(layout_enabled=True, warmup_layout=True)
+        detector = DocLayoutDetector(config)
+        detector.detect = Mock(
+            return_value=LayoutResult(
+                engine="doclayout_yolo",
+                regions=[],
+                metadata={},
+            )
+        )
+
+        status = detector.warmup()
+
+        self.assertTrue(status["ok"])
+        self.assertTrue(status["metadata"]["inference_ok"])
+        detector.detect.assert_called_once()
+
     def test_doclayout_yolo_output_schema_is_normalized(self) -> None:
         class Boxes:
             xyxy = [[0, 0, 100, 50]]

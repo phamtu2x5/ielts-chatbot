@@ -11,13 +11,12 @@ QUESTION_RANGE_RE = re.compile(
 NO_SOLUTION_PATTERNS = [
     re.compile(r"\b(?:không|chưa)\s+(?:tự\s+)?giải(?!\s*thích)\b", re.IGNORECASE),
     re.compile(
-        r"\b(?:không|chưa)\s+(?:đưa|điền|xác\s+định)\s+(?:ra\s+)?đáp\s+án\b",
+        r"\b(?:không|chưa)\s+(?:đưa|điền)\s+(?:ra\s+)?đáp\s+án\b",
         re.IGNORECASE,
     ),
     re.compile(r"\b(?:không|chưa)\s+chọn\s+(?:\S+\s+){0,3}?đáp\s+án\b", re.IGNORECASE),
     re.compile(r"\b(?:không|chưa)\s+ghép\b", re.IGNORECASE),
     re.compile(r"\bgiữ\s+nguyên\s+ô\s+trống\b", re.IGNORECASE),
-    re.compile(r"\bchỉ\s+(?:hiển\s+thị|liệt\s+kê|trích\s+xuất)\b", re.IGNORECASE),
 ]
 
 NO_WRITING_PATTERNS = [
@@ -55,8 +54,6 @@ SOLVE_MARKERS = [
     "làm câu",
     "chọn đáp án",
     "tìm đáp án",
-    "true false not given",
-    "t/f/ng",
 ]
 
 CALCULATION_MARKERS = ["tăng nhiều nhất", "giảm nhiều nhất", "phép tính", "chênh lệch", "difference"]
@@ -170,6 +167,10 @@ def detect_query_intent_decision(
     asks_explain = any(marker in lowered for marker in ["giải thích", "explain", "phân tích"])
     asks_solve = any(marker in lowered for marker in SOLVE_MARKERS)
     is_grounded = probe.get("has_document_intent") if document_grounded is None else document_grounded
+    tabular_coordinates = len(re.findall(r"\b\d{4}\b", lowered)) >= 2 or any(
+        marker in lowered
+        for marker in ["tỷ lệ", "số liệu", "phần trăm", "percent", "country", "quốc gia"]
+    )
 
     def decision(
         intent: str,
@@ -188,16 +189,17 @@ def detect_query_intent_decision(
             visual_target=visual_target,
         )
 
-    if probe.get("is_overview") or looks_like_document_overview(message):
-        return decision("document_overview", 0.98, "overview marker or overview probe")
-
     if targets_flowchart and (asks_show or forbid_solution):
         return decision("show_flowchart", 0.98, "flowchart target with show/no-solve constraint", visual_target="flowchart")
     if targets_diagram and (asks_show or forbid_solution):
         return decision("show_diagram", 0.98, "diagram target with show/no-solve constraint", visual_target="diagram")
-    if targets_table and _has_any(lowered, CALCULATION_MARKERS):
+    if _has_any(lowered, CALCULATION_MARKERS) and (
+        targets_table or bool(is_grounded and tabular_coordinates)
+    ):
         return decision("table_calculation", 0.98, "table target with calculation operation", visual_target="table")
-    if targets_table and _has_any(lowered, COMPARISON_MARKERS):
+    if _has_any(lowered, COMPARISON_MARKERS) and (
+        targets_table or bool(is_grounded and tabular_coordinates)
+    ):
         return decision("table_comparison", 0.98, "table target with comparison operation", visual_target="table")
     if _looks_like_table_cell_lookup(lowered):
         return decision("table_cell", 0.98, "single table row/column value lookup", visual_target="table")
@@ -234,6 +236,8 @@ def detect_query_intent_decision(
         if asks_explain:
             return decision("explain_questions", 0.95, "question explanation request without solve marker")
         return decision("show_questions", 0.9, "question range defaults to show-only")
+    if probe.get("is_overview") or looks_like_document_overview(message):
+        return decision("document_overview", 0.98, "overview marker or overview probe")
     if is_grounded:
         return decision("semantic_qa", 0.85, "document-grounded semantic question", allow_solution=True)
     return decision("direct", 0.9, "question is independent from uploaded documents")

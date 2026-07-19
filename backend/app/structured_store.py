@@ -46,15 +46,16 @@ class StructuredDocumentStore:
             ]
             seen_passages = set()
             for doc in passage_docs:
+                if len(results) >= top_k:
+                    break
                 passage_number = doc.get("metadata", {}).get("passage_number")
-                if passage_number in seen_passages:
+                passage_key = (doc.get("document_id"), passage_number)
+                if passage_key in seen_passages:
                     continue
-                seen_passages.add(passage_number)
+                seen_passages.add(passage_key)
                 item = self._mark_retrieval(doc, "overview_passage", 0.8)
                 item["overview_score"] = 0.8
                 results.append(item)
-                if len(results) >= top_k:
-                    break
             return results
 
         docs = sorted(docs, key=lambda doc: (min(doc.get("pages") or [999]), doc.get("chunk_index", 0)))
@@ -122,8 +123,9 @@ class StructuredDocumentStore:
         catalog: dict[str, Dict] = {}
         for doc in self._docs_in_scope(document_ids):
             source_file = doc.get("source_file", "unknown")
+            document_id = str(doc.get("document_id") or source_file)
             entry = catalog.setdefault(
-                source_file,
+                document_id,
                 {
                     "source_file": source_file,
                     "chunks": 0,
@@ -376,8 +378,10 @@ class StructuredDocumentStore:
         return results[:top_k]
 
     def _docs_in_scope(self, document_ids: List[str] | None) -> List[Dict]:
-        if not document_ids:
+        if document_ids is None:
             return self.docs
+        if not document_ids:
+            return []
         allowed = set(document_ids)
         return [doc for doc in self.docs if doc.get("document_id") in allowed]
 
