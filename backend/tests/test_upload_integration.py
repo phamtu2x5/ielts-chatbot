@@ -442,7 +442,9 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(answer, "Đối chiếu từng phát biểu với mô tả của hai phương pháp.")
         self.assertEqual(model.await_count, 2)
-        self.assertIn("explicitly asked not to solve", model.await_args_list[1].args[0])
+        retry_prompt = model.await_args_list[1].args[0]
+        self.assertIn("Do not select, infer, eliminate, or hint", retry_prompt)
+        self.assertNotIn("24: A", retry_prompt)
 
     async def test_no_solution_matching_answer_is_rewritten(self) -> None:
         prepared = main.ChatPreparation(
@@ -491,6 +493,58 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(answer, "Đối chiếu từng phát biểu với thông tin trong passage.")
         self.assertEqual(model.await_count, 1)
+
+    async def test_translation_retries_with_language_and_range_contract(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded translation prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": False}},
+            query_intent="translate_questions",
+        )
+        translated = (
+            "25. Cơ quan nào cung cấp số liệu du lịch toàn cầu?\n"
+            "26. Ai thường được hưởng lợi về tài chính?\n"
+            "27. Cuộc họp nào cung cấp các nguyên tắc?"
+        )
+        model = AsyncMock(
+            side_effect=[
+                "25. Which body provides global tourist numbers?",
+                translated,
+            ]
+        )
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",
+            )
+
+        self.assertEqual(answer, translated)
+        self.assertEqual(model.await_count, 2)
+        self.assertEqual(prepared.debug["generation"]["final_issues"], [])
+
+    async def test_no_solution_uses_safe_fallback_when_retry_still_leaks(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded explanation prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": False}},
+            query_intent="explain_questions",
+        )
+        model = AsyncMock(side_effect=["24: A", "25: B"])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Giải thích Questions 24-27 nhưng không chọn đáp án.",
+            )
+
+        self.assertIn("chưa chọn hoặc loại trừ", answer)
+        self.assertTrue(prepared.debug["generation"]["safe_fallback_used"])
+        self.assertEqual(prepared.debug["generation"]["final_issues"], [])
 
 
 if __name__ == "__main__":

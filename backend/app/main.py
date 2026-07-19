@@ -25,12 +25,15 @@ from .intent import (
 from .llm import (
     OLLAMA_MODEL,
     OLLAMA_NUM_PREDICT,
+    OllamaRequestError,
     classify_route,
     direct_prompt,
-    likely_contains_solution,
-    no_solution_review_prompt,
     query_ollama,
     rag_prompt,
+    response_output_contract,
+    response_output_issues,
+    response_output_penalty,
+    response_retry_prompt,
     select_best_writing_output,
     stream_ollama,
     writing_output_contract,
@@ -41,6 +44,7 @@ from .llm import (
 from .rag import get_store
 from .schemas import ChatRequest, ChatResponse, SearchRequest, SearchResponse, StatsResponse, UploadResponse
 from .table_operations import (
+    comparison_row_facts,
     comparison_row,
     format_number,
     table_cell_value,
@@ -64,6 +68,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def ollama_failure_detail(exc: Exception) -> dict[str, Any]:
+    diagnostic = (
+        exc.debug_detail()
+        if isinstance(exc, OllamaRequestError)
+        else {"kind": type(exc).__name__, "message": str(exc)[:500]}
+    )
+    return {
+        "message": "Không thể kết nối hoặc nhận câu trả lời từ Ollama.",
+        "ollama": diagnostic,
+    }
 
 
 def stream_event(event_type: str, **payload: Any) -> str:
@@ -302,20 +318,61 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         else:
             generation_debug["retry_used"] = False
         generation_debug["final_issues"] = writing_output_issues(answer, contract)
-    elif (
-        has_explicit_no_solution_constraint(message)
-        and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
-        and likely_contains_solution(answer)
-    ):
-        answer = await query_ollama(
-            no_solution_review_prompt(prompt, answer),
-            temperature=0.1,
+    else:
+        allow_solution = bool(prepared.debug.get("intent_decision", {}).get("allow_solution", False))
+        contract = response_output_contract(
+            message,
+            prepared.query_intent,
+            allow_solution=allow_solution,
+            writing_context=is_writing_response(prepared),
         )
+        issues = response_output_issues(answer, contract)
+        generation_debug = prepared.debug.setdefault("generation", {})
+        generation_debug["response_contract"] = {
+            "language": contract.language,
+            "forbid_solution": contract.forbid_solution,
+            "required_question_numbers": list(contract.required_question_numbers),
+            "first_draft_issues": issues,
+        }
+        should_retry = bool(issues) and (
+            prepared.query_intent == "translate_questions"
+            or (
+                has_explicit_no_solution_constraint(message)
+                and contract.forbid_solution
+            )
+        )
+        if should_retry:
+            retry = await query_ollama(
+                response_retry_prompt(prompt, contract),
+                temperature=0.1,
+            )
+            selected = min(
+                (answer, retry),
+                key=lambda text: response_output_penalty(text, contract),
+            )
+            generation_debug["retry_used"] = True
+            generation_debug["candidate_penalties"] = {
+                "first": list(response_output_penalty(answer, contract)),
+                "retry": list(response_output_penalty(retry, contract)),
+            }
+            generation_debug["selected_candidate"] = "first" if selected == answer else "retry"
+            answer = selected
+        else:
+            generation_debug["retry_used"] = False
+        final_issues = response_output_issues(answer, contract)
+        if contract.forbid_solution and any("reveals or narrows" in issue for issue in final_issues):
+            answer = (
+                "Hãy đối chiếu từng câu với đúng đoạn liên quan, xác định từ khóa và điều kiện trong "
+                "hướng dẫn, nhưng chưa chọn hoặc loại trừ bất kỳ đáp án nào."
+            )
+            generation_debug["safe_fallback_used"] = True
+            final_issues = response_output_issues(answer, contract)
+        generation_debug["final_issues"] = final_issues
     return answer
 
 
 def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> bool:
-    return is_writing_response(prepared) or (
+    return is_writing_response(prepared) or prepared.query_intent == "translate_questions" or (
         has_explicit_no_solution_constraint(message)
         and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
     )
@@ -472,7 +529,13 @@ def _render_table_comparison(message: str, sources: list[dict[str, Any]]) -> str
     if not row:
         return None
     markdown = _markdown_table({"columns": table.get("columns") or [], "rows": [row]})
-    return f"{markdown}\n\nNguồn: {_source_label(source)}." if markdown else None
+    if not markdown:
+        return None
+    facts = comparison_row_facts(table, row)
+    comparison = "\n".join(f"- {fact}" for fact in facts)
+    if comparison:
+        return f"{markdown}\n\n{comparison}\n\nNguồn: {_source_label(source)}."
+    return f"{markdown}\n\nNguồn: {_source_label(source)}."
 
 
 def _render_writing_prompt(sources: list[dict[str, Any]]) -> str | None:
@@ -1092,7 +1155,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
             logger.exception("Chat generation failed")
             raise HTTPException(
                 status_code=502,
-                detail="Không thể kết nối hoặc nhận câu trả lời từ Ollama.",
+                detail=ollama_failure_detail(exc),
             ) from exc
     return ChatResponse(
         response=answer or "",
@@ -1150,9 +1213,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     fallback_answer = generation_fallback(prepared)
                 yield stream_event("token", token=fallback_answer)
             yield stream_event("done")
-        except Exception:
+        except Exception as exc:
             logger.exception("Streaming chat failed")
-            yield stream_event("error", message="Không thể tạo câu trả lời lúc này. Vui lòng thử lại.")
+            yield stream_event(
+                "error",
+                message="Không thể tạo câu trả lời lúc này. Vui lòng thử lại.",
+                detail=ollama_failure_detail(exc),
+            )
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 

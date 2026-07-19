@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import numpy as np
 
 
@@ -27,7 +28,7 @@ except ImportError:
     sentence_transformers_stub.SentenceTransformer = object
     sys.modules["sentence_transformers"] = sentence_transformers_stub
 
-from app import rag
+from app import llm, rag
 from app.document_scope import resolve_document_scope
 from app.intent import (
     detect_query_intent,
@@ -39,6 +40,9 @@ from app.llm import (
     likely_contains_solution,
     looks_like_prompt_echo,
     rag_prompt,
+    response_output_contract,
+    response_output_issues,
+    response_retry_prompt,
     select_best_writing_output,
     writing_output_contract,
     writing_output_issues,
@@ -47,6 +51,7 @@ from app.llm import (
 from app.structured_store import StructuredDocumentStore
 from app.table_operations import (
     comparison_row,
+    comparison_row_facts,
     table_cell_value,
     table_change_calculations,
     table_summary_facts,
@@ -479,6 +484,42 @@ class LocalVectorStoreTests(unittest.TestCase):
         second = " ".join(["word"] * 169)
         self.assertEqual(select_best_writing_output(first, second, contract), second)
 
+    def test_translation_contract_requires_vietnamese_and_all_question_numbers(self) -> None:
+        contract = response_output_contract(
+            "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",
+            "translate_questions",
+            allow_solution=False,
+        )
+
+        self.assertEqual(contract.language, "Vietnamese")
+        self.assertEqual(contract.required_question_numbers, (25, 26, 27))
+        issues = response_output_issues(
+            "25. Which body provides global tourist numbers?",
+            contract,
+        )
+        self.assertTrue(any("not written in Vietnamese" in issue for issue in issues))
+        self.assertTrue(any("26, 27" in issue for issue in issues))
+        retry_prompt = response_retry_prompt("original context", contract)
+        self.assertIn("Output language: Vietnamese", retry_prompt)
+        self.assertNotIn("Which body", retry_prompt)
+
+    def test_comparison_facts_describe_changes_instead_of_only_reprinting_row(self) -> None:
+        table = {
+            "columns": [
+                "Country",
+                "Internet Access 2019 (%)",
+                "Internet Access 2024 (%)",
+                "Smartphone Ownership 2019 (%)",
+                "Smartphone Ownership 2024 (%)",
+            ],
+            "rows": [["A", 78, 96, 82, 99]],
+        }
+
+        facts = comparison_row_facts(table, table["rows"][0])
+
+        self.assertIn("Internet Access: 78 (2019) → 96 (2024), tăng 18.", facts)
+        self.assertIn("Smartphone Ownership: 82 (2019) → 99 (2024), tăng 17.", facts)
+
     def test_solve_prompt_requires_explicit_evidence_relationship(self) -> None:
         prompt = rag_prompt(
             "Trả lời Questions 1-4.",
@@ -538,6 +579,39 @@ class LocalVectorStoreTests(unittest.TestCase):
             "pages": [1],
             "metadata": {},
         }
+
+
+class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_stream_request_retries_one_server_error(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(503, text="model busy", request=request)
+            return httpx.Response(200, json={"response": "Ready"}, request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(llm.httpx, "AsyncClient", return_value=client):
+            answer = await llm.query_ollama("Say ready", temperature=0.0)
+
+        self.assertEqual(answer, "Ready")
+        self.assertEqual(attempts, 2)
+
+    async def test_non_stream_error_keeps_status_and_response_body(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, text="model unavailable", request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(llm.httpx, "AsyncClient", return_value=client):
+            with self.assertRaises(llm.OllamaRequestError) as raised:
+                await llm.query_ollama("Say ready", temperature=0.0)
+
+        detail = raised.exception.debug_detail()
+        self.assertEqual(detail["status_code"], 503)
+        self.assertEqual(detail["response_body"], "model unavailable")
+        self.assertEqual(detail["attempts"], 2)
 
 
 if __name__ == "__main__":

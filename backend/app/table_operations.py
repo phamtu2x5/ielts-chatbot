@@ -109,6 +109,41 @@ def comparison_row(message: str, table: dict[str, Any]) -> list[Any] | None:
     return max(matching, key=lambda row: row_match_score(message, row[0])) if matching else None
 
 
+def comparison_row_facts(table: dict[str, Any], row: list[Any]) -> list[str]:
+    columns = table.get("columns") or []
+    if len(columns) < 3 or len(row) < 3:
+        return []
+
+    metric_columns: dict[str, list[tuple[int, int, str]]] = {}
+    for index, column in enumerate(columns[1:], 1):
+        label = str(column)
+        year_match = re.search(r"\b(\d{4})\b", label)
+        metric = _metric_key(label)
+        if year_match and metric:
+            metric_columns.setdefault(metric, []).append((int(year_match.group(1)), index, label))
+
+    facts: list[str] = []
+    for entries in metric_columns.values():
+        if len(entries) < 2:
+            continue
+        first_year, first_index, first_label = min(entries)
+        last_year, last_index, _ = max(entries)
+        if len(row) <= max(first_index, last_index) or first_year == last_year:
+            continue
+        first = numeric_value(row[first_index])
+        last = numeric_value(row[last_index])
+        if first is None or last is None:
+            continue
+        change = last - first
+        direction = "tăng" if change >= 0 else "giảm"
+        metric_label = re.sub(r"\s+\d{4}\b.*$", "", first_label).strip() or first_label
+        facts.append(
+            f"{metric_label}: {format_number(first)} ({first_year}) → {format_number(last)} "
+            f"({last_year}), {direction} {format_number(abs(change))}."
+        )
+    return facts
+
+
 def table_summary_facts(table: dict[str, Any]) -> list[str]:
     columns = table.get("columns") or []
     rows = [row for row in table.get("rows") or [] if isinstance(row, list) and row]

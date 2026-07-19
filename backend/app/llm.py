@@ -49,6 +49,18 @@ WRITING_META_RE = re.compile(
     r"(?:word\s+count|số\s+từ)\s*[:=-])",
     re.IGNORECASE,
 )
+EXPLICIT_ENGLISH_RE = re.compile(
+    r"(?:bằng|sang|viết|trả\s+lời)\s+(?:ra\s+)?tiếng\s+anh|in\s+english|translate\s+(?:it\s+)?(?:into|to)\s+english",
+    re.IGNORECASE,
+)
+EXPLICIT_VIETNAMESE_RE = re.compile(
+    r"(?:bằng|sang|viết|trả\s+lời|dịch)\s+(?:ra\s+)?tiếng\s+việt|in\s+vietnamese|translate\s+(?:it\s+)?(?:into|to)\s+vietnamese",
+    re.IGNORECASE,
+)
+QUESTION_RANGE_RE = re.compile(
+    r"\b(?:questions?|câu(?:\s+hỏi)?)\s*(\d{1,3})\s*(?:-|\u2013|\u2014|to|đến|tới)\s*(\d{1,3})\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +76,9 @@ class WritingOutputContract:
         lines = [f"- Output language: {self.language}."]
         if self.min_words is not None and self.max_words is not None:
             lines.append(f"- Required length: {self.min_words}-{self.max_words} words.")
+            lines.append(
+                "- Silently verify the final word count before returning; do not stop below the minimum or exceed the maximum."
+            )
         if self.target_words is not None:
             lines.append(
                 f"- Aim for {self.target_words[0]}-{self.target_words[1]} words so the final response stays safely within the required range."
@@ -79,6 +94,53 @@ class WritingOutputContract:
             ]
         )
         return lines
+
+
+@dataclass(frozen=True)
+class ResponseOutputContract:
+    language: str | None
+    forbid_solution: bool
+    required_question_numbers: tuple[int, ...] = ()
+
+    def prompt_lines(self) -> list[str]:
+        lines: list[str] = []
+        if self.language:
+            lines.append(f"- Output language: {self.language}.")
+        if self.required_question_numbers:
+            numbers = ", ".join(str(number) for number in self.required_question_numbers)
+            lines.append(f"- Preserve and answer every requested question number: {numbers}.")
+        if self.forbid_solution:
+            lines.append(
+                "- Do not select, infer, eliminate, or hint at any answer. Explain or translate only."
+            )
+        lines.append("- Return only the requested content, without a generic introduction or invitation.")
+        return lines
+
+
+class OllamaRequestError(RuntimeError):
+    def __init__(
+        self,
+        kind: str,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_body: str | None = None,
+        attempts: int = 1,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.status_code = status_code
+        self.response_body = response_body
+        self.attempts = attempts
+
+    def debug_detail(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "message": str(self),
+            "status_code": self.status_code,
+            "response_body": self.response_body,
+            "attempts": self.attempts,
+        }
 
 
 def format_history(history: Optional[List[ChatMessage]]) -> str:
@@ -136,6 +198,89 @@ def writing_output_contract(message: str) -> WritingOutputContract:
         target_words=target_words,
         single_paragraph=single_paragraph,
         overview_only=overview_only,
+    )
+
+
+def response_output_contract(
+    message: str,
+    query_intent: str,
+    *,
+    allow_solution: bool,
+    writing_context: bool = False,
+) -> ResponseOutputContract:
+    if query_intent == "translate_questions":
+        language = "English" if EXPLICIT_ENGLISH_RE.search(message) else "Vietnamese"
+    elif writing_context:
+        language = writing_output_contract(message).language
+    elif EXPLICIT_ENGLISH_RE.search(message):
+        language = "English"
+    elif EXPLICIT_VIETNAMESE_RE.search(message) or VIETNAMESE_CHARACTER_RE.search(message):
+        language = "Vietnamese"
+    else:
+        language = "English"
+
+    required_numbers: tuple[int, ...] = ()
+    if query_intent == "translate_questions":
+        match = QUESTION_RANGE_RE.search(message)
+        if match:
+            start, end = int(match.group(1)), int(match.group(2))
+            if start <= end and end - start <= 100:
+                required_numbers = tuple(range(start, end + 1))
+
+    return ResponseOutputContract(
+        language=language,
+        forbid_solution=not allow_solution
+        and query_intent in {"show_questions", "translate_questions", "explain_questions"},
+        required_question_numbers=required_numbers,
+    )
+
+
+def response_output_issues(text: str, contract: ResponseOutputContract) -> list[str]:
+    issues: list[str] = []
+    letters = re.findall(r"[^\W\d_]", text, flags=re.UNICODE)
+    vietnamese_characters = VIETNAMESE_CHARACTER_RE.findall(text)
+    if (
+        contract.language == "English"
+        and len(vietnamese_characters) >= 5
+        and len(vietnamese_characters) / max(1, len(letters)) >= 0.02
+    ):
+        issues.append("The response is not written in English.")
+    if contract.language == "Vietnamese" and len(vietnamese_characters) < 2:
+        issues.append("The response is not written in Vietnamese.")
+    if contract.forbid_solution and likely_contains_solution(text):
+        issues.append("The response reveals or narrows an answer despite the no-solution constraint.")
+    if contract.required_question_numbers:
+        present = {
+            int(value)
+            for value in re.findall(
+                r"(?im)^\s*(?:câu(?:\s+hỏi)?\s*)?(\d{1,3})\s*[.):]",
+                text,
+            )
+        }
+        missing = [number for number in contract.required_question_numbers if number not in present]
+        if missing:
+            issues.append(f"The response is missing question numbers: {missing}.")
+    return issues
+
+
+def response_retry_prompt(original_prompt: str, contract: ResponseOutputContract) -> str:
+    contract_text = "\n".join(contract.prompt_lines())
+    return f"""{original_prompt}
+
+Generate a fresh response from the original study material context. Do not refer to an earlier draft, validation, or correction.
+
+Final output contract:
+{contract_text}
+
+Begin the final response now."""
+
+
+def response_output_penalty(text: str, contract: ResponseOutputContract) -> tuple[int, int, int]:
+    issues = response_output_issues(text, contract)
+    return (
+        int(any("reveals or narrows" in issue for issue in issues)),
+        int(any("not written in" in issue for issue in issues)),
+        len(issues),
     )
 
 
@@ -215,19 +360,6 @@ def select_best_writing_output(
     return min((first, second), key=lambda text: writing_output_penalty(text, contract))
 
 
-def no_solution_review_prompt(original_prompt: str, draft: str) -> str:
-    return f"""{original_prompt}
-
-The user explicitly asked not to solve or select answers.
-Rewrite the candidate response so it only explains the instructions, question format, vocabulary, or solving strategy.
-Remove answer mappings, selected labels, inferred answers, eliminations, and hints that narrow a question to particular options.
-Keep useful question statements or option text only when needed to explain the format.
-Return only the revised response.
-
-Candidate response:
-{draft}"""
-
-
 def likely_contains_solution(text: str) -> bool:
     lowered = text.lower()
     if any(marker in lowered for marker in ["đáp án là", "đáp án đúng", "answer is", "correct answer"]):
@@ -294,17 +426,48 @@ def _ollama_payload(
 async def query_ollama(prompt: str, temperature: float = 0.7, num_predict: Optional[int] = None) -> str:
     payload = _ollama_payload(prompt, stream=False, temperature=temperature, num_predict=num_predict)
 
+    data: dict = {}
     async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
-        response = await client.post(OLLAMA_API_URL, json=payload)
-        response.raise_for_status()
-        data = response.json()
+        for attempt in range(1, 3):
+            try:
+                response = await client.post(OLLAMA_API_URL, json=payload)
+                response.raise_for_status()
+                data = response.json()
+                break
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                body = exc.response.text[:500] or None
+                if status_code >= 500 and attempt == 1:
+                    continue
+                raise OllamaRequestError(
+                    "http_status",
+                    f"Ollama returned HTTP {status_code}.",
+                    status_code=status_code,
+                    response_body=body,
+                    attempts=attempt,
+                ) from exc
+            except httpx.RequestError as exc:
+                if attempt == 1:
+                    continue
+                raise OllamaRequestError(
+                    "transport",
+                    f"{type(exc).__name__}: {exc}",
+                    attempts=attempt,
+                ) from exc
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise OllamaRequestError(
+                    "invalid_json",
+                    f"Ollama returned invalid JSON: {exc}",
+                    response_body=response.text[:500] or None,
+                    attempts=attempt,
+                ) from exc
 
     text = data.get("response") or data.get("thinking") or ""
     text = clean_response(text)
     if looks_like_prompt_echo(text, prompt):
-        return ""
+        raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt instead of answering.")
     if not text:
-        return "Mình sẵn sàng hỗ trợ bạn luyện IELTS. Bạn có thể hỏi cụ thể về Reading, Listening, Writing hoặc Speaking nhé."
+        raise OllamaRequestError("empty_response", "Ollama returned an empty response.")
     return text
 
 
@@ -319,37 +482,50 @@ async def stream_ollama(
     guard_released = False
 
     async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
-        async with client.stream("POST", OLLAMA_API_URL, json=payload) as response:
-            response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
-                data = json.loads(line)
-                if data.get("error"):
-                    raise RuntimeError(str(data["error"]))
-                token = data.get("response") or data.get("message", {}).get("content") or ""
-                token = re.sub(r"<br\s*/?>", "\n", token, flags=re.IGNORECASE)
-                token = DECORATIVE_ICON_RE.sub("", token)
-                if not token:
-                    continue
+        try:
+            stream_context = client.stream("POST", OLLAMA_API_URL, json=payload)
+            async with stream_context as response:
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    body = (await response.aread()).decode(errors="replace")[:500] or None
+                    raise OllamaRequestError(
+                        "http_status",
+                        f"Ollama returned HTTP {response.status_code} while streaming.",
+                        status_code=response.status_code,
+                        response_body=body,
+                    ) from exc
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("error"):
+                        raise OllamaRequestError("stream_error", str(data["error"]))
+                    token = data.get("response") or data.get("message", {}).get("content") or ""
+                    token = re.sub(r"<br\s*/?>", "\n", token, flags=re.IGNORECASE)
+                    token = DECORATIVE_ICON_RE.sub("", token)
+                    if not token:
+                        continue
 
-                if guard_released:
-                    yield token
-                    continue
+                    if guard_released:
+                        yield token
+                        continue
 
-                guard_buffer += token
-                buffer_prefix = " ".join(guard_buffer.split()).lower()
-                if looks_like_prompt_echo(guard_buffer, prompt):
-                    return
-                if buffer_prefix and not prompt_prefix.startswith(buffer_prefix):
-                    guard_released = True
+                    guard_buffer += token
+                    buffer_prefix = " ".join(guard_buffer.split()).lower()
+                    if looks_like_prompt_echo(guard_buffer, prompt):
+                        raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt while streaming.")
+                    if buffer_prefix and not prompt_prefix.startswith(buffer_prefix):
+                        guard_released = True
+                        yield guard_buffer
+                        guard_buffer = ""
+                    elif len(buffer_prefix) >= 220:
+                        raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt while streaming.")
+
+                if guard_buffer and not looks_like_prompt_echo(guard_buffer, prompt):
                     yield guard_buffer
-                    guard_buffer = ""
-                elif len(buffer_prefix) >= 220:
-                    return
-
-            if guard_buffer and not looks_like_prompt_echo(guard_buffer, prompt):
-                yield guard_buffer
+        except httpx.RequestError as exc:
+            raise OllamaRequestError("transport", f"{type(exc).__name__}: {exc}") from exc
 
 
 def direct_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
@@ -535,5 +711,12 @@ def rag_prompt(
         parts.append("Final output contract:\n" + "\n".join(contract.prompt_lines()))
         parts.append("Begin the final Writing response immediately. Output nothing before or after it.")
     else:
+        contract = response_output_contract(
+            message,
+            query_intent,
+            allow_solution=allow_solution,
+            writing_context=writing_context,
+        )
+        parts.append("Final output contract:\n" + "\n".join(contract.prompt_lines()))
         parts.append("Answer naturally and clearly, but stay strictly grounded in the provided context.")
     return "\n\n".join(parts)
