@@ -65,6 +65,43 @@ function downloadJson(filename, data) {
   URL.revokeObjectURL(url);
 }
 
+function affinityFromMetadata(eventData) {
+  if (!eventData.route_used?.startsWith("vector_rag")) return null;
+
+  const sources = eventData.sources || [];
+  const resolvedIds = eventData.debug?.target_resolution?.resolved_document_ids || [];
+  const documentIds = [
+    ...new Set([
+      ...sources.map((source) => source.document_id).filter(Boolean),
+      ...resolvedIds,
+    ]),
+  ];
+  if (!documentIds.length) return null;
+
+  const passageNumbers = [
+    ...new Set(
+      sources
+        .map((source) => source.metadata?.passage_number)
+        .filter((value) => Number.isInteger(value))
+    ),
+  ];
+  const questionRanges = [];
+  const seenRanges = new Set();
+  for (const source of sources) {
+    const range = source.metadata?.question_range;
+    if (!Array.isArray(range) || range.length !== 2) continue;
+    const key = `${range[0]}-${range[1]}`;
+    if (seenRanges.has(key)) continue;
+    seenRanges.add(key);
+    questionRanges.push(range);
+  }
+  return {
+    document_ids: documentIds,
+    passage_numbers: passageNumbers,
+    question_ranges: questionRanges,
+  };
+}
+
 function MessageContent({ message }) {
   const content = message.content || "";
 
@@ -226,6 +263,7 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [pendingFiles, setPendingFiles] = useState([]);
   const [activeDocumentIds, setActiveDocumentIds] = useState([]);
+  const [conversationAffinity, setConversationAffinity] = useState(null);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
   const hasStreamingAssistant = messages.some((message) => message.streaming);
@@ -396,6 +434,15 @@ function App() {
           setActiveDocumentIds((current) => [
             ...new Set([...current, ...uploadedFiles.map((data) => data.document_id)]),
           ]);
+          setConversationAffinity(
+            uploadedFiles.length === 1
+              ? {
+                  document_ids: [uploadedFiles[0].document_id],
+                  passage_numbers: [],
+                  question_ranges: [],
+                }
+              : null
+          );
         }
         setMessages((current) =>
           current.map((message) =>
@@ -460,6 +507,7 @@ function App() {
           document_ids: uploadedFiles.length
             ? uploadedFiles.map((data) => data.document_id)
             : activeDocumentIds,
+          affinity: uploadedFiles.length ? null : conversationAffinity,
         }),
       });
       if (!response.ok || !response.body) {
@@ -493,6 +541,8 @@ function App() {
               )
             );
           } else if (eventData.type === "metadata") {
+            const nextAffinity = affinityFromMetadata(eventData);
+            if (nextAffinity) setConversationAffinity(nextAffinity);
             setMessages((current) =>
               current.map((message) =>
                 message.id === assistantId

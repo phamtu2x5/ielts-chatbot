@@ -175,6 +175,40 @@ def resolve_document_scope(
     )
 
 
+def apply_document_affinity(
+    scope: DocumentScope,
+    catalog: list[dict[str, Any]],
+    affinity_document_ids: list[str] | None,
+) -> DocumentScope:
+    """Use client-carried conversation context only when this query did not select a document."""
+    if scope.method not in {"ambiguous", "unresolved"} or not affinity_document_ids:
+        return scope
+
+    allowed_affinity = [
+        document_id
+        for document_id in dict.fromkeys(affinity_document_ids)
+        if document_id in scope.allowed_document_ids
+    ]
+    if len(allowed_affinity) != 1:
+        return scope
+
+    matched_files = [
+        item.get("source_file", "unknown")
+        for item in catalog
+        if any(document_id in allowed_affinity for document_id in item.get("document_ids", []))
+    ]
+    return DocumentScope(
+        requested_document_ids=scope.requested_document_ids,
+        allowed_document_ids=scope.allowed_document_ids,
+        resolved_document_ids=allowed_affinity,
+        matched_files=matched_files,
+        method="conversation_affinity",
+        ambiguous=False,
+        document_grounded=scope.document_grounded,
+        reason="The current query did not select a document, so the previous turn's document scope was reused.",
+    )
+
+
 def _filename_match_score(normalized_query: str, source_file: str) -> float:
     stem = normalize_reference(Path(source_file).stem)
     if not stem:

@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import types
@@ -120,6 +121,8 @@ class _FakeChatStore:
         self.catalog = catalog
         self.has_document_intent = has_document_intent
         self.probe_dense_flags: list[bool] = []
+        self.probe_queries: list[str] = []
+        self.probe_document_ids: list[list[str] | None] = []
 
     def stats(self) -> dict:
         return {"documents": len(self.catalog), "chunks": len(self.catalog), "embedding_model": "test"}
@@ -136,6 +139,8 @@ class _FakeChatStore:
 
     def probe_with_catalog(self, query, top_k, document_ids=None, include_dense=True):
         self.probe_dense_flags.append(include_dense)
+        self.probe_queries.append(query)
+        self.probe_document_ids.append(document_ids)
         return (
             {
                 "results": [],
@@ -155,6 +160,78 @@ class _FakeChatStore:
 
 
 class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    def test_gateway_stream_decision_holds_only_the_rag_sentinel_prefix(self) -> None:
+        self.assertEqual(main.gateway_stream_decision("["), "pending")
+        self.assertEqual(main.gateway_stream_decision("[[USE_"), "pending")
+        self.assertEqual(main.gateway_stream_decision("[[USE_RAG]]"), "rag")
+        self.assertEqual(main.gateway_stream_decision("Chào"), "direct")
+        self.assertEqual(main.gateway_visible_buffer("assistant\nChào bạn"), "Chào bạn")
+
+    async def test_direct_gateway_response_is_forwarded_as_live_stream_tokens(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt=None,
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"gateway": {"used": True, "decision": "gateway_pending"}},
+            gateway_prompt="gateway prompt",
+        )
+
+        async def fake_stream(*args, **kwargs):
+            yield "Xin "
+            yield "chào"
+
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "stream_ollama", fake_stream),
+        ):
+            response = await main.chat_stream(main.ChatRequest(message="xin chào"))
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        token_events = [event["token"] for event in events if event["type"] == "token"]
+        self.assertEqual(token_events, ["Xin ", "chào"])
+        self.assertEqual(
+            next(event for event in events if event["type"] == "metadata")["route_used"],
+            "base_model",
+        )
+
+    async def test_streamed_rag_sentinel_is_not_exposed_to_the_user(self) -> None:
+        pending = main.ChatPreparation(
+            prompt=None,
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"gateway": {"used": True, "decision": "gateway_pending"}},
+            gateway_prompt="gateway prompt",
+        )
+        grounded = main.ChatPreparation(
+            prompt=None,
+            static_response="Grounded answer",
+            route_used="vector_rag_static",
+            sources=[{"document_id": "doc-1"}],
+            debug={"gateway": {"used": True, "decision": "rag"}},
+            query_intent="show_questions",
+        )
+
+        async def fake_stream(*args, **kwargs):
+            yield "[[USE_"
+            yield "RAG]]"
+
+        prepare = AsyncMock(side_effect=[pending, grounded])
+        with (
+            patch.object(main, "prepare_chat", prepare),
+            patch.object(main, "stream_ollama", fake_stream),
+        ):
+            response = await main.chat_stream(main.ChatRequest(message="Question 1 là gì?"))
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        self.assertEqual(
+            [event["token"] for event in events if event["type"] == "token"],
+            ["Grounded answer"],
+        )
+        self.assertEqual(prepare.await_count, 2)
+        self.assertEqual(prepare.await_args_list[1].kwargs["gateway_result"], ("rag", None))
+
     async def test_chat_converts_gateway_failure_to_502(self) -> None:
         failure = main.OllamaRequestError("empty_response", "router returned no content")
         with patch.object(main, "prepare_chat", AsyncMock(side_effect=failure)):
@@ -334,6 +411,85 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(advice.query_intent, "direct")
         self.assertEqual(advice.static_response, "Three tips.")
         self.assertEqual(store.probe_dense_flags, [False, False])
+
+    async def test_stream_preparation_defers_gateway_generation(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-1"],
+                "mime_types": ["application/pdf"],
+            }
+        ]
+        gateway = AsyncMock(return_value=("direct", "This should not be called."))
+        with (
+            patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
+            patch.object(main, "route_or_answer", gateway),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(message="Give me one IELTS Speaking tip.", document_ids=["doc-1"]),
+                defer_gateway=True,
+            )
+
+        gateway.assert_not_awaited()
+        self.assertIsNotNone(prepared.gateway_prompt)
+        self.assertIsNone(prepared.static_response)
+        self.assertEqual(prepared.route_used, "base_model")
+
+    async def test_follow_up_affinity_limits_retrieval_to_previous_document(self) -> None:
+        catalog = [
+            {"source_file": "reading-2.pdf", "document_ids": ["doc-2"], "mime_types": ["application/pdf"]},
+            {"source_file": "reading-4.pdf", "document_ids": ["doc-4"], "mime_types": ["application/pdf"]},
+        ]
+        store = _FakeChatStore(catalog, has_document_intent=False)
+        prepared = None
+        with patch.object(main, "get_store", return_value=store):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Tại sao?",
+                    conversation_history=[
+                        {"role": "user", "content": "Trả lời Question 4 trong Reading Test 2"}
+                    ],
+                    document_ids=["doc-2", "doc-4"],
+                    affinity={
+                        "document_ids": ["doc-2"],
+                        "passage_numbers": [1],
+                        "question_ranges": [[1, 4]],
+                    },
+                ),
+                gateway_result=("rag", None),
+            )
+
+        self.assertEqual(prepared.debug["target_resolution"]["method"], "conversation_affinity")
+        self.assertTrue(all(ids == ["doc-2"] for ids in store.probe_document_ids))
+        self.assertEqual(store.probe_queries[0], "Tại sao?")
+        self.assertTrue(any("Trả lời Question 4" in query for query in store.probe_queries[1:]))
+        self.assertTrue(any("Follow-up: Tại sao?" in query for query in store.probe_queries[1:]))
+
+    async def test_affinity_does_not_turn_a_new_direct_question_into_rag(self) -> None:
+        catalog = [
+            {"source_file": "reading-2.pdf", "document_ids": ["doc-2"], "mime_types": ["application/pdf"]},
+            {"source_file": "reading-4.pdf", "document_ids": ["doc-4"], "mime_types": ["application/pdf"]},
+        ]
+        store = _FakeChatStore(catalog, has_document_intent=False)
+        gateway = AsyncMock(return_value=("direct", "Three concise tips."))
+        with (
+            patch.object(main, "get_store", return_value=store),
+            patch.object(main, "route_or_answer", gateway),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Give me three IELTS Speaking tips.",
+                    conversation_history=[
+                        {"role": "user", "content": "Trả lời Question 4 trong Reading Test 2"}
+                    ],
+                    document_ids=["doc-2", "doc-4"],
+                    affinity={"document_ids": ["doc-2"]},
+                )
+            )
+
+        self.assertEqual(prepared.route_used, "base_model")
+        self.assertEqual(prepared.static_response, "Three concise tips.")
+        self.assertEqual(store.probe_queries, ["Give me three IELTS Speaking tips."])
 
     async def test_gateway_can_request_rag_with_an_explicit_document_scope(self) -> None:
         catalog = [

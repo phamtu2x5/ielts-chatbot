@@ -29,7 +29,7 @@ except ImportError:
     sys.modules["sentence_transformers"] = sentence_transformers_stub
 
 from app import llm, rag
-from app.document_scope import resolve_document_scope
+from app.document_scope import apply_document_affinity, resolve_document_scope
 from app.intent import (
     detect_query_intent,
     filter_sources_for_intent,
@@ -373,6 +373,15 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual(resolved.resolved_document_ids, ["doc-2"])
         self.assertFalse(resolved.ambiguous)
         self.assertTrue(ambiguous.ambiguous)
+
+        affinity_scope = apply_document_affinity(ambiguous, catalog, ["doc-2"])
+        self.assertEqual(affinity_scope.resolved_document_ids, ["doc-2"])
+        self.assertEqual(affinity_scope.method, "conversation_affinity")
+        self.assertFalse(affinity_scope.ambiguous)
+
+        explicit_scope = apply_document_affinity(resolved, catalog, ["doc-4"])
+        self.assertEqual(explicit_scope.resolved_document_ids, ["doc-2"])
+        self.assertEqual(explicit_scope.method, "catalog_reference")
 
     def test_explicit_document_scope_only_limits_allowed_documents(self) -> None:
         catalog = [

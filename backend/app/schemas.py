@@ -8,10 +8,17 @@ class ChatMessage(BaseModel):
     content: str = Field(min_length=1, max_length=20_000)
 
 
+class ChatAffinity(BaseModel):
+    document_ids: List[str] = Field(default_factory=list, max_length=50)
+    passage_numbers: List[int] = Field(default_factory=list, max_length=20)
+    question_ranges: List[List[int]] = Field(default_factory=list, max_length=20)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8_000)
     conversation_history: Optional[List[ChatMessage]] = Field(default=None, max_length=20)
     document_ids: Optional[List[str]] = Field(default=None, max_length=50)
+    affinity: Optional[ChatAffinity] = None
 
 
 class ChatResponse(BaseModel):

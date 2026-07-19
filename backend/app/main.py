@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from .config import settings
-from .document_scope import DocumentScope, resolve_document_scope
+from .document_scope import DocumentScope, apply_document_affinity, resolve_document_scope
 from .document_pipeline import DocumentProcessor
 from .intent import (
     dedupe_sources,
@@ -25,6 +25,7 @@ from .intent import (
 from .llm import (
     OLLAMA_MODEL,
     OLLAMA_NUM_PREDICT,
+    RAG_ROUTE_SENTINEL,
     OllamaRequestError,
     query_ollama,
     rag_prompt,
@@ -33,6 +34,7 @@ from .llm import (
     response_output_penalty,
     response_retry_prompt,
     route_or_answer,
+    route_or_answer_prompt,
     select_best_writing_output,
     stream_ollama,
     writing_output_contract,
@@ -701,6 +703,60 @@ class ChatPreparation:
     sources: list[dict[str, Any]]
     debug: dict[str, Any]
     query_intent: str = "direct"
+    gateway_prompt: str | None = None
+
+
+def gateway_stream_decision(buffer: str) -> str:
+    normalized = re.sub(r"^assistant\s*", "", buffer.strip(), flags=re.IGNORECASE).strip()
+    normalized = normalized.removeprefix("```").strip()
+    upper = normalized.upper()
+    if RAG_ROUTE_SENTINEL in upper:
+        return "rag"
+    if not normalized:
+        return "pending"
+    if RAG_ROUTE_SENTINEL.startswith(upper):
+        return "pending"
+    return "direct"
+
+
+def gateway_visible_buffer(buffer: str) -> str:
+    visible = re.sub(r"^\s*assistant\s*", "", buffer, flags=re.IGNORECASE)
+    return re.sub(r"^\s*```(?:markdown|text)?\s*", "", visible, flags=re.IGNORECASE)
+
+
+def affinity_retrieval_query(req: ChatRequest, scope: DocumentScope) -> str:
+    message = req.message.strip()
+    if scope.method != "conversation_affinity" or not req.conversation_history:
+        return message
+
+    previous_user_message = next(
+        (
+            item.content.strip()
+            for item in reversed(req.conversation_history)
+            if item.role == "user" and item.content.strip()
+        ),
+        "",
+    )
+    if not previous_user_message:
+        return message
+
+    affinity_hints: list[str] = []
+    if req.affinity:
+        if req.affinity.passage_numbers:
+            affinity_hints.append(
+                "Passages: " + ", ".join(str(value) for value in req.affinity.passage_numbers)
+            )
+        if req.affinity.question_ranges:
+            affinity_hints.append(
+                "Question ranges: "
+                + ", ".join(
+                    f"{values[0]}-{values[1]}"
+                    for values in req.affinity.question_ranges
+                    if len(values) == 2
+                )
+            )
+    suffix = f"\n{' | '.join(affinity_hints)}" if affinity_hints else ""
+    return f"{previous_user_message}\nFollow-up: {message}{suffix}"
 
 
 def ambiguous_document_response(scope: DocumentScope) -> str:
@@ -711,7 +767,12 @@ def ambiguous_document_response(scope: DocumentScope) -> str:
     return f"{AMBIGUOUS_DOCUMENT_RESPONSE}\n\nCác file có thể liên quan:\n{choices}"
 
 
-async def prepare_chat(req: ChatRequest) -> ChatPreparation:
+async def prepare_chat(
+    req: ChatRequest,
+    *,
+    defer_gateway: bool = False,
+    gateway_result: tuple[str, str | None] | None = None,
+) -> ChatPreparation:
     message = req.message.strip()
     store = get_store()
     route = "direct"
@@ -723,12 +784,19 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     writing_parent_id: str | None = None
     evidence_query: str | None = None
     direct_answer: str | None = None
+    gateway_prompt: str | None = None
     gateway_debug: dict[str, Any] = {"used": False}
 
     stats = await run_in_threadpool(store.stats)
     full_catalog = await run_in_threadpool(store.document_catalog)
     scope = resolve_document_scope(message, full_catalog, req.document_ids)
+    scope = apply_document_affinity(
+        scope,
+        full_catalog,
+        req.affinity.document_ids if req.affinity else None,
+    )
     scope_ids = scope.resolved_document_ids or scope.allowed_document_ids
+    retrieval_query = affinity_retrieval_query(req, scope)
 
     if scope.ambiguous:
         debug = {
@@ -804,20 +872,32 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         ):
             route = "rag"
         else:
-            route, direct_answer = await route_or_answer(
-                message,
-                req.conversation_history,
-                format_gateway_document_context(catalog, probe),
-            )
+            gateway_context = format_gateway_document_context(catalog, probe)
+            if gateway_result is not None:
+                route, direct_answer = gateway_result
+            elif defer_gateway:
+                route = "gateway_pending"
+                gateway_prompt = route_or_answer_prompt(
+                    message,
+                    req.conversation_history,
+                    gateway_context,
+                )
+            else:
+                route, direct_answer = await route_or_answer(
+                    message,
+                    req.conversation_history,
+                    gateway_context,
+                )
             gateway_debug = {
                 "used": True,
                 "decision": route,
                 "returned_direct_answer": direct_answer is not None,
+                "stream_deferred": gateway_prompt is not None,
             }
         if route == "rag" and (query_intent in {"direct", "semantic_qa"}):
             probe, catalog = await run_in_threadpool(
                 store.probe_with_catalog,
-                message,
+                retrieval_query,
                 probe_top_k,
                 scope_ids,
                 True,
@@ -841,15 +921,26 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         if query_intent != "direct" or scope.document_grounded:
             route = "rag"
         else:
-            route, direct_answer = await route_or_answer(
-                message,
-                req.conversation_history,
-                "Available uploaded documents: none",
-            )
+            if gateway_result is not None:
+                route, direct_answer = gateway_result
+            elif defer_gateway:
+                route = "gateway_pending"
+                gateway_prompt = route_or_answer_prompt(
+                    message,
+                    req.conversation_history,
+                    "Available uploaded documents: none",
+                )
+            else:
+                route, direct_answer = await route_or_answer(
+                    message,
+                    req.conversation_history,
+                    "Available uploaded documents: none",
+                )
             gateway_debug = {
                 "used": True,
                 "decision": route,
                 "returned_direct_answer": direct_answer is not None,
+                "stream_deferred": gateway_prompt is not None,
             }
 
     if route == "rag":
@@ -861,7 +952,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         )
         structured_sources = await run_in_threadpool(
             store.structured_lookup,
-            message,
+            retrieval_query,
             query_intent,
             structured_top_k,
             scope_ids,
@@ -886,7 +977,12 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             sources = []
             retrieval_method = "no_strong_document_match"
         else:
-            sources = await run_in_threadpool(store.search, message, settings.rag_top_k, scope_ids)
+            sources = await run_in_threadpool(
+                store.search,
+                retrieval_query,
+                settings.rag_top_k,
+                scope_ids,
+            )
             retrieval_method = "dense"
         before_filter_count = len(sources)
         sources = filter_sources_for_intent(sources, message, query_intent)
@@ -941,6 +1037,16 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 )
             evidence_context_count = len(evidence_context)
             sources = dedupe_sources(sources + question_context + evidence_context)
+        elif query_intent == "semantic_qa" and scope.method == "conversation_affinity" and sources:
+            passage_context = await run_in_threadpool(
+                store.passage_context_for_sources,
+                sources,
+                3,
+                scope_ids,
+            )
+            if passage_context:
+                sources = dedupe_sources(sources + passage_context)
+                retrieval_method = f"{retrieval_method or 'semantic'}_with_parent"
         sources = dedupe_sources(sources)
     else:
         structured_sources = []
@@ -965,6 +1071,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "evidence_candidate_count": evidence_candidate_count,
             "evidence_context_count": evidence_context_count,
             "evidence_query": evidence_query,
+            "retrieval_query": retrieval_query,
             "writing_parent_id": writing_parent_id,
             "final_context": compact_final_context_debug(sources),
         },
@@ -1071,6 +1178,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         sources=[],
         debug=debug,
         query_intent=query_intent,
+        gateway_prompt=gateway_prompt,
     )
 
 
@@ -1204,7 +1312,76 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     async def generate():
         try:
             yield stream_event("status", message="Đang phân tích câu hỏi...")
-            prepared = await prepare_chat(req)
+            prepared = await prepare_chat(req, defer_gateway=True)
+            if prepared.gateway_prompt:
+                gateway_buffer = ""
+                gateway_decision = "pending"
+                direct_stream_started = False
+                async for token in stream_ollama(prepared.gateway_prompt, temperature=0.2):
+                    if direct_stream_started:
+                        yield stream_event("token", token=token)
+                        continue
+
+                    gateway_buffer += token
+                    gateway_decision = gateway_stream_decision(gateway_buffer)
+                    if gateway_decision == "rag":
+                        break
+                    if gateway_decision == "direct":
+                        prepared.debug["route_decision"] = "direct"
+                        prepared.debug["gateway"].update(
+                            {"decision": "direct", "stream_deferred": False}
+                        )
+                        yield stream_event(
+                            "metadata",
+                            route_used="base_model",
+                            sources=[],
+                            debug=prepared.debug,
+                        )
+                        yield stream_event("token", token=gateway_visible_buffer(gateway_buffer))
+                        gateway_buffer = ""
+                        direct_stream_started = True
+
+                if direct_stream_started:
+                    yield stream_event("done")
+                    return
+
+                if gateway_decision == "pending":
+                    gateway_decision = gateway_stream_decision(gateway_buffer)
+                if gateway_decision == "direct" and gateway_buffer.strip():
+                    prepared.debug["route_decision"] = "direct"
+                    prepared.debug["gateway"].update(
+                        {"decision": "direct", "stream_deferred": False}
+                    )
+                    yield stream_event(
+                        "metadata",
+                        route_used="base_model",
+                        sources=[],
+                        debug=prepared.debug,
+                    )
+                    yield stream_event("token", token=gateway_visible_buffer(gateway_buffer))
+                    yield stream_event("done")
+                    return
+
+                if gateway_decision != "rag":
+                    gateway_answer = await query_ollama(prepared.gateway_prompt, temperature=0.2)
+                    if RAG_ROUTE_SENTINEL not in gateway_answer.upper():
+                        prepared.debug["route_decision"] = "direct"
+                        prepared.debug["gateway"].update(
+                            {"decision": "direct", "stream_deferred": False, "fallback": True}
+                        )
+                        yield stream_event(
+                            "metadata",
+                            route_used="base_model",
+                            sources=[],
+                            debug=prepared.debug,
+                        )
+                        yield stream_event("token", token=gateway_answer)
+                        yield stream_event("done")
+                        return
+                    gateway_decision = "rag"
+
+                prepared = await prepare_chat(req, gateway_result=("rag", None))
+
             yield stream_event(
                 "metadata",
                 route_used=prepared.route_used,
