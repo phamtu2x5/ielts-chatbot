@@ -186,13 +186,15 @@ backend with all models warmed up, then run:
 python backend/tools/chat_evaluation.py --base-url http://127.0.0.1:2222
 ```
 
-The runner verifies and uploads all seven files in `docs/`, sends the 56 questions
+The runner verifies and uploads all seven files in `docs/`, sends the 66 questions
 from `backend/evaluation/chat_corpus_v2.json`, and writes the raw answers, routes,
 sources and debug metadata under `backend/data/chat_evaluation/`. It does not
 score answer quality; the report is reviewed manually. Use `--skip-upload` when
 the same corpus is already indexed, or repeat `--case CASE_ID` to collect selected
-cases. The previous 19-question set is retired because it does not represent the
-expanded corpus.
+cases. The direct-router cases deliberately run while all uploaded document IDs
+are active, so they expose false RAG routing without tying the question to a
+specific document. The previous 19-question set is retired because it does not
+represent the expanded corpus.
 
 ## Notes
 

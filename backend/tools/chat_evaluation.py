@@ -226,6 +226,7 @@ def capture_case(
         "category": case["category"],
         "query": case["query"],
         "target_files": case.get("target_files", []),
+        "request_scope": case.get("request_scope", "target_files"),
         "request_document_ids": request_document_ids or [],
         "http_status": result.get("http_status"),
         "duration_seconds": result.get("duration_seconds"),
@@ -259,6 +260,24 @@ def merge_document_catalog(
             catalog_by_file[source_file] = entry
 
 
+def case_request_document_ids(
+    case: dict[str, Any],
+    uploaded_document_ids: dict[str, str],
+) -> list[str]:
+    request_scope = case.get("request_scope", "target_files")
+    if request_scope == "all_uploaded":
+        filenames = uploaded_document_ids
+    elif request_scope == "target_files":
+        filenames = case.get("target_files", [])
+    else:
+        raise ValueError(f"Unsupported request_scope: {request_scope}")
+    return [
+        uploaded_document_ids[filename]
+        for filename in filenames
+        if filename in uploaded_document_ids
+    ]
+
+
 def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     manifest = load_manifest(args.manifest)
     corpus_files = verify_corpus(manifest, args.corpus_dir)
@@ -275,11 +294,17 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     failed_upload_files = {
         item["filename"] for item in upload_results if item.get("http_status") != 200
     }
-    uploaded_document_ids = {
-        item["filename"]: str((item.get("response") or {}).get("document_id"))
-        for item in upload_results
-        if item.get("http_status") == 200 and (item.get("response") or {}).get("document_id")
-    }
+    if args.skip_upload:
+        uploaded_document_ids = {
+            str(document["filename"]): str(document["sha256"])
+            for document in manifest.get("documents", [])
+        }
+    else:
+        uploaded_document_ids = {
+            item["filename"]: str((item.get("response") or {}).get("document_id"))
+            for item in upload_results
+            if item.get("http_status") == 200 and (item.get("response") or {}).get("document_id")
+        }
 
     case_results: list[dict[str, Any]] = []
     source_index: dict[str, dict[str, Any]] = {}
@@ -301,11 +326,7 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
                 )
             )
             continue
-        request_document_ids = [
-            uploaded_document_ids[filename]
-            for filename in case.get("target_files", [])
-            if filename in uploaded_document_ids
-        ]
+        request_document_ids = case_request_document_ids(case, uploaded_document_ids)
         try:
             raw_result = ask_chat(
                 base_url,

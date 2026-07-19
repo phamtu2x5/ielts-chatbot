@@ -487,6 +487,76 @@
         "Screenshot 2026-07-11 at 15.26.21.png"
       ],
       "query": "Ảnh Writing có nêu dữ liệu về cinema attendance hoặc forest and timber không?"
+    },
+    {
+      "id": "direct-01-greeting",
+      "category": "direct_router",
+      "target_files": [],
+      "request_scope": "all_uploaded",
+      "query": "Xin chào"
+    },
+    {
+      "id": "direct-02-speaking-tips",
+      "category": "direct_router",
+      "target_files": [],
+      "request_scope": "all_uploaded",
+      "query": "Give me 3 concise IELTS Speaking Part 2 tips."
+    },
+    {
+      "id": "direct-03-study-plan",
+      "category": "direct_router",
+      "target_files": [],
+      "request_scope": "all_uploaded",
+      "query": "Lập cho tôi một kế hoạch tự học IELTS trong 3 tháng, mỗi ngày khoảng 60 phút."
+    },
+    {
+      "id": "direct-04-grammar",
+      "category": "direct_router",
+      "target_files": [],
+      "request_scope": "all_uploaded",
+      "query": "Giải thích sự khác nhau giữa present perfect và past simple bằng hai ví dụ ngắn."
+    },
+    {
+      "id": "direct-05-reading-strategy",
+      "category": "direct_router",
+      "target_files": [],
+      "request_scope": "all_uploaded",
+      "query": "Làm thế nào để tăng tốc độ đọc và vẫn tìm đúng từ khóa trong IELTS Reading?"
+    },
+    {
+      "id": "direct-06-question-type-strategy",
+      "category": "direct_router",
+      "target_files": [],
+      "request_scope": "all_uploaded",
+      "query": "What is the difference between TRUE/FALSE/NOT GIVEN and YES/NO/NOT GIVEN in IELTS Reading?"
+    },
+    {
+      "id": "direct-07-writing-structure",
+      "category": "direct_router",
+      "target_files": [],
+      "request_scope": "all_uploaded",
+      "query": "Cho tôi cấu trúc chung của một bài IELTS Writing Task 2 dạng discussion essay."
+    },
+    {
+      "id": "direct-08-vocabulary",
+      "category": "direct_router",
+      "target_files": [],
+      "request_scope": "all_uploaded",
+      "query": "Suggest five formal alternatives to the word important for IELTS Writing."
+    },
+    {
+      "id": "direct-09-listening-strategy",
+      "category": "direct_router",
+      "target_files": [],
+      "request_scope": "all_uploaded",
+      "query": "Cho mình ba cách hạn chế mất đáp án khi nghe IELTS Listening Section 3."
+    },
+    {
+      "id": "direct-10-speaking-practice",
+      "category": "direct_router",
+      "target_files": [],
+      "request_scope": "all_uploaded",
+      "query": "Give me one IELTS Speaking Part 1 practice question about hometown, then wait for my answer."
     }
   ]
 }

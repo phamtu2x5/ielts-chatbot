@@ -11,6 +11,7 @@ if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
 
 from backend.tools.chat_evaluation import (
+    case_request_document_ids,
     capture_case,
     compact_upload_result,
     verify_corpus,
@@ -20,6 +21,7 @@ from backend.tools.chat_evaluation import (
 MANIFEST_PATH = BACKEND_DIR / "evaluation" / "chat_corpus_v2.json"
 CORPUS_DIR = REPO_DIR / "docs"
 REQUIRED_CATEGORIES = {
+    "direct_router",
     "document_overview",
     "show_questions",
     "translate_questions",
@@ -51,8 +53,20 @@ class ChatEvaluationManifestTests(unittest.TestCase):
         for case in cases:
             self.assertTrue(case["query"].strip())
             self.assertTrue(set(case["target_files"]).issubset(filenames))
+            self.assertIn(case.get("request_scope", "target_files"), {"target_files", "all_uploaded"})
             self.assertNotIn("expected_intent", case)
             self.assertNotIn("answer_terms", case)
+
+    def test_direct_router_cases_can_run_with_all_uploaded_documents_active(self) -> None:
+        uploaded = {"reading.pdf": "doc-reading", "writing.png": "doc-writing"}
+        document_ids = case_request_document_ids(
+            {
+                "target_files": [],
+                "request_scope": "all_uploaded",
+            },
+            uploaded,
+        )
+        self.assertEqual(document_ids, ["doc-reading", "doc-writing"])
 
     def test_corpus_hash_mismatch_is_rejected_before_requests(self) -> None:
         manifest = {
