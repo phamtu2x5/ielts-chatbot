@@ -26,7 +26,6 @@ from .llm import (
     OLLAMA_MODEL,
     OLLAMA_NUM_PREDICT,
     OllamaRequestError,
-    classify_route,
     direct_prompt,
     query_ollama,
     rag_prompt,
@@ -140,52 +139,6 @@ def evidence_query_for_sources(sources: list[dict[str, Any]], fallback: str) -> 
         if text and text not in queries:
             queries.append(text)
     return " ".join(queries).strip() or fallback
-
-
-def format_router_document_context(catalog: list[dict], probe: dict) -> str:
-    lines = []
-    if catalog:
-        lines.append("Uploaded documents:")
-        for item in catalog:
-            pages = item.get("pages") or []
-            page_label = f"pages {pages[0]}-{pages[-1]}" if pages else "pages unknown"
-            mime_types = ", ".join(item.get("mime_types") or [])
-            unit_types = ", ".join(item.get("unit_types") or [])
-            document_types = ", ".join(item.get("document_types") or [])
-            task_types = ", ".join(item.get("task_types") or [])
-            passage_numbers = item.get("passage_numbers") or []
-            lines.append(
-                f"- {item.get('source_file', 'unknown')} | chunks={item.get('chunks', 0)} | {page_label}"
-                + (f" | type={mime_types}" if mime_types else "")
-                + (f" | units={unit_types}" if unit_types else "")
-                + (f" | doc_type={document_types}" if document_types else "")
-                + (f" | task_type={task_types}" if task_types else "")
-                + (f" | passages={passage_numbers}" if passage_numbers else "")
-            )
-
-    results = probe.get("results") or []
-    lines.append(
-        "Retrieval probe strength: "
-        + ("strong" if probe.get("has_strong_hits") else "weak_or_none")
-    )
-    if results:
-        lines.append("Retrieval probe top hits:")
-        for index, result in enumerate(results[:3], 1):
-            source_file = result.get("source_file", "unknown")
-            pages = result.get("pages") or []
-            text = " ".join((result.get("display_text") or result.get("text") or "").split())[:260]
-            dense = result.get("probe_dense_score", result.get("score", 0.0))
-            keyword = result.get("probe_keyword_score", 0.0)
-            question = result.get("probe_question_score", 0.0)
-            overview = result.get("probe_overview_score", 0.0)
-            lines.append(
-                f"{index}. {source_file} pages={pages} dense={dense:.3f} keyword={keyword:.1f} "
-                f"question={question:.1f} overview={overview:.1f}: {text}"
-            )
-    else:
-        lines.append("Retrieval probe top hits: none")
-
-    return "\n".join(lines)
 
 
 def compact_probe_debug(probe: dict) -> dict:
@@ -815,8 +768,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         if scope.document_grounded or probe.get("has_document_intent"):
             route = "rag"
         else:
-            document_context = format_router_document_context(catalog, probe)
-            route = await classify_route(message, req.conversation_history, document_context)
+            route = "direct"
 
         if route == "direct" and (
             probe.get("is_overview") or probe.get("top_question_score", 0.0) >= 1

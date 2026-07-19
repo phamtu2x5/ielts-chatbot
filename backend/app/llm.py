@@ -554,50 +554,6 @@ Question:
 Answer naturally and clearly."""
 
 
-def route_prompt(
-    message: str,
-    history: Optional[List[ChatMessage]] = None,
-    document_context: str = "",
-) -> str:
-    history_text = format_history(history)
-    context = f"\nPrevious conversation:\n{history_text}\n" if history_text else ""
-    docs = f"\nUploaded document context and retrieval probe:\n{document_context}\n" if document_context else ""
-    return f"""You are a strict router for an IELTS chatbot.
-
-Decide whether the assistant should answer directly or use the uploaded document/vector knowledge base.
-
-Choose "rag" when the user asks about:
-- the uploaded file, document, PDF, DOCX, image, material, source, lesson, or text
-- a summary, explanation, extraction, comparison, or question based on uploaded material
-- "dựa vào tài liệu", "trong file", "PDF", "DOCX", "ảnh", "nội dung trên", or similar references
-
-Choose "direct" for general IELTS advice, greetings, study plans, grammar explanations, writing/speaking tips, or anything that does not need uploaded material.
-
-Use the uploaded document context and retrieval probe carefully:
-- If uploaded documents exist and the current question asks for file content, question numbers, page content, passages, tables, flow charts, summaries, explanations, or answers based on the material, choose "rag".
-- If the retrieval probe strength is strong or the probe hits clearly mention the requested content, choose "rag".
-- If the retrieval probe is weak_or_none and the question is clearly general IELTS advice, choose "direct".
-- Choose "direct" only when the question is clearly independent from uploaded material.
-{context}
-{docs}
-Current user message:
-{message}
-
-Return exactly one word: direct or rag."""
-
-
-async def classify_route(
-    message: str,
-    history: Optional[List[ChatMessage]] = None,
-    document_context: str = "",
-) -> str:
-    decision = await query_ollama(route_prompt(message, history, document_context), temperature=0.0, num_predict=8)
-    decision = decision.strip().lower()
-    if "rag" in decision and "direct" not in decision:
-        return "rag"
-    return "direct"
-
-
 def rag_prompt(
     message: str,
     context: str,

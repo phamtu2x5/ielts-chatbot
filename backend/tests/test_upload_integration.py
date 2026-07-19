@@ -116,8 +116,9 @@ class _FakeStore:
 
 
 class _FakeChatStore:
-    def __init__(self, catalog: list[dict]) -> None:
+    def __init__(self, catalog: list[dict], *, has_document_intent: bool = True) -> None:
         self.catalog = catalog
+        self.has_document_intent = has_document_intent
 
     def stats(self) -> dict:
         return {"documents": len(self.catalog), "chunks": len(self.catalog), "embedding_model": "test"}
@@ -138,7 +139,7 @@ class _FakeChatStore:
                 "results": [],
                 "has_hits": False,
                 "has_strong_hits": False,
-                "has_document_intent": True,
+                "has_document_intent": self.has_document_intent,
                 "is_overview": False,
             },
             self.document_catalog(document_ids),
@@ -230,6 +231,27 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.route_used, "vector_rag_no_match")
         self.assertIsNone(prepared.prompt)
         self.assertEqual(prepared.static_response, main.NO_RAG_MATCH_RESPONSE)
+
+    async def test_general_question_without_document_scope_routes_directly(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-1"],
+                "mime_types": ["application/pdf"],
+            }
+        ]
+        store = _FakeChatStore(catalog, has_document_intent=False)
+
+        with patch.object(main, "get_store", return_value=store):
+            greeting = await main.prepare_chat(main.ChatRequest(message="xin chào"))
+            advice = await main.prepare_chat(
+                main.ChatRequest(message="Give me 3 IELTS Speaking Part 2 tips.")
+            )
+
+        self.assertEqual(greeting.route_used, "base_model")
+        self.assertEqual(greeting.query_intent, "direct")
+        self.assertEqual(advice.route_used, "base_model")
+        self.assertEqual(advice.query_intent, "direct")
 
     async def test_explicit_document_scope_never_routes_semantic_query_to_base_model(self) -> None:
         catalog = [

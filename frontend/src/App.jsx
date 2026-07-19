@@ -529,6 +529,18 @@ function App() {
               )
             );
           } else if (eventData.type === "error") {
+            if (eventData.detail) {
+              setMessages((current) =>
+                current.map((message) =>
+                  message.id === assistantId
+                    ? {
+                        ...message,
+                        debug: { ...(message.debug || {}), generation_error: eventData.detail },
+                      }
+                    : message
+                )
+              );
+            }
             throw new Error(eventData.message || "Yêu cầu không thành công");
           }
         }
