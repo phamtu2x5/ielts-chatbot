@@ -25,6 +25,7 @@ const routeLabels = {
   vector_rag_static: "Tài liệu RAG",
   vector_rag_no_match: "Tài liệu RAG",
   vector_rag_ambiguous_document: "Tài liệu RAG",
+  route_undetermined: "Chưa xác định luồng",
   upload: "Tài liệu",
   error: "Lỗi",
 };
@@ -69,7 +70,10 @@ function affinityFromMetadata(eventData) {
   if (!eventData.route_used?.startsWith("vector_rag")) return null;
 
   const sources = eventData.sources || [];
-  const resolvedIds = eventData.debug?.target_resolution?.resolved_document_ids || [];
+  const resolvedIds =
+    eventData.debug?.document_resolution?.resolved_document_ids ||
+    eventData.debug?.target_resolution?.resolved_document_ids ||
+    [];
   const documentIds = [
     ...new Set([
       ...sources.map((source) => source.document_id).filter(Boolean),
@@ -100,6 +104,36 @@ function affinityFromMetadata(eventData) {
     passage_numbers: passageNumbers,
     question_ranges: questionRanges,
   };
+}
+
+function completedConversationHistory(messages) {
+  const completed = [];
+  for (let index = 0; index < messages.length; index += 1) {
+    const user = messages[index];
+    if (user.role !== "user" || !user.content?.trim()) continue;
+    const assistant = messages[index + 1];
+    if (
+      !assistant ||
+      assistant.role !== "assistant" ||
+      assistant.streaming ||
+      !assistant.content?.trim() ||
+      ["welcome", "upload", "error"].includes(assistant.route_used)
+    ) {
+      continue;
+    }
+    completed.push(
+      { role: "user", content: user.content.trim() },
+      { role: "assistant", content: assistant.content.trim() }
+    );
+  }
+  const selected = [];
+  let totalChars = 0;
+  for (const message of completed.slice(-8).reverse()) {
+    if (selected.length && totalChars + message.content.length > 12000) break;
+    selected.push(message);
+    totalChars += message.content.length;
+  }
+  return selected.reverse();
 }
 
 function MessageContent({ message }) {
@@ -263,20 +297,12 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [pendingFiles, setPendingFiles] = useState([]);
   const [activeDocumentIds, setActiveDocumentIds] = useState([]);
-  const [conversationAffinity, setConversationAffinity] = useState(null);
+  const [conversationState, setConversationState] = useState(null);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
   const hasStreamingAssistant = messages.some((message) => message.streaming);
 
-  const history = useMemo(
-    () =>
-      messages
-        .filter((message) => message.role === "user" || message.role === "assistant")
-        .filter((message) => message.content?.trim())
-        .slice(-6)
-        .map(({ role, content }) => ({ role, content })),
-    [messages]
-  );
+  const history = useMemo(() => completedConversationHistory(messages), [messages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -434,15 +460,17 @@ function App() {
           setActiveDocumentIds((current) => [
             ...new Set([...current, ...uploadedFiles.map((data) => data.document_id)]),
           ]);
-          setConversationAffinity(
-            uploadedFiles.length === 1
-              ? {
-                  document_ids: [uploadedFiles[0].document_id],
-                  passage_numbers: [],
-                  question_ranges: [],
-                }
-              : null
-          );
+          if (uploadedFiles.length === 1) {
+            setConversationState((current) => ({
+              last_route: current?.last_route || null,
+              last_intent: current?.last_intent || null,
+              rag_affinity: {
+                document_ids: [uploadedFiles[0].document_id],
+                passage_numbers: [],
+                question_ranges: [],
+              },
+            }));
+          }
         }
         setMessages((current) =>
           current.map((message) =>
@@ -508,7 +536,8 @@ function App() {
             ? uploadedFiles.map((data) => data.document_id)
             : activeDocumentIds,
           document_scope: uploadedFiles.length ? "explicit" : "available",
-          affinity: uploadedFiles.length ? null : conversationAffinity,
+          affinity: uploadedFiles.length ? null : conversationState?.rag_affinity || null,
+          conversation_state: uploadedFiles.length ? null : conversationState,
         }),
       });
       if (!response.ok || !response.body) {
@@ -519,6 +548,7 @@ function App() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let pendingConversationState = null;
 
       while (true) {
         const { value, done } = await reader.read();
@@ -542,8 +572,18 @@ function App() {
               )
             );
           } else if (eventData.type === "metadata") {
-            const nextAffinity = affinityFromMetadata(eventData);
-            if (nextAffinity) setConversationAffinity(nextAffinity);
+            if (eventData.conversation_state) {
+              pendingConversationState = eventData.conversation_state;
+            } else {
+              const nextAffinity = affinityFromMetadata(eventData);
+              if (nextAffinity) {
+                pendingConversationState = {
+                  last_route: conversationState?.last_route || "rag",
+                  last_intent: conversationState?.last_intent || null,
+                  rag_affinity: nextAffinity,
+                };
+              }
+            }
             setMessages((current) =>
               current.map((message) =>
                 message.id === assistantId
@@ -569,6 +609,9 @@ function App() {
               )
             );
           } else if (eventData.type === "done") {
+            if (pendingConversationState) {
+              setConversationState(pendingConversationState);
+            }
             setMessages((current) =>
               current.map((message) =>
                 message.id === assistantId
