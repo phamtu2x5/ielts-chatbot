@@ -108,12 +108,14 @@ def ask_chat(
     timeout: float,
     document_ids: list[str] | None = None,
     document_scope: str = "auto",
+    conversation_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = json.dumps(
         {
             "message": message,
             "document_ids": document_ids or None,
             "document_scope": document_scope,
+            "conversation_state": conversation_state,
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -239,6 +241,12 @@ def capture_case(
         "error_detail": response if result.get("http_status") != 200 else None,
         "answer": response.get("response"),
         "route_used": response.get("route_used"),
+        "conversation_state": response.get("conversation_state"),
+        "resolved_document_ids": (
+            (response.get("debug") or {})
+            .get("document_resolution", {})
+            .get("resolved_document_ids", [])
+        ),
         "sources": [compact_source_reference(source) for source in raw_sources],
         "debug": compact_case_debug(response.get("debug") or {}),
     }
@@ -367,7 +375,7 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         for item in case_results
     )
     report = {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "question_set_name": manifest.get("name"),
         "manifest_schema_version": manifest.get("schema_version"),
         "base_url": base_url,

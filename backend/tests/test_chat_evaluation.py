@@ -112,6 +112,7 @@ class ChatEvaluationManifestTests(unittest.TestCase):
         capture = capture_case(case, result, source_index, ["doc-1"])
         self.assertEqual(capture["answer"], "Nội dung nói về Mars.")
         self.assertEqual(capture["request_document_ids"], ["doc-1"])
+        self.assertEqual(capture["resolved_document_ids"], [])
         self.assertEqual(
             capture["sources"],
             [
@@ -132,6 +133,44 @@ class ChatEvaluationManifestTests(unittest.TestCase):
         self.assertNotIn("raw_response", capture)
         self.assertNotIn("status", capture)
         self.assertNotIn("failures", capture)
+
+    def test_capture_preserves_backend_scope_and_conversation_state(self) -> None:
+        case = {
+            "id": "state",
+            "category": "semantic_qa",
+            "query": "Tại sao?",
+            "target_files": ["sample.pdf"],
+        }
+        state = {
+            "last_route": "rag",
+            "last_intent": "semantic_qa",
+            "rag_affinity": {
+                "document_ids": ["doc-1"],
+                "passage_numbers": [2],
+                "question_ranges": [],
+            },
+        }
+        capture = capture_case(
+            case,
+            {
+                "http_status": 200,
+                "duration_seconds": 0.1,
+                "response": {
+                    "response": "Vì ...",
+                    "route_used": "vector_rag",
+                    "sources": [],
+                    "conversation_state": state,
+                    "debug": {
+                        "document_resolution": {
+                            "resolved_document_ids": ["doc-1"],
+                        }
+                    },
+                },
+            },
+            request_document_ids=["doc-1"],
+        )
+        self.assertEqual(capture["conversation_state"], state)
+        self.assertEqual(capture["resolved_document_ids"], ["doc-1"])
 
     def test_capture_preserves_http_error_detail(self) -> None:
         case = {
