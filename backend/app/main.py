@@ -117,7 +117,7 @@ def format_context(sources: list[dict], max_chars_per_source: int | None = None)
     return "\n\n".join(parts)
 
 
-def format_gateway_document_context(catalog: list[dict], probe: dict) -> str:
+def format_gateway_document_context(catalog: list[dict]) -> str:
     lines: list[str] = []
     if catalog:
         lines.append("Available uploaded documents:")
@@ -131,15 +131,6 @@ def format_gateway_document_context(catalog: list[dict], probe: dict) -> str:
     else:
         lines.append("Available uploaded documents: none")
 
-    lines.append(
-        "Retrieval probe: "
-        + ("strong" if probe.get("has_strong_hits") else "weak_or_none")
-    )
-    for result in (probe.get("results") or [])[:3]:
-        lines.append(
-            f"- {result.get('source_file', 'unknown')} | "
-            f"unit={result.get('metadata', {}).get('unit_type')}"
-        )
     return "\n".join(lines)
 
 
@@ -763,7 +754,12 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
 
     stats = await run_in_threadpool(store.stats)
     full_catalog = await run_in_threadpool(store.document_catalog)
-    scope = resolve_document_scope(message, full_catalog, req.document_ids)
+    scope = resolve_document_scope(
+        message,
+        full_catalog,
+        req.document_ids,
+        req.document_scope,
+    )
     scope = apply_document_affinity(
         scope,
         full_catalog,
@@ -773,34 +769,25 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     retrieval_query = affinity_retrieval_query(req, scope)
 
     probe_top_k = max(settings.rag_probe_top_k, settings.rag_top_k)
-    gateway_context = "Available uploaded documents: none"
-    if stats["chunks"] > 0:
-        probe, catalog = await run_in_threadpool(
-            store.probe_with_catalog,
-            message,
-            probe_top_k,
-            scope_ids,
-            False,
-        )
-        intent_decision = detect_query_intent_decision(
-            message,
-            probe,
-            document_grounded=scope.document_grounded,
-        )
-        query_intent = intent_decision.intent
-        intent_debug = intent_decision.to_debug()
-        gateway_context = format_gateway_document_context(catalog, probe)
+    if scope_ids:
+        catalog = [
+            item
+            for item in full_catalog
+            if any(document_id in scope_ids for document_id in item.get("document_ids", []))
+        ]
     else:
-        intent_decision = detect_query_intent_decision(
-            message,
-            probe,
-            document_grounded=scope.document_grounded,
-        )
-        query_intent = intent_decision.intent
-        intent_debug = intent_decision.to_debug()
+        catalog = full_catalog
+    intent_decision = detect_query_intent_decision(
+        message,
+        probe,
+        document_grounded=scope.document_grounded,
+    )
+    query_intent = intent_decision.intent
+    intent_debug = intent_decision.to_debug()
+    gateway_context = format_gateway_document_context(catalog)
 
     if query_intent == "direct":
-        route, direct_answer = await route_or_answer(
+        route, direct_answer, gateway_reason = await route_or_answer(
             message,
             req.conversation_history,
             gateway_context,
@@ -808,6 +795,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         gateway_debug = {
             "used": True,
             "decision": route,
+            "reason": gateway_reason,
             "returned_direct_answer": direct_answer is not None,
         }
     else:
@@ -902,7 +890,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         if structured_sources:
             source_limit = 50 if query_intent == "document_overview" else settings.rag_top_k
             sources = structured_sources[:source_limit]
-        elif probe.get("is_overview"):
+        elif query_intent == "document_overview":
             sources = await run_in_threadpool(
                 store.overview,
                 settings.rag_overview_top_k,

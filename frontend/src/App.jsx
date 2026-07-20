@@ -507,6 +507,7 @@ function App() {
           document_ids: uploadedFiles.length
             ? uploadedFiles.map((data) => data.document_id)
             : activeDocumentIds,
+          document_scope: uploadedFiles.length ? "explicit" : "available",
           affinity: uploadedFiles.length ? null : conversationAffinity,
         }),
       });

@@ -408,6 +408,43 @@ class LocalVectorStoreTests(unittest.TestCase):
         )
         self.assertFalse(general_writing.document_grounded)
 
+        explicit = resolve_document_scope(
+            "How did the fence affect kangaroos?",
+            catalog,
+            ["doc-reading"],
+            request_mode="explicit",
+        )
+        self.assertTrue(explicit.document_grounded)
+        self.assertEqual(explicit.method, "explicit_single")
+
+    def test_available_document_ids_do_not_force_general_chat_into_rag(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-reading"],
+                "mime_types": ["application/pdf"],
+                "section_titles": ["Snow-makers"],
+            }
+        ]
+
+        greeting = resolve_document_scope(
+            "Hello",
+            catalog,
+            ["doc-reading"],
+            request_mode="available",
+        )
+        section_query = resolve_document_scope(
+            "What is Snow-makers about?",
+            catalog,
+            ["doc-reading"],
+            request_mode="available",
+        )
+
+        self.assertFalse(greeting.document_grounded)
+        self.assertEqual(greeting.method, "requested_single")
+        self.assertTrue(section_query.document_grounded)
+        self.assertEqual(section_query.method, "catalog_reference")
+
     def test_generic_ielts_terms_do_not_select_uploaded_documents(self) -> None:
         catalog = [
             {
@@ -753,54 +790,90 @@ class LocalVectorStoreTests(unittest.TestCase):
 
 class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_route_or_answer_uses_direct_model_output(self) -> None:
+        model = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "route": "direct",
+                    "answer": "Use a clear beginning, middle, and end.",
+                    "reason": "The request is general IELTS advice.",
+                }
+            )
+        )
         with patch.object(
             llm,
             "query_ollama",
-            AsyncMock(return_value="Use a clear beginning, middle, and end."),
+            model,
         ):
-            route, answer = await llm.route_or_answer("Give me one Speaking Part 2 tip.")
+            route, answer, reason = await llm.route_or_answer("Give me one Speaking Part 2 tip.")
 
         self.assertEqual(route, "direct")
         self.assertEqual(answer, "Use a clear beginning, middle, and end.")
+        self.assertEqual(reason, "The request is general IELTS advice.")
+        self.assertEqual(model.await_args.kwargs["response_format"], llm.GATEWAY_RESPONSE_SCHEMA)
+        self.assertEqual(model.await_args.kwargs["temperature"], 0.0)
 
-    async def test_route_or_answer_uses_explicit_rag_sentinel(self) -> None:
+    async def test_route_or_answer_uses_structured_rag_decision(self) -> None:
         with patch.object(
             llm,
             "query_ollama",
-            AsyncMock(return_value="assistant\n[[USE_RAG]]"),
+            AsyncMock(
+                return_value=json.dumps(
+                    {
+                        "route": "rag",
+                        "answer": "",
+                        "reason": "The request asks about an uploaded file.",
+                    }
+                )
+            ),
         ):
-            route, answer = await llm.route_or_answer("What is Question 4 in the file?")
+            route, answer, reason = await llm.route_or_answer("What is Question 4 in the file?")
 
         self.assertEqual(route, "rag")
         self.assertIsNone(answer)
+        self.assertIn("uploaded file", reason)
 
-    async def test_route_or_answer_never_exposes_rag_sentinel_with_extra_text(self) -> None:
-        with patch.object(
-            llm,
-            "query_ollama",
-            AsyncMock(return_value="I should retrieve this. [[USE_RAG]]"),
-        ):
-            route, answer = await llm.route_or_answer("What does the uploaded file say?")
+    async def test_route_or_answer_retries_invalid_gateway_json(self) -> None:
+        model = AsyncMock(
+            side_effect=[
+                "not-json",
+                json.dumps(
+                    {
+                        "route": "rag",
+                        "answer": "",
+                        "reason": "The request requires uploaded material.",
+                    }
+                ),
+            ]
+        )
+        with patch.object(llm, "query_ollama", model):
+            route, answer, _ = await llm.route_or_answer("What does the uploaded file say?")
 
         self.assertEqual(route, "rag")
         self.assertIsNone(answer)
+        self.assertEqual(model.await_count, 2)
 
     async def test_route_or_answer_retries_one_empty_gateway_response(self) -> None:
         model = AsyncMock(
             side_effect=[
                 llm.OllamaRequestError("empty_response", "empty"),
-                "Hello! How can I help with IELTS?",
+                json.dumps(
+                    {
+                        "route": "direct",
+                        "answer": "Hello! How can I help with IELTS?",
+                        "reason": "This is a greeting.",
+                    }
+                ),
             ]
         )
         with patch.object(llm, "query_ollama", model):
-            route, answer = await llm.route_or_answer("Hello")
+            route, answer, _ = await llm.route_or_answer("Hello")
 
         self.assertEqual(route, "direct")
         self.assertEqual(answer, "Hello! How can I help with IELTS?")
         self.assertEqual(model.await_count, 2)
         first_prompt = model.await_args_list[0].args[0]
         retry_prompt = model.await_args_list[1].args[0]
-        self.assertIn("first-stage gateway", first_prompt)
+        self.assertIn("Classify one request", first_prompt)
         self.assertEqual(retry_prompt, llm.compact_route_or_answer_prompt("Hello"))
 
     async def test_non_stream_request_retries_one_server_error(self) -> None:

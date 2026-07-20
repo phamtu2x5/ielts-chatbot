@@ -39,6 +39,7 @@ class DocumentScope:
     ambiguous: bool
     document_grounded: bool
     reason: str
+    request_mode: str = "auto"
 
     def to_debug(self) -> dict[str, Any]:
         return asdict(self)
@@ -72,6 +73,7 @@ def resolve_document_scope(
     message: str,
     catalog: list[dict[str, Any]],
     requested_document_ids: list[str] | None = None,
+    request_mode: str = "auto",
 ) -> DocumentScope:
     requested = list(dict.fromkeys(requested_document_ids or []))
     available_ids = {
@@ -89,9 +91,12 @@ def resolve_document_scope(
         for item in catalog
         if any(document_id in allowed for document_id in item.get("document_ids", []))
     ]
-    # Client-provided IDs constrain which documents may be searched. They do
-    # not by themselves mean that a general chat message requires RAG.
-    grounded = is_document_grounded_query(message)
+    # Available IDs constrain retrieval but do not imply RAG. Explicit IDs are
+    # files deliberately attached or selected for this request.
+    grounded = request_mode == "explicit" or is_document_grounded_query(
+        message,
+        allowed_entries,
+    )
     if requested and not allowed:
         return DocumentScope(
             requested,
@@ -102,21 +107,7 @@ def resolve_document_scope(
             False,
             grounded,
             "None of the requested document IDs exists in the current index.",
-        )
-    if len(allowed) == 1:
-        entry = next(
-            (item for item in allowed_entries if allowed[0] in item.get("document_ids", [])),
-            None,
-        )
-        return DocumentScope(
-            requested,
-            allowed,
-            allowed,
-            [entry.get("source_file", "unknown")] if entry else [],
-            "requested_single" if requested else "catalog_single",
-            False,
-            grounded,
-            "A single document is available in the allowed scope.",
+            request_mode,
         )
 
     normalized_query = normalize_reference(message)
@@ -143,6 +134,20 @@ def resolve_document_scope(
             False,
             True,
             "The query uniquely matched a file name, section title, or explicit document modality.",
+            request_mode,
+        )
+
+    if request_mode == "explicit" and allowed:
+        return DocumentScope(
+            requested,
+            allowed,
+            allowed,
+            [entry.get("source_file", "unknown") for entry in allowed_entries],
+            "explicit_request" if len(allowed) > 1 else "explicit_single",
+            False,
+            True,
+            "The client explicitly selected these documents for the current request.",
+            request_mode,
         )
 
     if any(normalize_reference(marker) in normalized_query for marker in COLLECTION_MARKERS):
@@ -155,6 +160,24 @@ def resolve_document_scope(
             False,
             grounded,
             "The query explicitly targets the uploaded document collection.",
+            request_mode,
+        )
+
+    if len(allowed) == 1:
+        entry = next(
+            (item for item in allowed_entries if allowed[0] in item.get("document_ids", [])),
+            None,
+        )
+        return DocumentScope(
+            requested,
+            allowed,
+            allowed,
+            [entry.get("source_file", "unknown")] if entry else [],
+            "requested_single" if requested else "catalog_single",
+            False,
+            grounded,
+            "A single document is available in the allowed scope.",
+            request_mode,
         )
 
     return DocumentScope(
@@ -166,6 +189,7 @@ def resolve_document_scope(
         bool(grounded and len(allowed_entries) > 1),
         grounded,
         "Multiple documents remain possible and the query does not identify one uniquely.",
+        request_mode,
     )
 
 
@@ -200,6 +224,7 @@ def apply_document_affinity(
         ambiguous=False,
         document_grounded=scope.document_grounded,
         reason="The current query did not select a document, so the previous turn's document scope was reused.",
+        request_mode=scope.request_mode,
     )
 
 

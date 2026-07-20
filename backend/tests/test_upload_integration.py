@@ -320,7 +320,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "mime_types": ["application/pdf"],
             }
         ]
-        gateway = AsyncMock(return_value=("direct", "hallucinated"))
+        gateway = AsyncMock(return_value=("direct", "hallucinated", "general request"))
         with (
             patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
             patch.object(main, "route_or_answer", gateway),
@@ -350,7 +350,12 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 main,
                 "route_or_answer",
-                AsyncMock(side_effect=[("direct", "Xin chào!"), ("direct", "Three tips.")]),
+                AsyncMock(
+                    side_effect=[
+                        ("direct", "Xin chào!", "greeting"),
+                        ("direct", "Three tips.", "general advice"),
+                    ]
+                ),
             ),
         ):
             greeting = await main.prepare_chat(
@@ -369,7 +374,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(advice.route_used, "base_model")
         self.assertEqual(advice.query_intent, "direct")
         self.assertEqual(advice.static_response, "Three tips.")
-        self.assertEqual(store.probe_dense_flags, [False, False])
+        self.assertEqual(store.probe_dense_flags, [])
 
     async def test_generic_ielts_categories_do_not_trigger_document_ambiguity(self) -> None:
         catalog = [
@@ -385,7 +390,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
         ]
         store = _FakeChatStore(catalog, has_document_intent=True)
-        gateway = AsyncMock(return_value=("direct", "General IELTS guidance."))
+        gateway = AsyncMock(return_value=("direct", "General IELTS guidance.", "general advice"))
 
         with (
             patch.object(main, "get_store", return_value=store),
@@ -424,7 +429,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
         ]
         store = _FakeChatStore(catalog, has_document_intent=True)
-        gateway = AsyncMock(return_value=("direct", "Wrong direct answer."))
+        gateway = AsyncMock(return_value=("direct", "Wrong direct answer.", "incorrect test stub"))
 
         with (
             patch.object(main, "get_store", return_value=store),
@@ -453,7 +458,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         prepared = None
         with (
             patch.object(main, "get_store", return_value=store),
-            patch.object(main, "route_or_answer", AsyncMock(return_value=("rag", None))),
+            patch.object(main, "route_or_answer", AsyncMock(return_value=("rag", None, "follow-up"))),
         ):
             prepared = await main.prepare_chat(
                 main.ChatRequest(
@@ -472,9 +477,9 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(prepared.debug["target_resolution"]["method"], "conversation_affinity")
         self.assertTrue(all(ids == ["doc-2"] for ids in store.probe_document_ids))
-        self.assertEqual(store.probe_queries[0], "Tại sao?")
-        self.assertTrue(any("Trả lời Question 4" in query for query in store.probe_queries[1:]))
-        self.assertTrue(any("Follow-up: Tại sao?" in query for query in store.probe_queries[1:]))
+        self.assertEqual(len(store.probe_queries), 1)
+        self.assertIn("Trả lời Question 4", store.probe_queries[0])
+        self.assertIn("Follow-up: Tại sao?", store.probe_queries[0])
 
     async def test_affinity_does_not_turn_a_new_direct_question_into_rag(self) -> None:
         catalog = [
@@ -482,7 +487,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             {"source_file": "reading-4.pdf", "document_ids": ["doc-4"], "mime_types": ["application/pdf"]},
         ]
         store = _FakeChatStore(catalog, has_document_intent=False)
-        gateway = AsyncMock(return_value=("direct", "Three concise tips."))
+        gateway = AsyncMock(return_value=("direct", "Three concise tips.", "new general request"))
         with (
             patch.object(main, "get_store", return_value=store),
             patch.object(main, "route_or_answer", gateway),
@@ -500,7 +505,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(prepared.route_used, "base_model")
         self.assertEqual(prepared.static_response, "Three concise tips.")
-        self.assertEqual(store.probe_queries, ["Give me three IELTS Speaking tips."])
+        self.assertEqual(store.probe_queries, [])
 
     async def test_retrieval_score_does_not_bypass_gateway_for_direct_intent(self) -> None:
         catalog = [
@@ -511,7 +516,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             has_document_intent=False,
             top_question_score=120.0,
         )
-        gateway = AsyncMock(return_value=("direct", "Direct answer."))
+        gateway = AsyncMock(return_value=("direct", "Direct answer.", "general request"))
         with (
             patch.object(main, "get_store", return_value=store),
             patch.object(main, "route_or_answer", gateway),
@@ -538,7 +543,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 main,
                 "route_or_answer",
-                AsyncMock(return_value=("rag", None)),
+                AsyncMock(return_value=("rag", None, "requires document facts")),
             ),
         ):
             prepared = await main.prepare_chat(
@@ -552,7 +557,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(prepared.query_intent, "direct")
         self.assertFalse(prepared.debug["target_resolution"]["document_grounded"])
         self.assertEqual(prepared.debug["gateway"]["decision"], "rag")
-        self.assertEqual(store.probe_dense_flags, [False, True])
+        self.assertEqual(store.probe_dense_flags, [True])
 
     async def test_ambiguous_question_range_requests_a_document_choice(self) -> None:
         catalog = [

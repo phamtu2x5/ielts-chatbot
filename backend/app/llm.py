@@ -13,9 +13,16 @@ from .schemas import ChatMessage
 OLLAMA_API_URL = settings.ollama_api_url
 OLLAMA_MODEL = settings.ollama_model
 OLLAMA_NUM_PREDICT = settings.ollama_num_predict
-RAG_ROUTE_SENTINEL = "[[USE_RAG]]"
-
-
+GATEWAY_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "route": {"type": "string", "enum": ["direct", "rag"]},
+        "answer": {"type": "string"},
+        "reason": {"type": "string"},
+    },
+    "required": ["route", "answer", "reason"],
+    "additionalProperties": False,
+}
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
 Default to Vietnamese unless the user clearly asks for another language or is practicing an English answer.
 Write in a concise, neutral, and coherent tutoring style.
@@ -411,8 +418,9 @@ def _ollama_payload(
     stream: bool,
     temperature: float,
     num_predict: Optional[int],
+    response_format: dict | str | None = None,
 ) -> dict:
-    return {
+    payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": stream,
@@ -426,10 +434,24 @@ def _ollama_payload(
             "repeat_penalty": 1.1,
         },
     }
+    if response_format is not None:
+        payload["format"] = response_format
+    return payload
 
 
-async def query_ollama(prompt: str, temperature: float = 0.7, num_predict: Optional[int] = None) -> str:
-    payload = _ollama_payload(prompt, stream=False, temperature=temperature, num_predict=num_predict)
+async def query_ollama(
+    prompt: str,
+    temperature: float = 0.7,
+    num_predict: Optional[int] = None,
+    response_format: dict | str | None = None,
+) -> str:
+    payload = _ollama_payload(
+        prompt,
+        stream=False,
+        temperature=temperature,
+        num_predict=num_predict,
+        response_format=response_format,
+    )
 
     data: dict = {}
     async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
@@ -554,12 +576,13 @@ def route_or_answer_prompt(
 ) -> str:
     history_text = format_history(history)
     parts = [
+        "Classify one request for an IELTS chatbot with optional uploaded study materials.",
+        "Use route=rag only when answering requires facts or evidence from uploaded material.",
+        "Use route=direct when the request can be answered independently of uploaded material.",
+        "For route=direct, put the complete user-facing answer in answer.",
+        "For route=rag, set answer to an empty string. Never answer from document titles or metadata alone.",
+        "Return only the JSON object required by the supplied schema.",
         ASSISTANT_STYLE,
-        "You are the first-stage gateway for an IELTS chatbot that may have uploaded study materials.",
-        "If the current request requires any fact, passage, question, table, image, answer, or evidence from uploaded material, output exactly [[USE_RAG]] and nothing else.",
-        "If the request is independent of uploaded material, answer it fully now. The text you return will be shown directly to the user, so do not output a route label.",
-        "General greetings, study advice, grammar help, and IELTS strategy questions are independent unless the user explicitly ties them to uploaded material.",
-        "Document metadata and retrieval previews below are routing hints only. Never answer a document-grounded request from those previews.",
     ]
     if document_context:
         parts.append(f"Uploaded material routing context:\n{document_context}")
@@ -568,7 +591,7 @@ def route_or_answer_prompt(
     parts.extend(
         [
             f"Current user message:\n{message}",
-            "Either return the complete direct answer, or return exactly [[USE_RAG]].",
+            "Classify the request and provide a direct answer only when route=direct.",
         ]
     )
     return "\n\n".join(parts)
@@ -577,11 +600,34 @@ def route_or_answer_prompt(
 def compact_route_or_answer_prompt(message: str) -> str:
     return "\n\n".join(
         [
-            "Route one IELTS chatbot request.",
-            "Return exactly [[USE_RAG]] only when the request needs facts from uploaded material.",
-            "Otherwise answer the user directly and do not mention routing.",
+            "Classify one IELTS chatbot request as direct or rag.",
+            "Use rag only when uploaded material is required.",
+            "For direct, provide the complete answer. For rag, use an empty answer.",
+            "Return only the JSON object required by the supplied schema.",
             f"User message:\n{message}",
         ]
+    )
+
+
+def parse_gateway_response(response: str) -> tuple[str, str | None, str]:
+    try:
+        payload = json.loads(response)
+    except json.JSONDecodeError as exc:
+        raise OllamaRequestError("invalid_gateway_output", "Gateway returned invalid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise OllamaRequestError("invalid_gateway_output", "Gateway returned a non-object JSON value.")
+    route = payload.get("route")
+    answer = str(payload.get("answer") or "").strip()
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        raise OllamaRequestError("invalid_gateway_output", "Gateway response did not include a reason.")
+    if route == "rag":
+        return "rag", None, reason
+    if route == "direct" and answer:
+        return "direct", answer, reason
+    raise OllamaRequestError(
+        "invalid_gateway_output",
+        "Gateway response did not contain a valid route and direct answer.",
     )
 
 
@@ -589,21 +635,26 @@ async def route_or_answer(
     message: str,
     history: Optional[List[ChatMessage]] = None,
     document_context: str = "",
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str]:
     prompt = route_or_answer_prompt(message, history, document_context)
     for attempt in range(2):
         try:
             current_prompt = prompt if attempt == 0 else compact_route_or_answer_prompt(message)
-            response = await query_ollama(current_prompt, temperature=0.2)
-            break
+            response = await query_ollama(
+                current_prompt,
+                temperature=0.0,
+                response_format=GATEWAY_RESPONSE_SCHEMA,
+            )
+            return parse_gateway_response(response)
         except OllamaRequestError as exc:
-            if attempt == 0 and exc.kind in {"empty_response", "prompt_echo"}:
+            if attempt == 0 and exc.kind in {
+                "empty_response",
+                "prompt_echo",
+                "invalid_gateway_output",
+            }:
                 continue
             raise
-    normalized = re.sub(r"^assistant\s*", "", response.strip(), flags=re.IGNORECASE).strip()
-    if RAG_ROUTE_SENTINEL in normalized.upper():
-        return "rag", None
-    return "direct", response
+    raise OllamaRequestError("invalid_gateway_output", "Gateway did not return a usable decision.")
 
 
 def rag_prompt(

@@ -107,9 +107,14 @@ def ask_chat(
     message: str,
     timeout: float,
     document_ids: list[str] | None = None,
+    document_scope: str = "auto",
 ) -> dict[str, Any]:
     payload = json.dumps(
-        {"message": message, "document_ids": document_ids or None},
+        {
+            "message": message,
+            "document_ids": document_ids or None,
+            "document_scope": document_scope,
+        },
         ensure_ascii=False,
     ).encode("utf-8")
     started = time.perf_counter()
@@ -333,6 +338,7 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
                 case["query"],
                 args.chat_timeout,
                 request_document_ids,
+                "explicit" if case.get("request_scope", "target_files") == "target_files" else "available",
             )
         except Exception as exc:
             raw_result = {
