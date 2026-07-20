@@ -60,17 +60,15 @@ def _gateway_decision(
     route: str,
     intent: str,
     *,
-    answer: str | None = None,
     document_refs: tuple[str, ...] = (),
     section_refs: tuple[str, ...] = (),
     reason: str = "test decision",
 ) -> RouteGatewayDecision:
     return RouteGatewayDecision(
         route="rag" if route == "clarify" else route,
-        answer=answer,
         attempts=1,
         duration_seconds=0.01,
-        raw_output_preview=answer or ("[[RAG]]" if route != "direct" else "direct"),
+        raw_output_preview='{"route":"rag"}' if route != "direct" else '{"route":"direct"}',
         fallback_reason=None,
     )
 
@@ -293,7 +291,6 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ]
         gateway = RouteGatewayDecision(
             route="undetermined",
-            answer=None,
             attempts=2,
             duration_seconds=0.1,
             raw_output_preview="",
@@ -301,7 +298,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
-            patch.object(main, "route_or_answer", AsyncMock(return_value=gateway)),
+            patch.object(main, "classify_chat_route", AsyncMock(return_value=gateway)),
         ):
             response = await main.chat(main.ChatRequest(message="Tell me something useful."))
 
@@ -315,13 +312,10 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             {"source_file": "other.pdf", "document_ids": ["doc-2"], "mime_types": ["application/pdf"]},
         ]
         target = AsyncMock()
+        gateway = AsyncMock(return_value=_gateway_decision("direct", "direct"))
         with (
             patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
-            patch.object(
-                main,
-                "route_or_answer",
-                AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
-            ),
+            patch.object(main, "classify_chat_route", gateway),
             patch.object(main, "resolve_rag_target", target),
         ):
             prepared = await main.prepare_chat(
@@ -333,8 +327,37 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
         target.assert_not_awaited()
+        gateway.assert_not_awaited()
         self.assertNotEqual(prepared.route_used, "vector_rag_ambiguous_document")
         self.assertEqual(prepared.debug["document_resolution"]["resolved_document_ids"], ["doc-1"])
+        self.assertEqual(prepared.debug["route_gateway"]["reason"], "explicit_current_turn_document_scope")
+
+    async def test_intent_failure_does_not_fall_back_to_semantic_qa(self) -> None:
+        catalog = [
+            {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]}
+        ]
+        failed_intent = IntentClassifierDecision(
+            intent="undetermined",
+            attempts=2,
+            duration_seconds=0.1,
+            raw_output_preview="",
+            fallback_reason="empty_response",
+        )
+        with (
+            patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
+            patch.object(main, "classify_rag_intent", AsyncMock(return_value=failed_intent)),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Tóm tắt tài liệu này.",
+                    document_ids=["doc-1"],
+                    document_scope="explicit",
+                )
+            )
+
+        self.assertEqual(prepared.route_used, "intent_undetermined")
+        self.assertEqual(prepared.static_response, main.INTENT_UNDETERMINED_RESPONSE)
+        self.assertEqual(prepared.sources, [])
 
     async def test_chat_converts_gateway_failure_to_502(self) -> None:
         failure = main.OllamaRequestError("empty_response", "router returned no content")
@@ -449,7 +472,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
             patch.object(
                 main,
-                "route_or_answer",
+                "classify_chat_route",
                 AsyncMock(return_value=_gateway_decision("rag", "show_questions", document_refs=("D1",))),
             ),
         ):
@@ -477,7 +500,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
-            patch.object(main, "route_or_answer", gateway),
+            patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
                 main.ChatRequest(
@@ -503,11 +526,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "get_store", return_value=store),
             patch.object(
                 main,
-                "route_or_answer",
+                "classify_chat_route",
                 AsyncMock(
                     side_effect=[
-                        _gateway_decision("direct", "direct", answer="Xin chào!", reason="greeting"),
-                        _gateway_decision("direct", "direct", answer="Three tips.", reason="general advice"),
+                        _gateway_decision("direct", "direct", reason="greeting"),
+                        _gateway_decision("direct", "direct", reason="general advice"),
                     ]
                 ),
             ),
@@ -524,10 +547,12 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(greeting.route_used, "base_model")
         self.assertEqual(greeting.query_intent, "direct")
-        self.assertEqual(greeting.static_response, "Xin chào!")
+        self.assertIsNone(greeting.static_response)
+        self.assertIn("Current user message:\nxin chào", greeting.prompt)
         self.assertEqual(advice.route_used, "base_model")
         self.assertEqual(advice.query_intent, "direct")
-        self.assertEqual(advice.static_response, "Three tips.")
+        self.assertIsNone(advice.static_response)
+        self.assertIn("why it helps", advice.prompt)
         self.assertEqual(store.probe_dense_flags, [])
 
     async def test_generic_ielts_categories_do_not_trigger_document_ambiguity(self) -> None:
@@ -548,14 +573,13 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             return_value=_gateway_decision(
                 "direct",
                 "direct",
-                answer="General IELTS guidance.",
                 reason="general advice",
             )
         )
 
         with (
             patch.object(main, "get_store", return_value=store),
-            patch.object(main, "route_or_answer", gateway),
+            patch.object(main, "classify_chat_route", gateway),
         ):
             for message in [
                 "How can I improve my IELTS Reading speed?",
@@ -569,7 +593,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 self.assertEqual(prepared.route_used, "base_model")
-                self.assertEqual(prepared.static_response, "General IELTS guidance.")
+                self.assertIsNone(prepared.static_response)
+                self.assertIn(message, prepared.prompt)
                 self.assertTrue(prepared.debug["document_resolution"]["skipped"])
 
         self.assertEqual(gateway.await_count, 3)
@@ -596,7 +621,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(main, "get_store", return_value=store),
-            patch.object(main, "route_or_answer", gateway),
+            patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
                 main.ChatRequest(
@@ -623,7 +648,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "get_store", return_value=store),
             patch.object(
                 main,
-                "route_or_answer",
+                "classify_chat_route",
                 AsyncMock(return_value=_gateway_decision("rag", "semantic_qa", reason="follow-up")),
             ),
         ):
@@ -658,13 +683,12 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             return_value=_gateway_decision(
                 "direct",
                 "direct",
-                answer="Three concise tips.",
                 reason="new general request",
             )
         )
         with (
             patch.object(main, "get_store", return_value=store),
-            patch.object(main, "route_or_answer", gateway),
+            patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
                 main.ChatRequest(
@@ -678,7 +702,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(prepared.route_used, "base_model")
-        self.assertEqual(prepared.static_response, "Three concise tips.")
+        self.assertIsNone(prepared.static_response)
+        self.assertIn("three IELTS Speaking tips", prepared.prompt)
         self.assertEqual(store.probe_queries, [])
 
     async def test_retrieval_score_does_not_bypass_gateway_for_direct_intent(self) -> None:
@@ -694,13 +719,12 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             return_value=_gateway_decision(
                 "direct",
                 "direct",
-                answer="Direct answer.",
                 reason="general request",
             )
         )
         with (
             patch.object(main, "get_store", return_value=store),
-            patch.object(main, "route_or_answer", gateway),
+            patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
                 main.ChatRequest(message="Give me three IELTS Speaking tips.", document_ids=["doc-1"])
@@ -708,7 +732,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         gateway.assert_awaited_once()
         self.assertEqual(prepared.route_used, "base_model")
-        self.assertEqual(prepared.static_response, "Direct answer.")
+        self.assertIsNone(prepared.static_response)
+        self.assertIn("Give me three IELTS Speaking tips.", prepared.prompt)
 
     async def test_semantic_gateway_does_not_receive_catalog_or_retrieval_snippets(self) -> None:
         catalog = [
@@ -745,7 +770,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.object(main, "get_store", return_value=store),
-            patch.object(main, "route_or_answer", gateway),
+            patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
                 main.ChatRequest(message="Why did urban transport change?", document_ids=["doc-1"])
@@ -773,10 +798,10 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         catalog = [
             {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]}
         ]
-        gateway = AsyncMock(return_value=_gateway_decision("direct", "direct", answer="Direct answer."))
+        gateway = AsyncMock(return_value=_gateway_decision("direct", "direct"))
         with (
             patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
-            patch.object(main, "route_or_answer", gateway),
+            patch.object(main, "classify_chat_route", gateway),
         ):
             await main.prepare_chat(
                 main.ChatRequest(
@@ -813,7 +838,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "get_store", return_value=store),
             patch.object(
                 main,
-                "route_or_answer",
+                "classify_chat_route",
                 AsyncMock(
                     return_value=_gateway_decision(
                         "rag",
@@ -846,12 +871,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
             patch.object(
                 main,
-                "route_or_answer",
+                "classify_chat_route",
                 AsyncMock(
                     return_value=_gateway_decision(
                         "clarify",
                         "show_questions",
-                        answer="Vui lòng chọn file Reading cần dùng.",
                     )
                 ),
             ),

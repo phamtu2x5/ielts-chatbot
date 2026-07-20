@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import re
@@ -29,6 +28,7 @@ from .llm import (
     OllamaRequestError,
     RouteGatewayDecision,
     classify_rag_intent,
+    direct_answer_prompt,
     query_ollama,
     rag_prompt,
     response_output_contract,
@@ -36,7 +36,7 @@ from .llm import (
     response_output_penalty,
     response_retry_prompt,
     resolve_rag_target,
-    route_or_answer,
+    classify_chat_route,
     select_best_writing_output,
     stream_ollama,
     writing_output_contract,
@@ -245,6 +245,11 @@ ROUTE_UNDETERMINED_RESPONSE = (
     "Vui lòng nói rõ bạn muốn hỏi kiến thức chung hay nội dung trong một tài liệu cụ thể."
 )
 
+INTENT_UNDETERMINED_RESPONSE = (
+    "Mình chưa xác định được thao tác bạn muốn thực hiện với tài liệu. "
+    "Vui lòng nói rõ bạn muốn xem, dịch, giải thích, trả lời câu hỏi hay phân tích nội dung."
+)
+
 
 def document_extraction_failure_detail(document: Any) -> str:
     metadata = document.metadata or {}
@@ -404,7 +409,7 @@ def conversation_state_for_result(
     elif prepared.route_used == "vector_rag_ambiguous_document":
         route = "clarify"
         affinity = previous_affinity
-    elif prepared.route_used in {"vector_rag_no_match", "route_undetermined"}:
+    elif prepared.route_used in {"vector_rag_no_match", "route_undetermined", "intent_undetermined"}:
         route = "no_match"
         affinity = previous_affinity
     else:
@@ -872,7 +877,6 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     intent_debug: dict[str, Any] = {}
     writing_parent_id: str | None = None
     evidence_query: str | None = None
-    direct_answer: str | None = None
     gateway_debug: dict[str, Any]
     document_resolution_debug: dict[str, Any] = {}
 
@@ -896,19 +900,30 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         for item in full_catalog
         if any(document_id in allowed_scope_ids for document_id in item.get("document_ids", []))
     ]
-    gateway_decision = await route_or_answer(
-        message,
-        req.conversation_history,
-        gateway_state_context(req),
-    )
-    route = gateway_decision.route
-    direct_answer = gateway_decision.answer
-    gateway_debug = {"used": True, **gateway_decision.to_debug()}
+    if scope.request_mode == "explicit" and scope.resolved_document_ids:
+        route = "rag"
+        gateway_debug = {
+            "used": False,
+            "route": "rag",
+            "attempts": 0,
+            "duration_seconds": 0.0,
+            "raw_output_preview": "",
+            "fallback_reason": None,
+            "reason": "explicit_current_turn_document_scope",
+        }
+    else:
+        gateway_decision = await classify_chat_route(
+            message,
+            req.conversation_history,
+            gateway_state_context(req),
+        )
+        route = gateway_decision.route
+        gateway_debug = {"used": True, **gateway_decision.to_debug()}
 
     if route == "direct":
         return ChatPreparation(
-            prompt=None,
-            static_response=direct_answer,
+            prompt=direct_answer_prompt(message, req.conversation_history),
+            static_response=None,
             route_used="base_model",
             sources=[],
             debug={
@@ -917,6 +932,10 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 "route_gateway": gateway_debug,
                 "document_resolution": {"skipped": True, "reason": "direct_route"},
                 "intent_classifier": {"skipped": True, "reason": "direct_route"},
+                "direct_generation": {
+                    "used": True,
+                    "response_contract": "adaptive_direct_answer",
+                },
                 "retrieval": {"skipped": True, "final_context": []},
                 "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
                 "source_count": 0,
@@ -954,14 +973,11 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     gateway_context = format_document_catalog_context(catalog)
     scope_ids = list(scope.resolved_document_ids)
     needs_target_model = not scope_ids and len(allowed_scope_ids) > 1
-    intent_task = asyncio.create_task(classify_rag_intent(message, req.conversation_history))
-    target_task = (
-        asyncio.create_task(resolve_rag_target(message, gateway_context.text))
+    target_decision = (
+        await resolve_rag_target(message, gateway_context.text)
         if needs_target_model
         else None
     )
-    intent_classifier = await intent_task
-    target_decision = await target_task if target_task else None
 
     if not scope_ids and len(allowed_scope_ids) == 1:
         scope_ids = list(allowed_scope_ids)
@@ -988,24 +1004,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             **(target_decision.to_debug() if target_decision else {}),
         }
 
-    intent_decision = semantic_intent_decision(
-        message,
-        intent_classifier.intent,
-        1.0,
-        "Semantic intent enum classifier.",
-    )
-    query_intent = intent_decision.intent
-    intent_debug = intent_decision.to_debug()
-    intent_debug["classifier"] = intent_classifier.to_debug()
-
     if not scope_ids:
         debug = {
             "route_decision": "rag",
             "query_intent": "ambiguous_document" if len(allowed_scope_ids) > 1 else "document_no_match",
-            "intent_decision": intent_debug,
             "route_gateway": gateway_debug,
             "document_resolution": document_resolution_debug,
-            "intent_classifier": intent_classifier.to_debug(),
+            "intent_classifier": {"skipped": True, "reason": "document_scope_unresolved"},
             "target_resolution": scope.to_debug(),
             "catalog": full_catalog,
             "probe": compact_probe_debug(probe),
@@ -1034,6 +1039,43 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             debug=debug,
             query_intent=("ambiguous_document" if len(allowed_scope_ids) > 1 else "document_no_match"),
         )
+
+    intent_classifier = await classify_rag_intent(message, req.conversation_history)
+    if intent_classifier.intent == "undetermined":
+        debug = {
+            "route_decision": "rag",
+            "query_intent": "intent_undetermined",
+            "route_gateway": gateway_debug,
+            "document_resolution": {
+                **document_resolution_debug,
+                "resolved_document_ids": scope_ids,
+                "requested_scope": scope.to_debug(),
+            },
+            "intent_classifier": intent_classifier.to_debug(),
+            "target_resolution": scope.to_debug(),
+            "catalog": catalog,
+            "probe": compact_probe_debug(probe),
+            "retrieval": {"skipped": True, "final_context": []},
+            "source_count": 0,
+        }
+        return ChatPreparation(
+            prompt=None,
+            static_response=INTENT_UNDETERMINED_RESPONSE,
+            route_used="intent_undetermined",
+            sources=[],
+            debug=debug,
+            query_intent="intent_undetermined",
+        )
+
+    intent_decision = semantic_intent_decision(
+        message,
+        intent_classifier.intent,
+        1.0,
+        "Semantic intent enum classifier.",
+    )
+    query_intent = intent_decision.intent
+    intent_debug = intent_decision.to_debug()
+    intent_debug["classifier"] = intent_classifier.to_debug()
 
     if scope_ids:
         catalog = [
@@ -1303,8 +1345,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         )
 
     return ChatPreparation(
-        prompt=None,
-        static_response=direct_answer,
+        prompt=direct_answer_prompt(message, req.conversation_history),
+        static_response=None,
         route_used="base_model",
         sources=[],
         debug=debug,
@@ -1339,18 +1381,16 @@ async def warmup() -> dict:
         llm_started = time.perf_counter()
         try:
             response = await query_ollama(
-                "Warm up the IELTS assistant. Reply with exactly: ready",
-                temperature=0.0,
-                num_predict=32,
+                direct_answer_prompt("Give me one concise IELTS Speaking tip."),
+                temperature=0.2,
+                num_predict=192,
             )
-            direct_check, rag_check, intent_check = await asyncio.gather(
-                route_or_answer("Give me one concise IELTS Speaking tip."),
-                route_or_answer("Summarize the content of the uploaded document."),
-                classify_rag_intent("List Questions 1-4 without solving them."),
-            )
+            direct_check = await classify_chat_route("Give me one concise IELTS Speaking tip.")
+            rag_check = await classify_chat_route("Summarize the content of the uploaded document.")
+            intent_check = await classify_rag_intent("List Questions 1-4 without solving them.")
             gateway_ok = (
-                direct_check.route == "direct"
-                and bool(direct_check.answer)
+                bool(response.strip())
+                and direct_check.route == "direct"
                 and rag_check.route == "rag"
                 and intent_check.intent in {
                     "show_questions",
