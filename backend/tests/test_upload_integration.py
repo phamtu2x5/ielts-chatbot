@@ -53,6 +53,7 @@ except ImportError:
 
 from app import main
 from app.document_pipeline.models import DocumentChunk, ProcessedDocument, ProcessedPage
+from app.llm import IntentClassifierDecision, RouteGatewayDecision, TargetResolverDecision
 
 
 def _gateway_decision(
@@ -63,8 +64,8 @@ def _gateway_decision(
     document_refs: tuple[str, ...] = (),
     section_refs: tuple[str, ...] = (),
     reason: str = "test decision",
-) -> main.RouteGatewayDecision:
-    return main.RouteGatewayDecision(
+) -> RouteGatewayDecision:
+    return RouteGatewayDecision(
         route="rag" if route == "clarify" else route,
         answer=answer,
         attempts=1,
@@ -207,7 +208,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             main,
             "classify_rag_intent",
             AsyncMock(
-                return_value=main.IntentClassifierDecision(
+                return_value=IntentClassifierDecision(
                     intent="semantic_qa",
                     attempts=1,
                     duration_seconds=0.01,
@@ -219,7 +220,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             main,
             "resolve_rag_target",
             AsyncMock(
-                return_value=main.TargetResolverDecision(
+                return_value=TargetResolverDecision(
                     document_refs=(),
                     action="clarify",
                     attempts=1,
@@ -290,7 +291,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         catalog = [
             {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]}
         ]
-        gateway = main.RouteGatewayDecision(
+        gateway = RouteGatewayDecision(
             route="undetermined",
             answer=None,
             attempts=2,
