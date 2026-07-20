@@ -253,9 +253,9 @@ Chat/RAG pipeline:
 
 ```text
 User query
--> document catalog + retrieval probe
--> deterministic document intent guard
--> query intent detection
+-> allowed document catalog + compact semantic routing candidates
+-> one structured LLM gateway decides route, intent, and target documents/sections
+-> validate gateway references and explicit no-solve/no-writing constraints
 -> structured lookup when possible
 -> metadata-filtered retrieval
 -> parent/context expansion when needed
@@ -399,7 +399,7 @@ Near-term direction:
 1. Keep the current extraction baseline frozen unless a failure is reproduced
    across multiple documents or blocks production.
 2. Rebuild the structured and vector indexes from the current schema.
-3. Strengthen target document and structured-unit resolution for multiple files.
+3. Evaluate the semantic route/intent gateway and target resolution across the multi-document corpus.
 4. Run `backend/tools/chat_evaluation.py` against the rebuilt seven-document corpus
    and review its raw answer/debug report manually. Do not auto-score answers.
 5. Fix retrieval, grounding and generation-policy failures before changing prompts.

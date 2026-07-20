@@ -13,14 +13,51 @@ from .schemas import ChatMessage
 OLLAMA_API_URL = settings.ollama_api_url
 OLLAMA_MODEL = settings.ollama_model
 OLLAMA_NUM_PREDICT = settings.ollama_num_predict
+ROUTING_INTENTS = (
+    "direct",
+    "document_overview",
+    "show_questions",
+    "translate_questions",
+    "explain_questions",
+    "solve_questions",
+    "semantic_qa",
+    "show_table",
+    "extract_table",
+    "table_cell",
+    "table_calculation",
+    "table_comparison",
+    "show_flowchart",
+    "show_diagram",
+    "show_writing_prompt",
+    "writing_generation",
+)
+
 GATEWAY_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "route": {"type": "string", "enum": ["direct", "rag"]},
+        "route": {"type": "string", "enum": ["direct", "rag", "clarify"]},
+        "intent": {"type": "string", "enum": list(ROUTING_INTENTS)},
+        "target_document_refs": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "target_section_refs": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
         "answer": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "reason": {"type": "string"},
     },
-    "required": ["route", "answer", "reason"],
+    "required": [
+        "route",
+        "intent",
+        "target_document_refs",
+        "target_section_refs",
+        "answer",
+        "confidence",
+        "reason",
+    ],
     "additionalProperties": False,
 }
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
@@ -36,6 +73,28 @@ Use Markdown tables when the user asks for a schedule, comparison, rubric, or ot
 Keep Markdown tables simple: no nested bullet lists, no HTML, and no multi-paragraph content inside table cells.
 Never output raw HTML tags such as <ul>, <li>, <br>, or <table>; use Markdown instead.
 Do not add emojis, generic encouragement, or invitations to ask another question."""
+
+
+@dataclass(frozen=True)
+class GatewayDecision:
+    route: str
+    intent: str
+    target_document_refs: tuple[str, ...]
+    target_section_refs: tuple[str, ...]
+    answer: str | None
+    confidence: float
+    reason: str
+
+    def to_debug(self) -> dict:
+        return {
+            "route": self.route,
+            "intent": self.intent,
+            "target_document_refs": list(self.target_document_refs),
+            "target_section_refs": list(self.target_section_refs),
+            "returned_direct_answer": self.answer is not None,
+            "confidence": self.confidence,
+            "reason": self.reason,
+        }
 
 
 DECORATIVE_ICON_RE = re.compile(
@@ -576,11 +635,28 @@ def route_or_answer_prompt(
 ) -> str:
     history_text = format_history(history)
     parts = [
-        "Classify one request for an IELTS chatbot with optional uploaded study materials.",
-        "Use route=rag only when answering requires facts or evidence from uploaded material.",
-        "Use route=direct when the request can be answered independently of uploaded material.",
-        "For route=direct, put the complete user-facing answer in answer.",
-        "For route=rag, set answer to an empty string. Never answer from document titles or metadata alone.",
+        "Act as the semantic gateway for an IELTS chatbot with optional uploaded study materials.",
+        "Decide the route, user intent, and target documents from meaning and conversation context.",
+        "The routing candidates are navigation hints only. Their presence or similarity score never forces RAG.",
+        "Use route=direct when the request can be answered without facts from uploaded material, even when files are attached.",
+        "Use route=rag only when the requested answer, transformation, or evidence depends on uploaded material.",
+        "Use route=clarify when uploaded material is required but more than one document remains plausible and the user has not selected one.",
+        "For direct, put the complete user-facing answer in answer and use intent=direct.",
+        "For rag, set answer to an empty string. Never answer from routing snippets alone.",
+        "For clarify, ask one concise document-selection question in answer.",
+        "Select target_document_refs from the provided D references. Select every relevant document only for an explicit collection-wide request.",
+        "Select target_section_refs only when a supplied S reference clearly identifies the requested section.",
+        "Intent meanings:",
+        "- document_overview: summarize a document or selected collection.",
+        "- show_questions: reproduce question content without solving.",
+        "- translate_questions: translate requested questions without solving.",
+        "- explain_questions: explain instructions, wording, or method without solving.",
+        "- solve_questions: answer document questions using evidence.",
+        "- show_table/extract_table/show_flowchart/show_diagram/show_writing_prompt: reproduce structured content without filling answers.",
+        "- table_cell/table_calculation/table_comparison: exact structured table operations.",
+        "- writing_generation: produce requested IELTS Writing content from the selected prompt/data.",
+        "- semantic_qa: any other evidence-based question about selected material.",
+        "Respect explicit constraints such as not solving, not choosing answers, not filling blanks, or not writing an essay.",
         "Return only the JSON object required by the supplied schema.",
         ASSISTANT_STYLE,
     ]
@@ -597,19 +673,7 @@ def route_or_answer_prompt(
     return "\n\n".join(parts)
 
 
-def compact_route_or_answer_prompt(message: str) -> str:
-    return "\n\n".join(
-        [
-            "Classify one IELTS chatbot request as direct or rag.",
-            "Use rag only when uploaded material is required.",
-            "For direct, provide the complete answer. For rag, use an empty answer.",
-            "Return only the JSON object required by the supplied schema.",
-            f"User message:\n{message}",
-        ]
-    )
-
-
-def parse_gateway_response(response: str) -> tuple[str, str | None, str]:
+def parse_gateway_response(response: str) -> GatewayDecision:
     try:
         payload = json.loads(response)
     except json.JSONDecodeError as exc:
@@ -617,17 +681,41 @@ def parse_gateway_response(response: str) -> tuple[str, str | None, str]:
     if not isinstance(payload, dict):
         raise OllamaRequestError("invalid_gateway_output", "Gateway returned a non-object JSON value.")
     route = payload.get("route")
+    intent = payload.get("intent")
+    document_refs = payload.get("target_document_refs")
+    section_refs = payload.get("target_section_refs")
     answer = str(payload.get("answer") or "").strip()
+    confidence = payload.get("confidence")
     reason = str(payload.get("reason") or "").strip()
     if not reason:
         raise OllamaRequestError("invalid_gateway_output", "Gateway response did not include a reason.")
-    if route == "rag":
-        return "rag", None, reason
-    if route == "direct" and answer:
-        return "direct", answer, reason
-    raise OllamaRequestError(
-        "invalid_gateway_output",
-        "Gateway response did not contain a valid route and direct answer.",
+    if intent not in ROUTING_INTENTS:
+        raise OllamaRequestError("invalid_gateway_output", "Gateway response contained an invalid intent.")
+    if not isinstance(document_refs, list) or not all(isinstance(item, str) for item in document_refs):
+        raise OllamaRequestError("invalid_gateway_output", "Gateway document references are invalid.")
+    if not isinstance(section_refs, list) or not all(isinstance(item, str) for item in section_refs):
+        raise OllamaRequestError("invalid_gateway_output", "Gateway section references are invalid.")
+    if not isinstance(confidence, (int, float)) or not 0.0 <= float(confidence) <= 1.0:
+        raise OllamaRequestError("invalid_gateway_output", "Gateway confidence is invalid.")
+    if route == "rag" and intent != "direct":
+        answer = ""
+    elif route == "direct" and intent == "direct" and answer:
+        pass
+    elif route == "clarify" and answer:
+        pass
+    else:
+        raise OllamaRequestError(
+            "invalid_gateway_output",
+            "Gateway response did not contain a valid route, intent, and answer combination.",
+        )
+    return GatewayDecision(
+        route=route,
+        intent=intent,
+        target_document_refs=tuple(dict.fromkeys(document_refs)),
+        target_section_refs=tuple(dict.fromkeys(section_refs)),
+        answer=answer or None,
+        confidence=float(confidence),
+        reason=reason,
     )
 
 
@@ -635,11 +723,15 @@ async def route_or_answer(
     message: str,
     history: Optional[List[ChatMessage]] = None,
     document_context: str = "",
-) -> tuple[str, str | None, str]:
+) -> GatewayDecision:
     prompt = route_or_answer_prompt(message, history, document_context)
     for attempt in range(2):
         try:
-            current_prompt = prompt if attempt == 0 else compact_route_or_answer_prompt(message)
+            current_prompt = prompt if attempt == 0 else route_or_answer_prompt(
+                message,
+                history,
+                document_context,
+            )
             response = await query_ollama(
                 current_prompt,
                 temperature=0.0,

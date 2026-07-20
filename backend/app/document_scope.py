@@ -7,28 +7,6 @@ from pathlib import Path
 from typing import Any
 
 
-DOCUMENT_REFERENCE_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE)
-    for pattern in [
-        r"\btrong\s+(?:tài liệu|file|pdf|docx|bài đọc|ảnh|hình|bảng|sơ đồ)\b",
-        r"\b(?:tài liệu|file|pdf|docx|bài đọc|ảnh|hình|bảng|sơ đồ)\s+(?:này|trên|đó|đã tải)\b",
-        r"\b(?:uploaded|attached)\s+(?:material|document|file|pdf|image)\b",
-        r"\b(?:in|from)\s+(?:the\s+)?(?:document|file|pdf|image|table|diagram)\b",
-        r"\b(?:page|trang)\s*\d{1,4}\b",
-        r"\b(?:nội dung|tóm tắt|tổng quan)\s+(?:của\s+)?(?:tài liệu|file|pdf)\b",
-        r"\b(?:tài liệu|file|pdf)\s+(?:gồm|chứa|nhắc|nói về)\b",
-    ]
-]
-
-COLLECTION_MARKERS = [
-    "những tài liệu",
-    "các tài liệu",
-    "toàn bộ tài liệu",
-    "tài liệu đã tải",
-    "uploaded documents",
-]
-
-
 @dataclass(frozen=True)
 class DocumentScope:
     requested_document_ids: list[str]
@@ -49,24 +27,6 @@ def normalize_reference(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value.casefold())
     without_marks = "".join(character for character in normalized if not unicodedata.combining(character))
     return " ".join(re.findall(r"[a-z0-9]+", without_marks))
-
-
-def is_document_grounded_query(message: str, catalog: list[dict[str, Any]] | None = None) -> bool:
-    lowered = message.casefold()
-    normalized = normalize_reference(message)
-    if any(pattern.search(message) for pattern in DOCUMENT_REFERENCE_PATTERNS):
-        return True
-    if re.search(
-        r"\b(?:reading\s+passage|passage|questions?|câu(?:\s+hỏi)?)\s*\d{1,3}\b",
-        lowered,
-    ):
-        return True
-    matches = [
-        item
-        for item in catalog or []
-        if _catalog_match_score(normalized, lowered, item) > 0
-    ]
-    return len(matches) == 1
 
 
 def resolve_document_scope(
@@ -91,12 +51,9 @@ def resolve_document_scope(
         for item in catalog
         if any(document_id in allowed for document_id in item.get("document_ids", []))
     ]
-    # Available IDs constrain retrieval but do not imply RAG. Explicit IDs are
-    # files deliberately attached or selected for this request.
-    grounded = request_mode == "explicit" or is_document_grounded_query(
-        message,
-        allowed_entries,
-    )
+    # This layer only validates the allowed IDs and exact catalog references.
+    # Semantic document grounding is owned by the LLM gateway.
+    grounded = False
     if requested and not allowed:
         return DocumentScope(
             requested,
@@ -113,7 +70,7 @@ def resolve_document_scope(
     normalized_query = normalize_reference(message)
     scored: list[tuple[float, dict[str, Any]]] = []
     for entry in allowed_entries:
-        score = _catalog_match_score(normalized_query, message.casefold(), entry)
+        score = _catalog_match_score(normalized_query, entry)
         if score > 0:
             scored.append((score, entry))
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -145,21 +102,8 @@ def resolve_document_scope(
             [entry.get("source_file", "unknown") for entry in allowed_entries],
             "explicit_request" if len(allowed) > 1 else "explicit_single",
             False,
-            True,
-            "The client explicitly selected these documents for the current request.",
-            request_mode,
-        )
-
-    if any(normalize_reference(marker) in normalized_query for marker in COLLECTION_MARKERS):
-        return DocumentScope(
-            requested,
-            allowed,
-            allowed,
-            [entry.get("source_file", "unknown") for entry in allowed_entries],
-            "collection",
             False,
-            grounded,
-            "The query explicitly targets the uploaded document collection.",
+            "The client explicitly selected these documents for the current request.",
             request_mode,
         )
 
@@ -298,25 +242,9 @@ def _longest_contiguous_match(first: list[str], second: list[str]) -> int:
 
 def _catalog_match_score(
     normalized_query: str,
-    lowered_message: str,
     entry: dict[str, Any],
 ) -> float:
     return (
         _filename_match_score(normalized_query, entry.get("source_file", ""))
         + _section_title_match_score(normalized_query, entry.get("section_titles") or [])
-        + _modality_match_score(lowered_message, entry)
     )
-
-
-def _modality_match_score(message: str, entry: dict[str, Any]) -> float:
-    mime_types = entry.get("mime_types", [])
-    image_reference = any(
-        re.search(pattern, message, flags=re.IGNORECASE)
-        for pattern in [
-            r"\btrong\s+(?:ảnh|hình|image|screenshot)\b",
-            r"\b(?:ảnh|hình|image|screenshot)\s+(?:này|trên|đó|đã tải)\b",
-        ]
-    )
-    if image_reference:
-        return 30.0 if any(str(mime).startswith("image/") for mime in mime_types) else 0.0
-    return 0.0

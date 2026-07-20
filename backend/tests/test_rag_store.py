@@ -31,9 +31,9 @@ except ImportError:
 from app import llm, rag
 from app.document_scope import apply_document_affinity, resolve_document_scope
 from app.intent import (
-    detect_query_intent,
     filter_sources_for_intent,
     has_explicit_no_solution_constraint,
+    semantic_intent_decision,
 )
 from app.llm import (
     clean_response,
@@ -262,41 +262,24 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual([item["chunk_id"] for item in probe["results"]], ["outline", "passage-1", "passage-2"])
         self.assertTrue(all(item["probe_overview_score"] == 1.0 for item in probe["results"]))
 
-    def test_document_intent_matrix(self) -> None:
-        probe = {"is_overview": False, "has_document_intent": True}
-        cases = [
-            ("trả lời question 1 đến question 4", "solve_questions"),
-            ("trả lời câu hỏi từ 1 đến 4 trong tài liệu trên", "solve_questions"),
-            ("Hiển thị lại toàn bộ bảng của Questions 5-10, giữ đúng ô trống. Không giải bài.", "show_table"),
-            ("Hiển thị cấu trúc flowchart của Questions 18-23, chưa điền đáp án.", "show_flowchart"),
-            ("Tỷ lệ sở hữu smartphone của nước B năm 2024 là bao nhiêu?", "table_cell"),
-            ("Trả lời Question 40 và giải thích vì sao đáp án phù hợp.", "solve_questions"),
-            ("Hiển thị Questions 20-22, không chọn ba đáp án.", "show_questions"),
-            ("Liệt kê Questions 28-29 cùng phần hướng dẫn và các ô trống, chưa điền đáp án.", "show_questions"),
-            ("Giải thích Questions 27-32, không ghép đáp án A-H.", "explain_questions"),
-            ("Từ bảng, quốc gia nào tăng nhiều nhất? Trình bày phép tính.", "table_calculation"),
-            (
-                "Quốc gia nào có mức tăng Internet Access lớn nhất từ 2019 đến 2024? Trình bày phép tính.",
-                "table_calculation",
-            ),
-            ("So sánh hai chỉ số của Country A từ bảng.", "table_comparison"),
-            ("Chỉ liệt kê đáp án Questions 1-4.", "solve_questions"),
-            ("Giải thích dạng T/F/NG cho Questions 1-4.", "explain_questions"),
-            ("Tôi không xác định đáp án được, hãy trả lời Questions 1-4.", "solve_questions"),
-            ("Tóm tắt tài liệu và trả lời Question 1.", "solve_questions"),
-            (
-                "Đề Writing trong ảnh yêu cầu gì? Chỉ giải thích yêu cầu, chưa viết bài.",
-                "show_writing_prompt",
-            ),
-            (
-                "Viết riêng một đoạn overview cho bảng Writing, không viết introduction hoặc body.",
-                "writing_generation",
-            ),
-            ("Viết bài IELTS Writing Task 1 dài 170-190 từ dựa trên ảnh.", "writing_generation"),
-        ]
-        for message, expected in cases:
-            with self.subTest(message=message):
-                self.assertEqual(detect_query_intent(message, probe), expected)
+    def test_semantic_intent_keeps_router_decision_except_for_explicit_constraints(self) -> None:
+        solve = semantic_intent_decision(
+            "Trả lời Questions 1-4 và giải thích.",
+            "solve_questions",
+            0.94,
+            "The user asks for answers.",
+        )
+        no_solve = semantic_intent_decision(
+            "Hiển thị Questions 1-4, không giải bài.",
+            "solve_questions",
+            0.70,
+            "The request concerns questions.",
+        )
+
+        self.assertEqual(solve.intent, "solve_questions")
+        self.assertTrue(solve.allow_solution)
+        self.assertEqual(no_solve.intent, "show_questions")
+        self.assertFalse(no_solve.allow_solution)
 
     def test_keyword_only_probe_does_not_load_embedding_model(self) -> None:
         store = FakeVectorStore()
@@ -372,7 +355,8 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertEqual(resolved.resolved_document_ids, ["doc-2"])
         self.assertFalse(resolved.ambiguous)
-        self.assertTrue(ambiguous.ambiguous)
+        self.assertFalse(ambiguous.ambiguous)
+        self.assertEqual(ambiguous.method, "unresolved")
 
         affinity_scope = apply_document_affinity(ambiguous, catalog, ["doc-2"])
         self.assertEqual(affinity_scope.resolved_document_ids, ["doc-2"])
@@ -414,7 +398,7 @@ class LocalVectorStoreTests(unittest.TestCase):
             ["doc-reading"],
             request_mode="explicit",
         )
-        self.assertTrue(explicit.document_grounded)
+        self.assertFalse(explicit.document_grounded)
         self.assertEqual(explicit.method, "explicit_single")
 
     def test_available_document_ids_do_not_force_general_chat_into_rag(self) -> None:
@@ -472,8 +456,9 @@ class LocalVectorStoreTests(unittest.TestCase):
                 self.assertEqual(scope.resolved_document_ids, [])
 
         overview = resolve_document_scope("Nội dung tài liệu là gì?", catalog)
-        self.assertTrue(overview.document_grounded)
-        self.assertTrue(overview.ambiguous)
+        self.assertFalse(overview.document_grounded)
+        self.assertFalse(overview.ambiguous)
+        self.assertEqual(overview.method, "unresolved")
 
     def test_structured_section_title_selects_one_document(self) -> None:
         catalog = [
@@ -794,7 +779,11 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             return_value=json.dumps(
                 {
                     "route": "direct",
+                    "intent": "direct",
+                    "target_document_refs": [],
+                    "target_section_refs": [],
                     "answer": "Use a clear beginning, middle, and end.",
+                    "confidence": 0.99,
                     "reason": "The request is general IELTS advice.",
                 }
             )
@@ -804,11 +793,12 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             "query_ollama",
             model,
         ):
-            route, answer, reason = await llm.route_or_answer("Give me one Speaking Part 2 tip.")
+            decision = await llm.route_or_answer("Give me one Speaking Part 2 tip.")
 
-        self.assertEqual(route, "direct")
-        self.assertEqual(answer, "Use a clear beginning, middle, and end.")
-        self.assertEqual(reason, "The request is general IELTS advice.")
+        self.assertEqual(decision.route, "direct")
+        self.assertEqual(decision.intent, "direct")
+        self.assertEqual(decision.answer, "Use a clear beginning, middle, and end.")
+        self.assertEqual(decision.reason, "The request is general IELTS advice.")
         self.assertEqual(model.await_args.kwargs["response_format"], llm.GATEWAY_RESPONSE_SCHEMA)
         self.assertEqual(model.await_args.kwargs["temperature"], 0.0)
 
@@ -820,17 +810,23 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
                 return_value=json.dumps(
                     {
                         "route": "rag",
+                        "intent": "show_questions",
+                        "target_document_refs": ["D1"],
+                        "target_section_refs": ["S1"],
                         "answer": "",
+                        "confidence": 0.97,
                         "reason": "The request asks about an uploaded file.",
                     }
                 )
             ),
         ):
-            route, answer, reason = await llm.route_or_answer("What is Question 4 in the file?")
+            decision = await llm.route_or_answer("What is Question 4 in the file?")
 
-        self.assertEqual(route, "rag")
-        self.assertIsNone(answer)
-        self.assertIn("uploaded file", reason)
+        self.assertEqual(decision.route, "rag")
+        self.assertEqual(decision.intent, "show_questions")
+        self.assertIsNone(decision.answer)
+        self.assertEqual(decision.target_document_refs, ("D1",))
+        self.assertIn("uploaded file", decision.reason)
 
     async def test_route_or_answer_retries_invalid_gateway_json(self) -> None:
         model = AsyncMock(
@@ -839,17 +835,21 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps(
                     {
                         "route": "rag",
+                        "intent": "document_overview",
+                        "target_document_refs": ["D1"],
+                        "target_section_refs": [],
                         "answer": "",
+                        "confidence": 0.96,
                         "reason": "The request requires uploaded material.",
                     }
                 ),
             ]
         )
         with patch.object(llm, "query_ollama", model):
-            route, answer, _ = await llm.route_or_answer("What does the uploaded file say?")
+            decision = await llm.route_or_answer("What does the uploaded file say?")
 
-        self.assertEqual(route, "rag")
-        self.assertIsNone(answer)
+        self.assertEqual(decision.route, "rag")
+        self.assertIsNone(decision.answer)
         self.assertEqual(model.await_count, 2)
 
     async def test_route_or_answer_retries_one_empty_gateway_response(self) -> None:
@@ -859,22 +859,26 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
                 json.dumps(
                     {
                         "route": "direct",
+                        "intent": "direct",
+                        "target_document_refs": [],
+                        "target_section_refs": [],
                         "answer": "Hello! How can I help with IELTS?",
+                        "confidence": 0.99,
                         "reason": "This is a greeting.",
                     }
                 ),
             ]
         )
         with patch.object(llm, "query_ollama", model):
-            route, answer, _ = await llm.route_or_answer("Hello")
+            decision = await llm.route_or_answer("Hello")
 
-        self.assertEqual(route, "direct")
-        self.assertEqual(answer, "Hello! How can I help with IELTS?")
+        self.assertEqual(decision.route, "direct")
+        self.assertEqual(decision.answer, "Hello! How can I help with IELTS?")
         self.assertEqual(model.await_count, 2)
         first_prompt = model.await_args_list[0].args[0]
         retry_prompt = model.await_args_list[1].args[0]
-        self.assertIn("Classify one request", first_prompt)
-        self.assertEqual(retry_prompt, llm.compact_route_or_answer_prompt("Hello"))
+        self.assertIn("semantic gateway", first_prompt)
+        self.assertEqual(retry_prompt, llm.route_or_answer_prompt("Hello"))
 
     async def test_non_stream_request_retries_one_server_error(self) -> None:
         attempts = 0

@@ -32,8 +32,9 @@ Upload text/PDF/DOCX/image
 -> structure-aware chunks, with semantic chunk fallback for general documents
 -> sentence-transformers embedding
 -> local vector store
--> deterministic document-intent guard, then LLM router for ambiguous queries
--> retrieve context
+-> retrieve compact document/section routing candidates
+-> one structured LLM gateway decides direct/RAG/clarify, intent, and target documents
+-> validate the decision and retrieve only inside the selected document scope
 -> Ollama answer with context
 ```
 
