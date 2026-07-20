@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -23,16 +24,18 @@ from .intent import (
     semantic_intent_decision,
 )
 from .llm import (
-    GatewayDecision,
     OLLAMA_MODEL,
     OLLAMA_NUM_PREDICT,
     OllamaRequestError,
+    RouteGatewayDecision,
+    classify_rag_intent,
     query_ollama,
     rag_prompt,
     response_output_contract,
     response_output_issues,
     response_output_penalty,
     response_retry_prompt,
+    resolve_rag_target,
     route_or_answer,
     select_best_writing_output,
     stream_ollama,
@@ -42,7 +45,16 @@ from .llm import (
     writing_retry_prompt,
 )
 from .rag import get_store
-from .schemas import ChatRequest, ChatResponse, SearchRequest, SearchResponse, StatsResponse, UploadResponse
+from .schemas import (
+    ChatAffinity,
+    ChatConversationState,
+    ChatRequest,
+    ChatResponse,
+    SearchRequest,
+    SearchResponse,
+    StatsResponse,
+    UploadResponse,
+)
 from .table_operations import (
     comparison_row_facts,
     comparison_row,
@@ -54,18 +66,6 @@ from .table_operations import (
 
 
 logger = logging.getLogger(__name__)
-
-ROUTING_CANDIDATE_UNIT_TYPES = [
-    "document_outline",
-    "passage",
-    "question_group",
-    "table",
-    "flowchart",
-    "diagram",
-    "writing_task",
-    "writing_prompt",
-    "writing_table",
-]
 
 UPLOAD_DIR = settings.upload_dir
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -131,19 +131,14 @@ def format_context(sources: list[dict], max_chars_per_source: int | None = None)
 
 
 @dataclass(frozen=True)
-class GatewayRoutingContext:
+class DocumentCatalogContext:
     text: str
     document_refs: dict[str, str]
-    section_refs: dict[str, dict[str, Any]]
 
 
-def format_gateway_document_context(
-    catalog: list[dict],
-    candidates: list[dict[str, Any]],
-) -> GatewayRoutingContext:
+def format_document_catalog_context(catalog: list[dict]) -> DocumentCatalogContext:
     lines: list[str] = []
     document_refs: dict[str, str] = {}
-    document_ref_by_id: dict[str, str] = {}
     if catalog:
         lines.append("Available uploaded documents:")
         for index, item in enumerate(catalog, 1):
@@ -152,7 +147,6 @@ def format_gateway_document_context(
                 continue
             reference = f"D{index}"
             document_refs[reference] = document_id
-            document_ref_by_id[document_id] = reference
             lines.append(
                 f"- {reference}: {item.get('source_file', 'unknown')} | "
                 f"document_types={item.get('document_types') or []} | "
@@ -163,35 +157,9 @@ def format_gateway_document_context(
     else:
         lines.append("Available uploaded documents: none")
 
-    section_refs: dict[str, dict[str, Any]] = {}
-    if candidates:
-        lines.append("Routing candidates selected from the current query:")
-        for index, candidate in enumerate(candidates, 1):
-            document_id = str(candidate.get("document_id") or "")
-            document_ref = document_ref_by_id.get(document_id)
-            if not document_ref:
-                continue
-            section_ref = f"S{index}"
-            metadata = candidate.get("metadata", {})
-            text = " ".join(
-                str(candidate.get("display_text") or candidate.get("text") or "").split()
-            )
-            if len(text) > 360:
-                text = text[:360].rsplit(" ", 1)[0] + " ..."
-            section_refs[section_ref] = candidate
-            lines.append(
-                f"- {section_ref} in {document_ref} | "
-                f"unit={metadata.get('unit_type')} | "
-                f"passage={metadata.get('passage_number')} | "
-                f"question_range={metadata.get('question_range')} | "
-                f"title={metadata.get('passage_title') or metadata.get('task_title') or ''} | "
-                f"snippet={text}"
-            )
-
-    return GatewayRoutingContext(
+    return DocumentCatalogContext(
         text="\n".join(lines),
         document_refs=document_refs,
-        section_refs=section_refs,
     )
 
 
@@ -270,6 +238,11 @@ AMBIGUOUS_DOCUMENT_RESPONSE = (
 INCOMPLETE_QUESTION_RESPONSE = (
     "Mình đã tìm thấy câu hỏi nhưng phần lựa chọn hoặc dữ liệu cần thiết để giải chưa được "
     "trích xuất đầy đủ. Vì vậy mình chưa thể xác định đáp án đáng tin cậy từ tài liệu hiện có."
+)
+
+ROUTE_UNDETERMINED_RESPONSE = (
+    "Mình chưa xác định chắc chắn câu hỏi này có cần dùng tài liệu đã tải lên hay không. "
+    "Vui lòng nói rõ bạn muốn hỏi kiến thức chung hay nội dung trong một tài liệu cụ thể."
 )
 
 
@@ -418,6 +391,58 @@ def is_writing_response(prepared: "ChatPreparation") -> bool:
 
 def response_chunks(text: str, size: int = 180) -> list[str]:
     return [text[index : index + size] for index in range(0, len(text), size)] or [""]
+
+
+def conversation_state_for_result(
+    req: ChatRequest,
+    prepared: "ChatPreparation",
+) -> ChatConversationState:
+    previous_affinity = effective_affinity(req) or ChatAffinity()
+    if prepared.route_used == "base_model":
+        route = "direct"
+        affinity = previous_affinity
+    elif prepared.route_used == "vector_rag_ambiguous_document":
+        route = "clarify"
+        affinity = previous_affinity
+    elif prepared.route_used in {"vector_rag_no_match", "route_undetermined"}:
+        route = "no_match"
+        affinity = previous_affinity
+    else:
+        route = "rag"
+        document_ids = list(
+            dict.fromkeys(
+                str(source.get("document_id"))
+                for source in prepared.sources
+                if source.get("document_id")
+            )
+        )
+        passage_numbers = sorted(
+            {
+                int(source.get("metadata", {}).get("passage_number"))
+                for source in prepared.sources
+                if source.get("metadata", {}).get("passage_number") is not None
+            }
+        )
+        question_ranges = []
+        for source in prepared.sources:
+            values = source.get("metadata", {}).get("question_range")
+            if isinstance(values, list) and len(values) == 2 and values not in question_ranges:
+                question_ranges.append([int(values[0]), int(values[1])])
+        affinity = ChatAffinity(
+            document_ids=document_ids or previous_affinity.document_ids,
+            passage_numbers=passage_numbers,
+            question_ranges=question_ranges,
+        )
+    state = ChatConversationState(
+        last_route=route,
+        last_intent=prepared.query_intent,
+        rag_affinity=affinity,
+    )
+    prepared.debug["conversation_state"] = {
+        "input": req.conversation_state.model_dump() if req.conversation_state else None,
+        "output": state.model_dump(),
+    }
+    return state
 
 
 def _markdown_table(table: dict[str, Any]) -> str:
@@ -773,17 +798,18 @@ def affinity_retrieval_query(req: ChatRequest, scope: DocumentScope) -> str:
         return message
 
     affinity_hints: list[str] = []
-    if req.affinity:
-        if req.affinity.passage_numbers:
+    affinity = effective_affinity(req)
+    if affinity:
+        if affinity.passage_numbers:
             affinity_hints.append(
-                "Passages: " + ", ".join(str(value) for value in req.affinity.passage_numbers)
+                "Passages: " + ", ".join(str(value) for value in affinity.passage_numbers)
             )
-        if req.affinity.question_ranges:
+        if affinity.question_ranges:
             affinity_hints.append(
                 "Question ranges: "
                 + ", ".join(
                     f"{values[0]}-{values[1]}"
-                    for values in req.affinity.question_ranges
+                    for values in affinity.question_ranges
                     if len(values) == 2
                 )
             )
@@ -791,40 +817,40 @@ def affinity_retrieval_query(req: ChatRequest, scope: DocumentScope) -> str:
     return f"{previous_user_message}\nFollow-up: {message}{suffix}"
 
 
-def resolve_gateway_document_ids(
-    decision: GatewayDecision,
-    routing_context: GatewayRoutingContext,
-    scope: DocumentScope,
-) -> tuple[list[str], list[str], list[str]]:
-    allowed = set(scope.allowed_document_ids)
-    resolved: list[str] = []
-    invalid_document_refs: list[str] = []
-    invalid_section_refs: list[str] = []
+def effective_affinity(req: ChatRequest) -> ChatAffinity | None:
+    if req.conversation_state and req.conversation_state.rag_affinity.document_ids:
+        return req.conversation_state.rag_affinity
+    return req.affinity
 
-    for reference in decision.target_document_refs:
+
+def gateway_state_context(req: ChatRequest) -> str:
+    if not req.conversation_state:
+        return ""
+    return json.dumps(
+        {
+            "last_route": req.conversation_state.last_route,
+            "last_intent": req.conversation_state.last_intent,
+            "has_rag_affinity": bool(req.conversation_state.rag_affinity.document_ids),
+        },
+        ensure_ascii=False,
+    )
+
+
+def resolve_target_refs(
+    references: tuple[str, ...],
+    routing_context: DocumentCatalogContext,
+    allowed_document_ids: list[str],
+) -> tuple[list[str], list[str]]:
+    allowed = set(allowed_document_ids)
+    resolved: list[str] = []
+    invalid: list[str] = []
+    for reference in references:
         document_id = routing_context.document_refs.get(reference)
         if not document_id or document_id not in allowed:
-            invalid_document_refs.append(reference)
-            continue
-        if document_id not in resolved:
+            invalid.append(reference)
+        elif document_id not in resolved:
             resolved.append(document_id)
-
-    for reference in decision.target_section_refs:
-        section = routing_context.section_refs.get(reference)
-        document_id = str(section.get("document_id") or "") if section else ""
-        if not section or document_id not in allowed:
-            invalid_section_refs.append(reference)
-            continue
-        if document_id not in resolved:
-            resolved.append(document_id)
-
-    if not resolved and decision.route == "rag":
-        if len(scope.resolved_document_ids) == 1:
-            resolved = list(scope.resolved_document_ids)
-        elif len(scope.allowed_document_ids) == 1:
-            resolved = list(scope.allowed_document_ids)
-
-    return resolved, invalid_document_refs, invalid_section_refs
+    return resolved, invalid
 
 
 def gateway_clarification_response(catalog: list[dict[str, Any]]) -> str:
@@ -847,7 +873,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     writing_parent_id: str | None = None
     evidence_query: str | None = None
     direct_answer: str | None = None
-    gateway_debug: dict[str, Any] = {"used": False}
+    gateway_debug: dict[str, Any]
+    document_resolution_debug: dict[str, Any] = {}
 
     stats = await run_in_threadpool(store.stats)
     full_catalog = await run_in_threadpool(store.document_catalog)
@@ -857,103 +884,128 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         req.document_ids,
         req.document_scope,
     )
+    affinity = effective_affinity(req)
     scope = apply_document_affinity(
         scope,
         full_catalog,
-        req.affinity.document_ids if req.affinity else None,
+        affinity.document_ids if affinity else None,
     )
-    retrieval_query = affinity_retrieval_query(req, scope)
-    probe_top_k = max(settings.rag_probe_top_k, settings.rag_top_k)
     allowed_scope_ids = scope.allowed_document_ids
-    routing_candidate_ids = scope.resolved_document_ids or allowed_scope_ids
     catalog = [
         item
         for item in full_catalog
         if any(document_id in allowed_scope_ids for document_id in item.get("document_ids", []))
     ]
-    routing_candidates = []
-    if stats["chunks"] > 0 and routing_candidate_ids:
-        routing_candidates = await run_in_threadpool(
-            store.hybrid_search,
-            retrieval_query,
-            max(settings.rag_probe_top_k, 8),
-            routing_candidate_ids,
-            ROUTING_CANDIDATE_UNIT_TYPES,
-            None,
-        )
-    gateway_context = format_gateway_document_context(catalog, routing_candidates)
     gateway_decision = await route_or_answer(
         message,
         req.conversation_history,
-        gateway_context.text,
+        gateway_state_context(req),
     )
     route = gateway_decision.route
     direct_answer = gateway_decision.answer
+    gateway_debug = {"used": True, **gateway_decision.to_debug()}
+
+    if route == "direct":
+        return ChatPreparation(
+            prompt=None,
+            static_response=direct_answer,
+            route_used="base_model",
+            sources=[],
+            debug={
+                "route_decision": "direct",
+                "query_intent": "direct",
+                "route_gateway": gateway_debug,
+                "document_resolution": {"skipped": True, "reason": "direct_route"},
+                "intent_classifier": {"skipped": True, "reason": "direct_route"},
+                "retrieval": {"skipped": True, "final_context": []},
+                "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
+                "source_count": 0,
+            },
+            query_intent="direct",
+        )
+
+    has_safe_rag_fallback = bool(
+        (scope.request_mode == "explicit" and scope.resolved_document_ids)
+        or (scope.document_grounded and scope.resolved_document_ids)
+        or (affinity and affinity.document_ids)
+    )
+    if route == "undetermined" and not has_safe_rag_fallback:
+        return ChatPreparation(
+            prompt=None,
+            static_response=ROUTE_UNDETERMINED_RESPONSE,
+            route_used="route_undetermined",
+            sources=[],
+            debug={
+                "route_decision": "undetermined",
+                "query_intent": "route_undetermined",
+                "route_gateway": gateway_debug,
+                "document_resolution": {"skipped": True, "reason": "route_undetermined"},
+                "intent_classifier": {"skipped": True, "reason": "route_undetermined"},
+                "retrieval": {"skipped": True, "final_context": []},
+                "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
+                "source_count": 0,
+            },
+            query_intent="route_undetermined",
+        )
+    if route == "undetermined":
+        route = "rag"
+        gateway_debug["fallback_reason"] = "valid_document_scope_or_rag_affinity"
+
+    gateway_context = format_document_catalog_context(catalog)
+    scope_ids = list(scope.resolved_document_ids)
+    needs_target_model = not scope_ids and len(allowed_scope_ids) > 1
+    intent_task = asyncio.create_task(classify_rag_intent(message, req.conversation_history))
+    target_task = (
+        asyncio.create_task(resolve_rag_target(message, gateway_context.text))
+        if needs_target_model
+        else None
+    )
+    intent_classifier = await intent_task
+    target_decision = await target_task if target_task else None
+
+    if not scope_ids and len(allowed_scope_ids) == 1:
+        scope_ids = list(allowed_scope_ids)
+        document_resolution_debug = {"method": "single_allowed_document"}
+    elif scope_ids:
+        document_resolution_debug = {"method": scope.method}
+    elif target_decision and target_decision.action == "all":
+        scope_ids = list(allowed_scope_ids)
+        document_resolution_debug = {"method": "semantic_target_all", **target_decision.to_debug()}
+    elif target_decision and target_decision.action == "selected":
+        scope_ids, invalid_refs = resolve_target_refs(
+            target_decision.document_refs,
+            gateway_context,
+            allowed_scope_ids,
+        )
+        document_resolution_debug = {
+            "method": "semantic_target",
+            **target_decision.to_debug(),
+            "invalid_refs": invalid_refs,
+        }
+    else:
+        document_resolution_debug = {
+            "method": "semantic_target_clarify",
+            **(target_decision.to_debug() if target_decision else {}),
+        }
+
     intent_decision = semantic_intent_decision(
         message,
-        gateway_decision.intent,
-        gateway_decision.confidence,
-        gateway_decision.reason,
+        intent_classifier.intent,
+        1.0,
+        "Semantic intent enum classifier.",
     )
     query_intent = intent_decision.intent
     intent_debug = intent_decision.to_debug()
-    scope_ids, invalid_document_refs, invalid_section_refs = resolve_gateway_document_ids(
-        gateway_decision,
-        gateway_context,
-        scope,
-    )
-    gateway_debug = {
-        "used": True,
-        **gateway_decision.to_debug(),
-        "resolved_document_ids": scope_ids,
-        "resolved_sections": [
-            {
-                "reference": reference,
-                "chunk_id": gateway_context.section_refs[reference].get("chunk_id"),
-                "document_id": gateway_context.section_refs[reference].get("document_id"),
-                "unit_type": gateway_context.section_refs[reference].get("metadata", {}).get("unit_type"),
-            }
-            for reference in gateway_decision.target_section_refs
-            if reference in gateway_context.section_refs
-        ],
-        "invalid_document_refs": invalid_document_refs,
-        "invalid_section_refs": invalid_section_refs,
-        "routing_candidates": compact_final_context_debug(routing_candidates),
-    }
+    intent_debug["classifier"] = intent_classifier.to_debug()
 
-    if route == "clarify":
-        debug = {
-            "route_decision": "clarify",
-            "query_intent": "ambiguous_document",
-            "intent_decision": intent_debug,
-            "gateway": gateway_debug,
-            "target_resolution": scope.to_debug(),
-            "catalog": full_catalog,
-            "probe": compact_probe_debug(probe),
-            "retrieval": {
-                "method": None,
-                "structured_hits": 0,
-                "before_filter_count": 0,
-                "after_filter_count": 0,
-                "final_context": [],
-            },
-            "source_count": 0,
-        }
-        return ChatPreparation(
-            prompt=None,
-            static_response=direct_answer or gateway_clarification_response(catalog),
-            route_used="vector_rag_ambiguous_document",
-            sources=[],
-            debug=debug,
-            query_intent="ambiguous_document",
-        )
-
-    if route == "rag" and not scope_ids:
+    if not scope_ids:
         debug = {
             "route_decision": "rag",
-            "query_intent": "document_no_match",
+            "query_intent": "ambiguous_document" if len(allowed_scope_ids) > 1 else "document_no_match",
             "intent_decision": intent_debug,
-            "gateway": gateway_debug,
+            "route_gateway": gateway_debug,
+            "document_resolution": document_resolution_debug,
+            "intent_classifier": intent_classifier.to_debug(),
             "target_resolution": scope.to_debug(),
             "catalog": full_catalog,
             "probe": compact_probe_debug(probe),
@@ -989,6 +1041,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             for item in full_catalog
             if any(document_id in scope_ids for document_id in item.get("document_ids", []))
         ]
+
+    retrieval_query = affinity_retrieval_query(req, scope)
+    probe_top_k = max(settings.rag_probe_top_k, settings.rag_top_k)
 
     if stats["chunks"] > 0 and route == "rag" and query_intent == "semantic_qa":
         semantic_results = await run_in_threadpool(
@@ -1128,7 +1183,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         "route_decision": route,
         "query_intent": query_intent,
         "intent_decision": intent_debug,
-        "gateway": gateway_debug,
+        "route_gateway": gateway_debug,
+        "document_resolution": {
+            **document_resolution_debug,
+            "resolved_document_ids": scope_ids,
+            "requested_scope": scope.to_debug(),
+        },
+        "intent_classifier": intent_classifier.to_debug(),
         "target_resolution": scope.to_debug(),
         "catalog": catalog,
         "probe": compact_probe_debug(probe),
@@ -1145,6 +1206,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "final_context": compact_final_context_debug(sources),
         },
         "source_count": len(sources),
+        "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
     }
 
     if sources:
@@ -1281,11 +1343,43 @@ async def warmup() -> dict:
                 temperature=0.0,
                 num_predict=32,
             )
+            direct_check, rag_check, intent_check = await asyncio.gather(
+                route_or_answer("Give me one concise IELTS Speaking tip."),
+                route_or_answer("Summarize the content of the uploaded document."),
+                classify_rag_intent("List Questions 1-4 without solving them."),
+            )
+            gateway_ok = (
+                direct_check.route == "direct"
+                and bool(direct_check.answer)
+                and rag_check.route == "rag"
+                and intent_check.intent in {
+                    "show_questions",
+                    "translate_questions",
+                    "explain_questions",
+                    "solve_questions",
+                    "semantic_qa",
+                    "document_overview",
+                    "show_table",
+                    "extract_table",
+                    "table_cell",
+                    "table_calculation",
+                    "table_comparison",
+                    "show_flowchart",
+                    "show_diagram",
+                    "show_writing_prompt",
+                    "writing_generation",
+                }
+            )
             results["llm"] = {
-                "ok": True,
+                "ok": gateway_ok,
                 "model": OLLAMA_MODEL,
                 "duration_seconds": round(time.perf_counter() - llm_started, 2),
                 "sample": response[:120],
+                "gateway": {
+                    "direct": direct_check.to_debug(),
+                    "rag": rag_check.to_debug(),
+                    "intent": intent_check.to_debug(),
+                },
             }
         except Exception as exc:
             results["llm"] = {
@@ -1373,6 +1467,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
         route_used=prepared.route_used,
         sources=prepared.sources,
         debug=prepared.debug,
+        conversation_state=conversation_state_for_result(req, prepared),
     )
 
 
@@ -1390,6 +1485,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 route_used=prepared.route_used,
                 sources=prepared.sources,
                 debug=prepared.debug,
+                conversation_state=conversation_state_for_result(req, prepared).model_dump(),
             )
             if prepared.static_response is not None:
                 yield stream_event("token", token=prepared.static_response)

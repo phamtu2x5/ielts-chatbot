@@ -63,15 +63,14 @@ def _gateway_decision(
     document_refs: tuple[str, ...] = (),
     section_refs: tuple[str, ...] = (),
     reason: str = "test decision",
-) -> main.GatewayDecision:
-    return main.GatewayDecision(
-        route=route,
-        intent=intent,
-        target_document_refs=document_refs,
-        target_section_refs=section_refs,
+) -> main.RouteGatewayDecision:
+    return main.RouteGatewayDecision(
+        route="rag" if route == "clarify" else route,
         answer=answer,
-        confidence=0.99,
-        reason=reason,
+        attempts=1,
+        duration_seconds=0.01,
+        raw_output_preview=answer or ("[[RAG]]" if route != "direct" else "direct"),
+        fallback_reason=None,
     )
 
 
@@ -203,6 +202,39 @@ class _FakeChatStore:
 
 
 class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.intent_patcher = patch.object(
+            main,
+            "classify_rag_intent",
+            AsyncMock(
+                return_value=main.IntentClassifierDecision(
+                    intent="semantic_qa",
+                    attempts=1,
+                    duration_seconds=0.01,
+                    raw_output_preview="semantic_qa",
+                )
+            ),
+        )
+        self.target_patcher = patch.object(
+            main,
+            "resolve_rag_target",
+            AsyncMock(
+                return_value=main.TargetResolverDecision(
+                    document_refs=(),
+                    action="clarify",
+                    attempts=1,
+                    duration_seconds=0.01,
+                    raw_output_preview="CLARIFY",
+                )
+            ),
+        )
+        self.intent_patcher.start()
+        self.target_patcher.start()
+
+    async def asyncTearDown(self) -> None:
+        self.intent_patcher.stop()
+        self.target_patcher.stop()
+
     async def test_chat_stream_uses_the_same_completed_preparation_as_chat(self) -> None:
         prepared = main.ChatPreparation(
             prompt=None,
@@ -225,6 +257,83 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         prepare.assert_awaited_once()
         self.assertEqual(prepare.await_args.kwargs, {})
+
+    async def test_direct_turn_preserves_previous_rag_affinity(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt=None,
+            static_response="Three tips.",
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+        request = main.ChatRequest(
+            message="Give me three IELTS tips.",
+            conversation_state={
+                "last_route": "rag",
+                "last_intent": "semantic_qa",
+                "rag_affinity": {
+                    "document_ids": ["doc-1"],
+                    "passage_numbers": [2],
+                    "question_ranges": [[14, 17]],
+                },
+            },
+        )
+
+        state = main.conversation_state_for_result(request, prepared)
+
+        self.assertEqual(state.last_route, "direct")
+        self.assertEqual(state.rag_affinity.document_ids, ["doc-1"])
+        self.assertEqual(state.rag_affinity.passage_numbers, [2])
+
+    async def test_gateway_failure_without_document_basis_returns_safe_http_200_result(self) -> None:
+        catalog = [
+            {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]}
+        ]
+        gateway = main.RouteGatewayDecision(
+            route="undetermined",
+            answer=None,
+            attempts=2,
+            duration_seconds=0.1,
+            raw_output_preview="",
+            fallback_reason="empty_response",
+        )
+        with (
+            patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
+            patch.object(main, "route_or_answer", AsyncMock(return_value=gateway)),
+        ):
+            response = await main.chat(main.ChatRequest(message="Tell me something useful."))
+
+        self.assertEqual(response.route_used, "route_undetermined")
+        self.assertEqual(response.conversation_state.last_route, "no_match")
+        self.assertEqual(response.sources, [])
+
+    async def test_single_explicit_document_never_calls_target_resolver(self) -> None:
+        catalog = [
+            {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]},
+            {"source_file": "other.pdf", "document_ids": ["doc-2"], "mime_types": ["application/pdf"]},
+        ]
+        target = AsyncMock()
+        with (
+            patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
+            patch.object(
+                main,
+                "route_or_answer",
+                AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
+            ),
+            patch.object(main, "resolve_rag_target", target),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Summarize this document.",
+                    document_ids=["doc-1"],
+                    document_scope="explicit",
+                )
+            )
+
+        target.assert_not_awaited()
+        self.assertNotEqual(prepared.route_used, "vector_rag_ambiguous_document")
+        self.assertEqual(prepared.debug["document_resolution"]["resolved_document_ids"], ["doc-1"])
 
     async def test_chat_converts_gateway_failure_to_502(self) -> None:
         failure = main.OllamaRequestError("empty_response", "router returned no content")
@@ -460,7 +569,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(prepared.route_used, "base_model")
                 self.assertEqual(prepared.static_response, "General IELTS guidance.")
-                self.assertFalse(prepared.debug["target_resolution"]["ambiguous"])
+                self.assertTrue(prepared.debug["document_resolution"]["skipped"])
 
         self.assertEqual(gateway.await_count, 3)
 
@@ -498,7 +607,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         gateway.assert_awaited_once()
         self.assertEqual(prepared.route_used, "vector_rag_no_match")
         self.assertEqual(
-            prepared.debug["gateway"]["resolved_document_ids"],
+            prepared.debug["document_resolution"]["resolved_document_ids"],
             ["doc-a"],
         )
 
@@ -534,7 +643,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(prepared.debug["target_resolution"]["method"], "conversation_affinity")
         self.assertTrue(all(ids == ["doc-2"] for ids in store.routing_document_ids))
-        self.assertEqual(len(store.routing_queries), 2)
+        self.assertEqual(len(store.routing_queries), 1)
         self.assertIn("Trả lời Question 4", store.routing_queries[0])
         self.assertIn("Follow-up: Tại sao?", store.routing_queries[0])
 
@@ -600,7 +709,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.route_used, "base_model")
         self.assertEqual(prepared.static_response, "Direct answer.")
 
-    async def test_semantic_gateway_receives_routing_candidates_and_resolves_document_ref(self) -> None:
+    async def test_semantic_gateway_does_not_receive_catalog_or_retrieval_snippets(self) -> None:
         catalog = [
             {
                 "source_file": "reading.pdf",
@@ -642,11 +751,53 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
         gateway_context = gateway.await_args.args[2]
-        self.assertIn("D1: reading.pdf", gateway_context)
-        self.assertIn("S1 in D1", gateway_context)
-        self.assertIn("Urban transport changed", gateway_context)
-        self.assertEqual(prepared.debug["gateway"]["resolved_document_ids"], ["doc-1"])
-        self.assertEqual(prepared.debug["gateway"]["resolved_sections"][0]["chunk_id"], "passage-2")
+        self.assertEqual(gateway_context, "")
+        self.assertEqual(prepared.debug["document_resolution"]["resolved_document_ids"], ["doc-1"])
+        self.assertEqual(store.routing_candidates, [
+            {
+                "chunk_id": "passage-2",
+                "document_id": "doc-1",
+                "source_file": "reading.pdf",
+                "pages": [3],
+                "text": "Urban transport changed after the rail network expanded.",
+                "metadata": {
+                    "unit_type": "passage",
+                    "passage_number": 2,
+                    "passage_title": "Urban transport",
+                },
+            }
+        ])
+
+    async def test_semantic_gateway_state_does_not_expose_document_references(self) -> None:
+        catalog = [
+            {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]}
+        ]
+        gateway = AsyncMock(return_value=_gateway_decision("direct", "direct", answer="Direct answer."))
+        with (
+            patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
+            patch.object(main, "route_or_answer", gateway),
+        ):
+            await main.prepare_chat(
+                main.ChatRequest(
+                    message="Give me three IELTS tips.",
+                    document_ids=["doc-1"],
+                    conversation_state={
+                        "last_route": "rag",
+                        "last_intent": "semantic_qa",
+                        "rag_affinity": {
+                            "document_ids": ["doc-1"],
+                            "passage_numbers": [2],
+                            "question_ranges": [[14, 17]],
+                        },
+                    },
+                )
+            )
+
+        state_context = gateway.await_args.args[2]
+        self.assertIn('"last_route": "rag"', state_context)
+        self.assertIn('"has_rag_affinity": true', state_context)
+        self.assertNotIn("doc-1", state_context)
+        self.assertNotIn("14", state_context)
 
     async def test_gateway_can_request_rag_with_an_explicit_document_scope(self) -> None:
         catalog = [
@@ -682,8 +833,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.route_used, "vector_rag_no_match")
         self.assertNotEqual(prepared.query_intent, "direct")
         self.assertFalse(prepared.debug["target_resolution"]["document_grounded"])
-        self.assertEqual(prepared.debug["gateway"]["route"], "rag")
-        self.assertEqual(store.routing_document_ids, [["doc-1"], ["doc-1"]])
+        self.assertEqual(prepared.debug["route_gateway"]["route"], "rag")
+        self.assertEqual(store.routing_document_ids, [["doc-1"]])
 
     async def test_ambiguous_question_range_requests_a_document_choice(self) -> None:
         catalog = [
@@ -707,7 +858,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             prepared = await main.prepare_chat(main.ChatRequest(message="Liệt kê Questions 1-4"))
 
         self.assertEqual(prepared.route_used, "vector_rag_ambiguous_document")
-        self.assertIn("Vui lòng chọn file", prepared.static_response)
+        self.assertIn("Vui lòng nêu tên file", prepared.static_response)
 
     async def test_static_table_operations_do_not_collapse_to_first_cell(self) -> None:
         source = {

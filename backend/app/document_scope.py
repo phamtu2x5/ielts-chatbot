@@ -51,8 +51,8 @@ def resolve_document_scope(
         for item in catalog
         if any(document_id in allowed for document_id in item.get("document_ids", []))
     ]
-    # This layer only validates the allowed IDs and exact catalog references.
-    # Semantic document grounding is owned by the LLM gateway.
+    # This layer only validates allowed IDs and exact catalog references.
+    # The separate target resolver owns semantic document selection.
     grounded = False
     if requested and not allowed:
         return DocumentScope(

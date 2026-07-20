@@ -14,12 +14,19 @@ class ChatAffinity(BaseModel):
     question_ranges: List[List[int]] = Field(default_factory=list, max_length=20)
 
 
+class ChatConversationState(BaseModel):
+    last_route: Optional[Literal["direct", "rag", "clarify", "no_match"]] = None
+    last_intent: Optional[str] = None
+    rag_affinity: ChatAffinity = Field(default_factory=ChatAffinity)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8_000)
     conversation_history: Optional[List[ChatMessage]] = Field(default=None, max_length=20)
     document_ids: Optional[List[str]] = Field(default=None, max_length=50)
     document_scope: Literal["auto", "explicit", "available"] = "auto"
     affinity: Optional[ChatAffinity] = None
+    conversation_state: Optional[ChatConversationState] = None
 
 
 class ChatResponse(BaseModel):
@@ -27,6 +34,7 @@ class ChatResponse(BaseModel):
     route_used: str
     sources: List[Dict[str, Any]] = Field(default_factory=list)
     debug: Optional[Dict[str, Any]] = None
+    conversation_state: Optional[ChatConversationState] = None
 
 
 class UploadResponse(BaseModel):

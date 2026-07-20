@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import List, Optional
@@ -14,7 +15,6 @@ OLLAMA_API_URL = settings.ollama_api_url
 OLLAMA_MODEL = settings.ollama_model
 OLLAMA_NUM_PREDICT = settings.ollama_num_predict
 ROUTING_INTENTS = (
-    "direct",
     "document_overview",
     "show_questions",
     "translate_questions",
@@ -31,35 +31,7 @@ ROUTING_INTENTS = (
     "show_writing_prompt",
     "writing_generation",
 )
-
-GATEWAY_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "route": {"type": "string", "enum": ["direct", "rag", "clarify"]},
-        "intent": {"type": "string", "enum": list(ROUTING_INTENTS)},
-        "target_document_refs": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "target_section_refs": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-        "answer": {"type": "string"},
-        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "reason": {"type": "string"},
-    },
-    "required": [
-        "route",
-        "intent",
-        "target_document_refs",
-        "target_section_refs",
-        "answer",
-        "confidence",
-        "reason",
-    ],
-    "additionalProperties": False,
-}
+RAG_ROUTE_TOKEN = "[[RAG]]"
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
 Default to Vietnamese unless the user clearly asks for another language or is practicing an English answer.
 Write in a concise, neutral, and coherent tutoring style.
@@ -76,24 +48,60 @@ Do not add emojis, generic encouragement, or invitations to ask another question
 
 
 @dataclass(frozen=True)
-class GatewayDecision:
+class RouteGatewayDecision:
     route: str
-    intent: str
-    target_document_refs: tuple[str, ...]
-    target_section_refs: tuple[str, ...]
     answer: str | None
-    confidence: float
-    reason: str
+    attempts: int
+    duration_seconds: float
+    raw_output_preview: str
+    fallback_reason: str | None = None
 
     def to_debug(self) -> dict:
         return {
             "route": self.route,
-            "intent": self.intent,
-            "target_document_refs": list(self.target_document_refs),
-            "target_section_refs": list(self.target_section_refs),
             "returned_direct_answer": self.answer is not None,
-            "confidence": self.confidence,
-            "reason": self.reason,
+            "attempts": self.attempts,
+            "duration_seconds": self.duration_seconds,
+            "raw_output_preview": self.raw_output_preview,
+            "fallback_reason": self.fallback_reason,
+        }
+
+
+@dataclass(frozen=True)
+class IntentClassifierDecision:
+    intent: str
+    attempts: int
+    duration_seconds: float
+    raw_output_preview: str
+    fallback_reason: str | None = None
+
+    def to_debug(self) -> dict:
+        return {
+            "intent": self.intent,
+            "attempts": self.attempts,
+            "duration_seconds": self.duration_seconds,
+            "raw_output_preview": self.raw_output_preview,
+            "fallback_reason": self.fallback_reason,
+        }
+
+
+@dataclass(frozen=True)
+class TargetResolverDecision:
+    document_refs: tuple[str, ...]
+    action: str
+    attempts: int
+    duration_seconds: float
+    raw_output_preview: str
+    fallback_reason: str | None = None
+
+    def to_debug(self) -> dict:
+        return {
+            "action": self.action,
+            "document_refs": list(self.document_refs),
+            "attempts": self.attempts,
+            "duration_seconds": self.duration_seconds,
+            "raw_output_preview": self.raw_output_preview,
+            "fallback_reason": self.fallback_reason,
         }
 
 
@@ -217,8 +225,16 @@ def format_history(history: Optional[List[ChatMessage]]) -> str:
     if not history:
         return ""
 
+    selected: list[ChatMessage] = []
+    total_chars = 0
+    for msg in reversed(history[-8:]):
+        length = len(msg.content)
+        if selected and total_chars + length > 12_000:
+            break
+        selected.append(msg)
+        total_chars += length
     lines = []
-    for msg in history[-6:]:
+    for msg in reversed(selected):
         role = "User" if msg.role == "user" else "Assistant"
         lines.append(f"{role}: {msg.content}")
     return "\n".join(lines)
@@ -503,6 +519,8 @@ async def query_ollama(
     temperature: float = 0.7,
     num_predict: Optional[int] = None,
     response_format: dict | str | None = None,
+    clean_output: bool = True,
+    max_attempts: int = 2,
 ) -> str:
     payload = _ollama_payload(
         prompt,
@@ -514,7 +532,7 @@ async def query_ollama(
 
     data: dict = {}
     async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
-        for attempt in range(1, 3):
+        for attempt in range(1, max(1, max_attempts) + 1):
             try:
                 response = await client.post(OLLAMA_API_URL, json=payload)
                 response.raise_for_status()
@@ -523,7 +541,7 @@ async def query_ollama(
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
                 body = exc.response.text[:500] or None
-                if status_code >= 500 and attempt == 1:
+                if status_code >= 500 and attempt < max_attempts:
                     continue
                 raise OllamaRequestError(
                     "http_status",
@@ -533,7 +551,7 @@ async def query_ollama(
                     attempts=attempt,
                 ) from exc
             except httpx.RequestError as exc:
-                if attempt == 1:
+                if attempt < max_attempts:
                     continue
                 raise OllamaRequestError(
                     "transport",
@@ -549,10 +567,11 @@ async def query_ollama(
                 ) from exc
 
     raw_text = data.get("response") or ""
-    text = clean_response(raw_text)
-    if looks_like_prompt_echo(text, prompt):
+    visible_text = clean_response(raw_text)
+    text = visible_text if clean_output else raw_text.strip()
+    if looks_like_prompt_echo(visible_text, prompt):
         raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt instead of answering.")
-    if not text:
+    if not visible_text:
         thinking = data.get("thinking") or ""
         raise OllamaRequestError(
             "empty_response",
@@ -631,122 +650,206 @@ async def stream_ollama(
 def route_or_answer_prompt(
     message: str,
     history: Optional[List[ChatMessage]] = None,
-    document_context: str = "",
+    conversation_state: str = "",
+    compact: bool = False,
 ) -> str:
     history_text = format_history(history)
-    parts = [
-        "Act as the semantic gateway for an IELTS chatbot with optional uploaded study materials.",
-        "Decide the route, user intent, and target documents from meaning and conversation context.",
-        "The routing candidates are navigation hints only. Their presence or similarity score never forces RAG.",
-        "Use route=direct when the request can be answered without facts from uploaded material, even when files are attached.",
-        "Use route=rag only when the requested answer, transformation, or evidence depends on uploaded material.",
-        "Use route=clarify when uploaded material is required but more than one document remains plausible and the user has not selected one.",
-        "For direct, put the complete user-facing answer in answer and use intent=direct.",
-        "For rag, set answer to an empty string. Never answer from routing snippets alone.",
-        "For clarify, ask one concise document-selection question in answer.",
-        "Select target_document_refs from the provided D references. Select every relevant document only for an explicit collection-wide request.",
-        "Select target_section_refs only when a supplied S reference clearly identifies the requested section.",
-        "Intent meanings:",
-        "- document_overview: summarize a document or selected collection.",
-        "- show_questions: reproduce question content without solving.",
-        "- translate_questions: translate requested questions without solving.",
-        "- explain_questions: explain instructions, wording, or method without solving.",
-        "- solve_questions: answer document questions using evidence.",
-        "- show_table/extract_table/show_flowchart/show_diagram/show_writing_prompt: reproduce structured content without filling answers.",
-        "- table_cell/table_calculation/table_comparison: exact structured table operations.",
-        "- writing_generation: produce requested IELTS Writing content from the selected prompt/data.",
-        "- semantic_qa: any other evidence-based question about selected material.",
-        "Respect explicit constraints such as not solving, not choosing answers, not filling blanks, or not writing an essay.",
-        "Return only the JSON object required by the supplied schema.",
-        ASSISTANT_STYLE,
-    ]
-    if document_context:
-        parts.append(f"Uploaded material routing context:\n{document_context}")
+    if compact:
+        parts = [
+            "Route this IELTS chatbot request.",
+            f"Return exactly {RAG_ROUTE_TOKEN} if answering requires uploaded document content.",
+            "Otherwise answer the user directly and naturally. Never add the route token to a direct answer.",
+        ]
+    else:
+        parts = [
+            "You are the direct-or-document gateway for an IELTS chatbot.",
+            f"If the answer requires facts, wording, data, evidence, translation, or transformation from uploaded material, return exactly {RAG_ROUTE_TOKEN} and nothing else.",
+            "Otherwise answer the user directly and naturally.",
+            "General IELTS advice, greetings, grammar help, study plans, and ordinary conversation are direct even when documents exist.",
+            "A follow-up that depends on the preceding document-grounded exchange requires uploaded material.",
+            "Do not classify intent, choose a document, explain routing, or emit JSON.",
+            ASSISTANT_STYLE,
+        ]
+    if conversation_state:
+        parts.append(f"Conversation state:\n{conversation_state}")
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
-    parts.extend(
-        [
-            f"Current user message:\n{message}",
-            "Classify the request and provide a direct answer only when route=direct.",
-        ]
-    )
+    parts.append(f"Current user message:\n{message}")
     return "\n\n".join(parts)
 
 
-def parse_gateway_response(response: str) -> GatewayDecision:
-    try:
-        payload = json.loads(response)
-    except json.JSONDecodeError as exc:
-        raise OllamaRequestError("invalid_gateway_output", "Gateway returned invalid JSON.") from exc
-    if not isinstance(payload, dict):
-        raise OllamaRequestError("invalid_gateway_output", "Gateway returned a non-object JSON value.")
-    route = payload.get("route")
-    intent = payload.get("intent")
-    document_refs = payload.get("target_document_refs")
-    section_refs = payload.get("target_section_refs")
-    answer = str(payload.get("answer") or "").strip()
-    confidence = payload.get("confidence")
-    reason = str(payload.get("reason") or "").strip()
-    if not reason:
-        raise OllamaRequestError("invalid_gateway_output", "Gateway response did not include a reason.")
-    if intent not in ROUTING_INTENTS:
-        raise OllamaRequestError("invalid_gateway_output", "Gateway response contained an invalid intent.")
-    if not isinstance(document_refs, list) or not all(isinstance(item, str) for item in document_refs):
-        raise OllamaRequestError("invalid_gateway_output", "Gateway document references are invalid.")
-    if not isinstance(section_refs, list) or not all(isinstance(item, str) for item in section_refs):
-        raise OllamaRequestError("invalid_gateway_output", "Gateway section references are invalid.")
-    if not isinstance(confidence, (int, float)) or not 0.0 <= float(confidence) <= 1.0:
-        raise OllamaRequestError("invalid_gateway_output", "Gateway confidence is invalid.")
-    if route == "rag" and intent != "direct":
-        answer = ""
-    elif route == "direct" and intent == "direct" and answer:
-        pass
-    elif route == "clarify" and answer:
-        pass
-    else:
+def _visible_raw_output(response: str) -> str:
+    return re.sub(
+        r"<(?:think|thinking)>.*?</(?:think|thinking)>",
+        "",
+        response,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+
+
+def parse_gateway_response(response: str) -> tuple[str, str | None]:
+    visible = _visible_raw_output(response)
+    if visible == RAG_ROUTE_TOKEN:
+        return "rag", None
+    if RAG_ROUTE_TOKEN in visible:
         raise OllamaRequestError(
             "invalid_gateway_output",
-            "Gateway response did not contain a valid route, intent, and answer combination.",
+            "Gateway mixed the RAG token with other content.",
         )
-    return GatewayDecision(
-        route=route,
-        intent=intent,
-        target_document_refs=tuple(dict.fromkeys(document_refs)),
-        target_section_refs=tuple(dict.fromkeys(section_refs)),
-        answer=answer or None,
-        confidence=float(confidence),
-        reason=reason,
-    )
+    answer = clean_response(visible)
+    if not answer:
+        raise OllamaRequestError("invalid_gateway_output", "Gateway returned no visible decision.")
+    return "direct", answer
 
 
 async def route_or_answer(
     message: str,
     history: Optional[List[ChatMessage]] = None,
-    document_context: str = "",
-) -> GatewayDecision:
-    prompt = route_or_answer_prompt(message, history, document_context)
-    for attempt in range(2):
+    conversation_state: str = "",
+) -> RouteGatewayDecision:
+    started = time.perf_counter()
+    last_raw = ""
+    last_error: str | None = None
+    for attempt in range(1, 3):
+        prompt = route_or_answer_prompt(
+            message,
+            history,
+            conversation_state,
+            compact=attempt == 2,
+        )
         try:
-            current_prompt = prompt if attempt == 0 else route_or_answer_prompt(
-                message,
-                history,
-                document_context,
-            )
-            response = await query_ollama(
-                current_prompt,
+            last_raw = await query_ollama(
+                prompt,
                 temperature=0.0,
-                response_format=GATEWAY_RESPONSE_SCHEMA,
+                num_predict=512,
+                clean_output=False,
+                max_attempts=1,
             )
-            return parse_gateway_response(response)
+            route, answer = parse_gateway_response(last_raw)
+            return RouteGatewayDecision(
+                route=route,
+                answer=answer,
+                attempts=attempt,
+                duration_seconds=round(time.perf_counter() - started, 3),
+                raw_output_preview=_visible_raw_output(last_raw)[:500],
+            )
         except OllamaRequestError as exc:
-            if attempt == 0 and exc.kind in {
-                "empty_response",
-                "prompt_echo",
-                "invalid_gateway_output",
-            }:
-                continue
-            raise
-    raise OllamaRequestError("invalid_gateway_output", "Gateway did not return a usable decision.")
+            last_error = exc.kind
+    return RouteGatewayDecision(
+        route="undetermined",
+        answer=None,
+        attempts=2,
+        duration_seconds=round(time.perf_counter() - started, 3),
+        raw_output_preview=_visible_raw_output(last_raw)[:500],
+        fallback_reason=last_error or "invalid_gateway_output",
+    )
+
+
+def intent_classifier_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
+    history_text = format_history(history)
+    intents = ", ".join(ROUTING_INTENTS)
+    parts = [
+        "Classify this uploaded-document request into exactly one intent enum.",
+        f"Allowed enums: {intents}.",
+        "Return only the enum, with no JSON or explanation.",
+        "Show, translate, and explain requests do not solve. Solve only when the user asks for an answer or solution.",
+    ]
+    if history_text:
+        parts.append(f"Previous conversation:\n{history_text}")
+    parts.append(f"Current user message:\n{message}")
+    return "\n\n".join(parts)
+
+
+async def classify_rag_intent(
+    message: str,
+    history: Optional[List[ChatMessage]] = None,
+) -> IntentClassifierDecision:
+    started = time.perf_counter()
+    last_raw = ""
+    last_error: str | None = None
+    for attempt in range(1, 3):
+        prompt = intent_classifier_prompt(message, history)
+        try:
+            last_raw = await query_ollama(
+                prompt,
+                temperature=0.0,
+                num_predict=48,
+                clean_output=False,
+                max_attempts=1,
+            )
+            intent = clean_response(_visible_raw_output(last_raw)).strip().lower()
+            if intent not in ROUTING_INTENTS:
+                raise OllamaRequestError("invalid_intent_output", "Intent classifier returned an invalid enum.")
+            return IntentClassifierDecision(
+                intent=intent,
+                attempts=attempt,
+                duration_seconds=round(time.perf_counter() - started, 3),
+                raw_output_preview=_visible_raw_output(last_raw)[:160],
+            )
+        except OllamaRequestError as exc:
+            last_error = exc.kind
+    return IntentClassifierDecision(
+        intent="semantic_qa",
+        attempts=2,
+        duration_seconds=round(time.perf_counter() - started, 3),
+        raw_output_preview=_visible_raw_output(last_raw)[:160],
+        fallback_reason=last_error or "invalid_intent_output",
+    )
+
+
+def target_resolver_prompt(message: str, catalog_context: str) -> str:
+    return "\n\n".join(
+        [
+            "Resolve which uploaded document the request targets using catalog metadata only.",
+            "Return only one of: a comma-separated list of D references, ALL, or CLARIFY.",
+            "Use ALL only for an explicit request about the whole uploaded collection.",
+            "Use CLARIFY only when multiple documents remain genuinely plausible.",
+            f"Catalog:\n{catalog_context}",
+            f"User message:\n{message}",
+        ]
+    )
+
+
+async def resolve_rag_target(message: str, catalog_context: str) -> TargetResolverDecision:
+    started = time.perf_counter()
+    last_raw = ""
+    last_error: str | None = None
+    valid_refs = set(re.findall(r"(?m)^-\s*(D\d+):", catalog_context))
+    for attempt in range(1, 3):
+        try:
+            last_raw = await query_ollama(
+                target_resolver_prompt(message, catalog_context),
+                temperature=0.0,
+                num_predict=64,
+                clean_output=False,
+                max_attempts=1,
+            )
+            value = clean_response(_visible_raw_output(last_raw)).strip().upper()
+            if value in {"ALL", "CLARIFY"}:
+                refs: tuple[str, ...] = ()
+                action = value.lower()
+            else:
+                refs = tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
+                if not refs or any(ref not in valid_refs for ref in refs):
+                    raise OllamaRequestError("invalid_target_output", "Target resolver returned invalid references.")
+                action = "selected"
+            return TargetResolverDecision(
+                document_refs=refs,
+                action=action,
+                attempts=attempt,
+                duration_seconds=round(time.perf_counter() - started, 3),
+                raw_output_preview=_visible_raw_output(last_raw)[:160],
+            )
+        except OllamaRequestError as exc:
+            last_error = exc.kind
+    return TargetResolverDecision(
+        document_refs=(),
+        action="clarify",
+        attempts=2,
+        duration_seconds=round(time.perf_counter() - started, 3),
+        raw_output_preview=_visible_raw_output(last_raw)[:160],
+        fallback_reason=last_error or "invalid_target_output",
+    )
 
 
 def rag_prompt(

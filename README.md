@@ -32,11 +32,16 @@ Upload text/PDF/DOCX/image
 -> structure-aware chunks, with semantic chunk fallback for general documents
 -> sentence-transformers embedding
 -> local vector store
--> retrieve compact document/section routing candidates
--> one structured LLM gateway decides direct/RAG/clarify, intent, and target documents
--> validate the decision and retrieve only inside the selected document scope
--> Ollama answer with context
+-> semantic gateway either answers directly or returns [[RAG]]
+-> resolve the target document from client scope, catalog metadata, or conversation affinity
+-> classify the RAG intent with a separate enum-only model call
+-> run structured lookup or metadata-filtered retrieval inside the resolved scope
+-> deterministic renderer or Ollama answer with grounded context
 ```
+
+`/chat` and `/chat/stream` accept an optional client-carried `conversation_state`.
+The backend returns the updated state after each turn so successful document
+affinity can be reused by follow-ups without mixing it into the direct/RAG gateway.
 
 ## Run Locally
 
@@ -190,7 +195,8 @@ python backend/tools/chat_evaluation.py --base-url http://127.0.0.1:2222
 
 The runner verifies and uploads all seven files in `docs/`, sends the 66 questions
 from `backend/evaluation/chat_corpus_v2.json`, and writes the raw answers, routes,
-sources and debug metadata under `backend/data/chat_evaluation/`. It does not
+resolved document IDs, conversation state, sources and debug metadata under
+`backend/data/chat_evaluation/`. It does not
 score answer quality; the report is reviewed manually. Use `--skip-upload` when
 the same corpus is already indexed, or repeat `--case CASE_ID` to collect selected
 cases. The direct-router cases deliberately run while all uploaded document IDs

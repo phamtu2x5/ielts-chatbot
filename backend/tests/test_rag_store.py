@@ -775,76 +775,25 @@ class LocalVectorStoreTests(unittest.TestCase):
 
 class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_route_or_answer_uses_direct_model_output(self) -> None:
-        model = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "route": "direct",
-                    "intent": "direct",
-                    "target_document_refs": [],
-                    "target_section_refs": [],
-                    "answer": "Use a clear beginning, middle, and end.",
-                    "confidence": 0.99,
-                    "reason": "The request is general IELTS advice.",
-                }
-            )
-        )
-        with patch.object(
-            llm,
-            "query_ollama",
-            model,
-        ):
+        model = AsyncMock(return_value="Use a clear beginning, middle, and end.")
+        with patch.object(llm, "query_ollama", model):
             decision = await llm.route_or_answer("Give me one Speaking Part 2 tip.")
 
         self.assertEqual(decision.route, "direct")
-        self.assertEqual(decision.intent, "direct")
         self.assertEqual(decision.answer, "Use a clear beginning, middle, and end.")
-        self.assertEqual(decision.reason, "The request is general IELTS advice.")
-        self.assertEqual(model.await_args.kwargs["response_format"], llm.GATEWAY_RESPONSE_SCHEMA)
         self.assertEqual(model.await_args.kwargs["temperature"], 0.0)
+        self.assertFalse(model.await_args.kwargs["clean_output"])
+        self.assertEqual(model.await_args.kwargs["max_attempts"], 1)
 
-    async def test_route_or_answer_uses_structured_rag_decision(self) -> None:
-        with patch.object(
-            llm,
-            "query_ollama",
-            AsyncMock(
-                return_value=json.dumps(
-                    {
-                        "route": "rag",
-                        "intent": "show_questions",
-                        "target_document_refs": ["D1"],
-                        "target_section_refs": ["S1"],
-                        "answer": "",
-                        "confidence": 0.97,
-                        "reason": "The request asks about an uploaded file.",
-                    }
-                )
-            ),
-        ):
+    async def test_route_or_answer_detects_raw_rag_token_before_cleanup(self) -> None:
+        with patch.object(llm, "query_ollama", AsyncMock(return_value="[[RAG]]")):
             decision = await llm.route_or_answer("What is Question 4 in the file?")
 
         self.assertEqual(decision.route, "rag")
-        self.assertEqual(decision.intent, "show_questions")
         self.assertIsNone(decision.answer)
-        self.assertEqual(decision.target_document_refs, ("D1",))
-        self.assertIn("uploaded file", decision.reason)
 
-    async def test_route_or_answer_retries_invalid_gateway_json(self) -> None:
-        model = AsyncMock(
-            side_effect=[
-                "not-json",
-                json.dumps(
-                    {
-                        "route": "rag",
-                        "intent": "document_overview",
-                        "target_document_refs": ["D1"],
-                        "target_section_refs": [],
-                        "answer": "",
-                        "confidence": 0.96,
-                        "reason": "The request requires uploaded material.",
-                    }
-                ),
-            ]
-        )
+    async def test_route_or_answer_retries_mixed_rag_output(self) -> None:
+        model = AsyncMock(side_effect=["Use [[RAG]]", "[[RAG]]"])
         with patch.object(llm, "query_ollama", model):
             decision = await llm.route_or_answer("What does the uploaded file say?")
 
@@ -856,17 +805,7 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         model = AsyncMock(
             side_effect=[
                 llm.OllamaRequestError("empty_response", "empty"),
-                json.dumps(
-                    {
-                        "route": "direct",
-                        "intent": "direct",
-                        "target_document_refs": [],
-                        "target_section_refs": [],
-                        "answer": "Hello! How can I help with IELTS?",
-                        "confidence": 0.99,
-                        "reason": "This is a greeting.",
-                    }
-                ),
+                "Hello! How can I help with IELTS?",
             ]
         )
         with patch.object(llm, "query_ollama", model):
@@ -877,8 +816,29 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_count, 2)
         first_prompt = model.await_args_list[0].args[0]
         retry_prompt = model.await_args_list[1].args[0]
-        self.assertIn("semantic gateway", first_prompt)
-        self.assertEqual(retry_prompt, llm.route_or_answer_prompt("Hello"))
+        self.assertIn("direct-or-document gateway", first_prompt)
+        self.assertNotEqual(retry_prompt, first_prompt)
+
+    async def test_route_or_answer_returns_safe_undetermined_after_two_failures(self) -> None:
+        model = AsyncMock(return_value="answer plus [[RAG]]")
+        with patch.object(llm, "query_ollama", model):
+            decision = await llm.route_or_answer("Ambiguous request")
+
+        self.assertEqual(decision.route, "undetermined")
+        self.assertIsNone(decision.answer)
+        self.assertEqual(decision.attempts, 2)
+
+    async def test_intent_classifier_accepts_only_enum(self) -> None:
+        with patch.object(llm, "query_ollama", AsyncMock(return_value="show_questions")):
+            decision = await llm.classify_rag_intent("Show Questions 1-4")
+        self.assertEqual(decision.intent, "show_questions")
+
+    async def test_target_resolver_accepts_catalog_refs(self) -> None:
+        catalog = "- D1: first.pdf\n- D2: second.pdf"
+        with patch.object(llm, "query_ollama", AsyncMock(return_value="D2")):
+            decision = await llm.resolve_rag_target("Use second.pdf", catalog)
+        self.assertEqual(decision.action, "selected")
+        self.assertEqual(decision.document_refs, ("D2",))
 
     async def test_non_stream_request_retries_one_server_error(self) -> None:
         attempts = 0
