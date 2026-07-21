@@ -31,6 +31,30 @@ ROUTING_INTENTS = (
     "show_writing_prompt",
     "writing_generation",
 )
+INTENT_ACTIONS = (
+    "overview",
+    "show",
+    "translate",
+    "explain",
+    "solve",
+    "extract",
+    "lookup",
+    "calculate",
+    "compare",
+    "generate",
+    "answer",
+)
+INTENT_TARGETS = (
+    "document",
+    "passage",
+    "questions",
+    "table",
+    "flowchart",
+    "diagram",
+    "writing_prompt",
+    "writing_task",
+    "content",
+)
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
 Default to Vietnamese unless the user clearly asks for another language or is practicing an English answer.
 Write in a concise, neutral, and coherent tutoring style.
@@ -71,6 +95,8 @@ class IntentClassifierDecision:
     duration_seconds: float
     raw_output_preview: str
     fallback_reason: str | None = None
+    action: str | None = None
+    target: str | None = None
 
     def to_debug(self) -> dict:
         return {
@@ -79,6 +105,8 @@ class IntentClassifierDecision:
             "duration_seconds": self.duration_seconds,
             "raw_output_preview": self.raw_output_preview,
             "fallback_reason": self.fallback_reason,
+            "action": self.action,
+            "target": self.target,
         }
 
 
@@ -185,6 +213,10 @@ class ResponseOutputContract:
             lines.append(
                 "- Do not select, infer, eliminate, or hint at any answer. Explain or translate only."
             )
+        lines.append(
+            "- Every Markdown table row must occupy exactly one physical line. Use semicolons, not bullets or line breaks, inside cells."
+        )
+        lines.append("- Do not prefix the answer with role labels such as User:, Assistant:, or System:.")
         lines.append("- Return only the requested content, without a generic introduction or invitation.")
         return lines
 
@@ -320,6 +352,8 @@ def response_output_contract(
 
 def response_output_issues(text: str, contract: ResponseOutputContract) -> list[str]:
     issues: list[str] = []
+    if re.match(r"(?i)^\s*(?:user|assistant|system)\s*:", text):
+        issues.append("The response starts with a conversation role prefix.")
     letters = re.findall(r"[^\W\d_]", text, flags=re.UNICODE)
     vietnamese_characters = VIETNAMESE_CHARACTER_RE.findall(text)
     if (
@@ -343,7 +377,31 @@ def response_output_issues(text: str, contract: ResponseOutputContract) -> list[
         missing = [number for number in contract.required_question_numbers if number not in present]
         if missing:
             issues.append(f"The response is missing question numbers: {missing}.")
+    if has_malformed_markdown_table(text):
+        issues.append("The response contains a malformed Markdown table with a row split across lines.")
     return issues
+
+
+def has_malformed_markdown_table(text: str) -> bool:
+    lines = text.splitlines()
+    for index in range(len(lines) - 1):
+        header = lines[index].strip()
+        separator = lines[index + 1].strip()
+        if not (header.startswith("|") and header.endswith("|")):
+            continue
+        if not re.fullmatch(r"\|(?:\s*:?-{3,}:?\s*\|){2,}", separator):
+            continue
+
+        expected_cells = header.count("|") - 1
+        row_index = index + 2
+        while row_index < len(lines) and lines[row_index].strip():
+            row = lines[row_index].strip()
+            if not row.startswith("|"):
+                break
+            if not row.endswith("|") or row.count("|") - 1 != expected_cells:
+                return True
+            row_index += 1
+    return False
 
 
 def response_retry_prompt(original_prompt: str, contract: ResponseOutputContract) -> str:
@@ -358,11 +416,12 @@ Final output contract:
 Begin the final response now."""
 
 
-def response_output_penalty(text: str, contract: ResponseOutputContract) -> tuple[int, int, int]:
+def response_output_penalty(text: str, contract: ResponseOutputContract) -> tuple[int, int, int, int]:
     issues = response_output_issues(text, contract)
     return (
         int(any("reveals or narrows" in issue for issue in issues)),
         int(any("not written in" in issue for issue in issues)),
+        int(any("malformed Markdown table" in issue for issue in issues)),
         len(issues),
     )
 
@@ -652,8 +711,11 @@ ROUTE_RESPONSE_SCHEMA = {
 }
 INTENT_RESPONSE_SCHEMA = {
     "type": "object",
-    "properties": {"intent": {"type": "string", "enum": list(ROUTING_INTENTS)}},
-    "required": ["intent"],
+    "properties": {
+        "action": {"type": "string", "enum": list(INTENT_ACTIONS)},
+        "target": {"type": "string", "enum": list(INTENT_TARGETS)},
+    },
+    "required": ["action", "target"],
     "additionalProperties": False,
 }
 
@@ -777,6 +839,9 @@ def direct_answer_prompt(
         "- Greetings and simple confirmations: answer in one or two natural sentences.",
         "- Tips: provide the requested number of actionable tips; for each tip include the action, why it helps, and a concrete practice routine or example.",
         "- Study plans or schedules: state any necessary assumptions briefly, then use a practical Markdown table with period, goals, activities, time allocation, and progress checks. Cover the full requested timeline without gaps; use weekly or two-week phases for multi-month plans and add a reusable weekly routine after the table.",
+        "- In Markdown tables, keep every row on exactly one physical line. Separate multiple activities inside a cell with semicolons; never use bullets or line breaks inside a cell.",
+        "- For time-limited plans, make the activities add up to the user's stated daily or weekly limit and do not duplicate or skip periods.",
+        "- Never prefix the answer with User:, Assistant:, or System:, and never repeat the user's message as the answer.",
         "- Explanations and strategies: give a clear sequence, examples, and common mistakes when relevant.",
         "- Follow the user's requested language, count, duration, and format exactly.",
         "Do not refer to uploaded files, ask the user to choose a document, or invent personal details.",
@@ -790,17 +855,61 @@ def direct_answer_prompt(
 
 def intent_classifier_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
     history_text = format_history(history)
-    intents = ", ".join(ROUTING_INTENTS)
     parts = [
-        "Classify this uploaded-document request into exactly one intent enum.",
-        f"Allowed enums: {intents}.",
-        'Return one JSON object only: {"intent":"<allowed enum>"}.',
-        "Show, translate, and explain requests do not solve. Solve only when the user asks for an answer or solution.",
+        "Classify the requested action and target for this uploaded-document request.",
+        f"Allowed actions: {', '.join(INTENT_ACTIONS)}.",
+        f"Allowed targets: {', '.join(INTENT_TARGETS)}.",
+        'Return one JSON object only: {"action":"<allowed action>","target":"<allowed target>"}.',
+        "Use overview+document for a whole-document outline or summary of all sections.",
+        "Use show+writing_prompt when the user asks what a Writing prompt requires without writing the answer.",
+        "Use solve+questions only when the user asks to answer, solve, choose, or determine an answer.",
+        "Use answer+content for factual or reasoning questions about passage content.",
+        "Use explain+questions only to explain question wording, task type, or method without answering.",
+        "Use lookup+table for one exact table value; calculate+table for arithmetic; compare+table for comparisons.",
+        "Negative constraints such as 'do not solve' or 'do not write' override solution generation.",
     ]
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Current user message:\n{message}")
     return "\n\n".join(parts)
+
+
+def intent_from_action_target(action: str, target: str) -> str | None:
+    direct_pairs = {
+        ("overview", "document"): "document_overview",
+        ("show", "document"): "document_overview",
+        ("extract", "document"): "document_overview",
+        ("show", "questions"): "show_questions",
+        ("extract", "questions"): "show_questions",
+        ("translate", "questions"): "translate_questions",
+        ("explain", "questions"): "explain_questions",
+        ("solve", "questions"): "solve_questions",
+        ("answer", "questions"): "solve_questions",
+        ("show", "table"): "show_table",
+        ("extract", "table"): "extract_table",
+        ("lookup", "table"): "table_cell",
+        ("calculate", "table"): "table_calculation",
+        ("compare", "table"): "table_comparison",
+        ("show", "flowchart"): "show_flowchart",
+        ("extract", "flowchart"): "show_flowchart",
+        ("show", "diagram"): "show_diagram",
+        ("extract", "diagram"): "show_diagram",
+        ("show", "writing_prompt"): "show_writing_prompt",
+        ("extract", "writing_prompt"): "show_writing_prompt",
+        ("explain", "writing_prompt"): "show_writing_prompt",
+        ("show", "writing_task"): "show_writing_prompt",
+        ("generate", "writing_task"): "writing_generation",
+    }
+    if (action, target) in direct_pairs:
+        return direct_pairs[(action, target)]
+    if action in {"answer", "overview", "translate", "explain", "lookup", "show"} and target in {
+        "content",
+        "passage",
+        "document",
+        "writing_task",
+    }:
+        return "semantic_qa"
+    return None
 
 
 async def classify_rag_intent(
@@ -822,14 +931,21 @@ async def classify_rag_intent(
                 max_attempts=1,
             )
             payload = _parse_json_object(last_raw, "invalid_intent_output")
-            intent = payload.get("intent")
-            if intent not in ROUTING_INTENTS:
-                raise OllamaRequestError("invalid_intent_output", "Intent classifier returned an invalid enum.")
+            action = payload.get("action")
+            target = payload.get("target")
+            intent = intent_from_action_target(action, target)
+            if action not in INTENT_ACTIONS or target not in INTENT_TARGETS or intent not in ROUTING_INTENTS:
+                raise OllamaRequestError(
+                    "invalid_intent_output",
+                    "Intent classifier returned an unsupported action-target pair.",
+                )
             return IntentClassifierDecision(
                 intent=intent,
                 attempts=attempt,
                 duration_seconds=round(time.perf_counter() - started, 3),
                 raw_output_preview=_visible_raw_output(last_raw)[:160],
+                action=action,
+                target=target,
             )
         except OllamaRequestError as exc:
             last_error = exc.kind

@@ -965,6 +965,61 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_count, 1)
         self.assertFalse(main.requires_reviewed_generation(prepared, "Trả lời Question 11."))
 
+    def test_direct_generation_is_buffered_for_output_validation(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct plan prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+
+        self.assertTrue(main.requires_reviewed_generation(prepared, "Lập kế hoạch học trong 3 tháng."))
+
+    async def test_direct_generation_retries_a_multiline_markdown_table(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct plan prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+        malformed = """| Giai đoạn | Hoạt động | Thời lượng |
+| --- | --- | --- |
+| Tuần 1-4 | - Luyện nghe
+- Luyện đọc | 60 phút |"""
+        valid = """| Giai đoạn | Hoạt động | Thời lượng |
+| --- | --- | --- |
+| Tuần 1-4 | Luyện nghe; luyện đọc | 60 phút |"""
+        model = AsyncMock(side_effect=[malformed, valid])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "Lập kế hoạch học trong 3 tháng.")
+
+        self.assertEqual(answer, valid)
+        self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["retry_used"])
+
+    async def test_direct_generation_retries_a_role_prefixed_echo(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct conversation prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+        model = AsyncMock(side_effect=["User: haha", "Mình đang nghe đây."])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "haha")
+
+        self.assertEqual(answer, "Mình đang nghe đây.")
+        self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["retry_used"])
+
     async def test_writing_generation_rewrites_wrong_language_and_length(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded writing prompt",

@@ -36,13 +36,55 @@ function routeLabel(route) {
 }
 
 function normalizeMarkdown(content) {
-  return (content || "")
+  const normalized = (content || "")
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/li>\s*<li>/gi, "\n- ")
     .replace(/<ul>\s*<li>/gi, "- ")
     .replace(/<\/li>\s*<\/ul>/gi, "")
     .replace(/<\/?ul>/gi, "")
     .replace(/<\/?li>/gi, "");
+  return repairMultilineMarkdownTables(normalized);
+}
+
+function repairMultilineMarkdownTables(content) {
+  const lines = content.split("\n");
+  const repaired = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const header = lines[index].trim();
+    const separator = lines[index + 1]?.trim() || "";
+    const isTableHeader =
+      header.startsWith("|") &&
+      header.endsWith("|") &&
+      /^\|(?:\s*:?-{3,}:?\s*\|){2,}$/.test(separator);
+    if (!isTableHeader) {
+      repaired.push(lines[index]);
+      continue;
+    }
+
+    const expectedPipes = (header.match(/\|/g) || []).length;
+    repaired.push(lines[index], lines[index + 1]);
+    index += 2;
+    while (index < lines.length && lines[index].trim()) {
+      let row = lines[index].trim();
+      if (!row.startsWith("|")) break;
+
+      while (
+        (!row.endsWith("|") || (row.match(/\|/g) || []).length !== expectedPipes) &&
+        index + 1 < lines.length &&
+        lines[index + 1].trim()
+      ) {
+        index += 1;
+        const continuation = lines[index].trim().replace(/^[-*•]\s*/, "");
+        row = `${row}; ${continuation}`;
+      }
+      repaired.push(row);
+      index += 1;
+    }
+    index -= 1;
+  }
+
+  return repaired.join("\n");
 }
 
 function safeFilename(value) {

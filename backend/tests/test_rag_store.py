@@ -37,6 +37,8 @@ from app.intent import (
 )
 from app.llm import (
     clean_response,
+    has_malformed_markdown_table,
+    intent_from_action_target,
     likely_contains_solution,
     looks_like_prompt_echo,
     rag_prompt,
@@ -835,15 +837,31 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.attempts, 2)
 
     async def test_intent_classifier_accepts_only_enum(self) -> None:
-        with patch.object(llm, "query_ollama", AsyncMock(return_value='{"intent":"show_questions"}')):
+        with patch.object(
+            llm,
+            "query_ollama",
+            AsyncMock(return_value='{"action":"show","target":"questions"}'),
+        ):
             decision = await llm.classify_rag_intent("Show Questions 1-4")
         self.assertEqual(decision.intent, "show_questions")
+        self.assertEqual(decision.action, "show")
+        self.assertEqual(decision.target, "questions")
 
     async def test_intent_classifier_fails_closed_after_invalid_output(self) -> None:
-        with patch.object(llm, "query_ollama", AsyncMock(return_value='{"intent":"other"}')):
+        with patch.object(
+            llm,
+            "query_ollama",
+            AsyncMock(return_value='{"action":"generate","target":"table"}'),
+        ):
             decision = await llm.classify_rag_intent("Show Questions 1-4")
         self.assertEqual(decision.intent, "undetermined")
         self.assertEqual(decision.fallback_reason, "invalid_intent_output")
+
+    def test_action_target_intents_cover_overview_solve_and_grounded_qa(self) -> None:
+        self.assertEqual(intent_from_action_target("overview", "document"), "document_overview")
+        self.assertEqual(intent_from_action_target("solve", "questions"), "solve_questions")
+        self.assertEqual(intent_from_action_target("show", "writing_prompt"), "show_writing_prompt")
+        self.assertEqual(intent_from_action_target("answer", "passage"), "semantic_qa")
 
     async def test_target_resolver_accepts_catalog_refs(self) -> None:
         catalog = "- D1: first.pdf\n- D2: second.pdf"
@@ -862,6 +880,24 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("why it helps", prompt)
         self.assertIn("progress checks", prompt)
         self.assertIn("full requested timeline without gaps", prompt)
+        self.assertIn("every row on exactly one physical line", prompt)
+        self.assertIn("do not duplicate or skip periods", prompt)
+
+    def test_malformed_markdown_table_detects_multiline_cells(self) -> None:
+        malformed = """| Period | Activities | Time |
+| --- | --- | --- |
+| Weeks 1-4 | - Read daily
+- Listen daily | 60 minutes |"""
+        valid = """| Period | Activities | Time |
+| --- | --- | --- |
+| Weeks 1-4 | Read daily; listen daily | 60 minutes |"""
+
+        self.assertTrue(has_malformed_markdown_table(malformed))
+        self.assertFalse(has_malformed_markdown_table(valid))
+        contract = response_output_contract("Create a plan", "direct", allow_solution=False)
+        self.assertTrue(
+            any("malformed Markdown table" in issue for issue in response_output_issues(malformed, contract))
+        )
 
     async def test_non_stream_request_retries_one_server_error(self) -> None:
         attempts = 0

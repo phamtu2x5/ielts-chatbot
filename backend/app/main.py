@@ -346,6 +346,8 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         }
         should_retry = bool(issues) and (
             prepared.query_intent == "translate_questions"
+            or any("malformed Markdown table" in issue for issue in issues)
+            or any("conversation role prefix" in issue for issue in issues)
             or (
                 has_explicit_no_solution_constraint(message)
                 and contract.forbid_solution
@@ -382,9 +384,14 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
 
 
 def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> bool:
-    return is_writing_response(prepared) or prepared.query_intent == "translate_questions" or (
-        has_explicit_no_solution_constraint(message)
-        and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
+    return (
+        prepared.route_used == "base_model"
+        or is_writing_response(prepared)
+        or prepared.query_intent == "translate_questions"
+        or (
+            has_explicit_no_solution_constraint(message)
+            and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
+        )
     )
 
 
