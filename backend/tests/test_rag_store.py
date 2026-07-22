@@ -859,6 +859,10 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"intent":"<allowed enum>"', prompt)
         self.assertIn("document_overview", prompt)
         self.assertIn("semantic_qa", prompt)
+        self.assertIn("Answer Question 11 and cite evidence", prompt)
+        self.assertIn("write an overview without an introduction or body", prompt)
+        self.assertIn("explicitly targets a table", prompt)
+        self.assertIn("sample answer compare two regions", prompt)
         self.assertNotIn('"action"', prompt)
         self.assertNotIn('"target"', prompt)
 
