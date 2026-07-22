@@ -1211,6 +1211,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         if structured_sources:
             source_limit = 50 if query_intent == "document_overview" else settings.rag_top_k
             sources = structured_sources[:source_limit]
+        elif query_intent == "solve_questions":
+            sources = []
+            retrieval_method = "structured_question_no_match"
         elif query_intent == "document_overview":
             sources = await run_in_threadpool(
                 store.overview,
@@ -1322,6 +1325,11 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         "retrieval": {
             "method": retrieval_method,
             "structured_hits": len(structured_sources),
+            "structured_question_units": sum(
+                1
+                for source in structured_sources
+                if source.get("metadata", {}).get("unit_type") in {"question", "question_group"}
+            ),
             "before_filter_count": before_filter_count,
             "after_filter_count": len(sources),
             "evidence_candidate_count": evidence_candidate_count,

@@ -1028,6 +1028,68 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_count, 1)
         self.assertFalse(main.requires_reviewed_generation(prepared, "Trả lời Question 11."))
 
+    async def test_solve_does_not_fall_back_to_semantic_passage_without_exact_question(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-1"],
+                "mime_types": ["application/pdf"],
+            }
+        ]
+
+        class StrongPassageStore(_FakeChatStore):
+            def probe_with_catalog(self, query, top_k, document_ids=None, include_dense=True):
+                passage = {
+                    "document_id": "doc-1",
+                    "source_file": "reading.pdf",
+                    "text": "Semantically related passage text.",
+                    "metadata": {"unit_type": "passage", "passage_number": 1},
+                }
+                return (
+                    {
+                        "results": [passage],
+                        "has_hits": True,
+                        "has_strong_hits": True,
+                        "has_document_intent": True,
+                        "is_overview": False,
+                        "top_question_score": 0.0,
+                    },
+                    self.document_catalog(document_ids),
+                )
+
+        store = StrongPassageStore(catalog)
+        with (
+            patch.object(main, "get_store", return_value=store),
+            patch.object(
+                main,
+                "classify_chat_route",
+                AsyncMock(return_value=_gateway_decision("rag", "solve_questions")),
+            ),
+            patch.object(
+                main,
+                "classify_rag_intent",
+                AsyncMock(
+                    return_value=IntentClassifierDecision(
+                        intent="solve_questions",
+                        attempts=1,
+                        duration_seconds=0.01,
+                        raw_output_preview="solve_questions",
+                    )
+                ),
+            ),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Trả lời Question 11 và giải thích.",
+                    document_ids=["doc-1"],
+                )
+            )
+
+        self.assertEqual(prepared.route_used, "vector_rag_no_match")
+        self.assertEqual(prepared.debug["retrieval"]["method"], "structured_question_no_match")
+        self.assertEqual(prepared.debug["retrieval"]["structured_question_units"], 0)
+        self.assertEqual(prepared.sources, [])
+
     def test_direct_generation_is_buffered_for_output_validation(self) -> None:
         prepared = main.ChatPreparation(
             prompt="direct plan prompt",
