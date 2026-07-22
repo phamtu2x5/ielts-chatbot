@@ -565,27 +565,6 @@ async def query_ollama(
                 response = await client.post(OLLAMA_API_URL, json=payload)
                 response.raise_for_status()
                 data = response.json()
-                raw_text = data.get("response") or ""
-                visible_text = clean_response(raw_text)
-                if not visible_text:
-                    thinking = data.get("thinking") or ""
-                    if attempt < max_attempts:
-                        continue
-                    raise OllamaRequestError(
-                        "empty_response",
-                        "Ollama returned an empty visible response.",
-                        attempts=attempt,
-                        metadata={
-                            "response_keys": sorted(data.keys()),
-                            "done": data.get("done"),
-                            "done_reason": data.get("done_reason"),
-                            "prompt_eval_count": data.get("prompt_eval_count"),
-                            "eval_count": data.get("eval_count"),
-                            "response_length": len(raw_text),
-                            "thinking_length": len(thinking),
-                            "think_requested": settings.ollama_think,
-                        },
-                    )
                 break
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
@@ -620,6 +599,22 @@ async def query_ollama(
     text = visible_text if clean_output else raw_text.strip()
     if looks_like_prompt_echo(visible_text, prompt):
         raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt instead of answering.")
+    if not visible_text:
+        thinking = data.get("thinking") or ""
+        raise OllamaRequestError(
+            "empty_response",
+            "Ollama returned an empty visible response.",
+            metadata={
+                "response_keys": sorted(data.keys()),
+                "done": data.get("done"),
+                "done_reason": data.get("done_reason"),
+                "prompt_eval_count": data.get("prompt_eval_count"),
+                "eval_count": data.get("eval_count"),
+                "response_length": len(raw_text),
+                "thinking_length": len(thinking),
+                "think_requested": settings.ollama_think,
+            },
+        )
     return text
 
 
@@ -667,16 +662,6 @@ async def stream_ollama(
                     buffer_prefix = " ".join(guard_buffer.split()).lower()
                     if looks_like_prompt_echo(guard_buffer, prompt):
                         raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt while streaming.")
-                    role_match = re.match(r"(?i)^\s*(user|assistant|system)\b", guard_buffer)
-                    if role_match:
-                        role_suffix = guard_buffer[role_match.end() :]
-                        if re.match(r"^\s*:", role_suffix):
-                            raise OllamaRequestError(
-                                "role_prefix",
-                                "Ollama started the streamed answer with a conversation role prefix.",
-                            )
-                        if not role_suffix or role_suffix.isspace():
-                            continue
                     if buffer_prefix and not prompt_prefix.startswith(buffer_prefix):
                         guard_released = True
                         yield guard_buffer
@@ -813,7 +798,6 @@ async def classify_chat_route(
 def direct_answer_prompt(
     message: str,
     history: Optional[List[ChatMessage]] = None,
-    user_profile: str = "",
 ) -> str:
     history_text = format_history(history)
     parts = [
@@ -832,11 +816,6 @@ def direct_answer_prompt(
         "Do not refer to uploaded files, ask the user to choose a document, or invent personal details.",
         "If important personal information is missing, make reasonable assumptions and label them briefly instead of refusing to help.",
     ]
-    if user_profile:
-        parts.append(
-            "Known user facts explicitly provided by the user. Treat these as authoritative and do not claim they are unknown:\n"
-            + user_profile
-        )
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Current user message:\n{message}")

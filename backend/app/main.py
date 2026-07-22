@@ -50,7 +50,6 @@ from .schemas import (
     ChatConversationState,
     ChatRequest,
     ChatResponse,
-    ChatUserProfile,
     SearchRequest,
     SearchResponse,
     StatsResponse,
@@ -230,16 +229,6 @@ NO_RAG_MATCH_RESPONSE = (
     "Mình chưa tìm thấy nội dung phù hợp trong tài liệu đã upload để trả lời câu hỏi này. "
     "Bạn có thể hỏi rõ hơn theo tên bài, số trang, hoặc upload lại tài liệu nếu phần đó nằm trong bảng/ảnh chưa được trích xuất tốt."
 )
-WRITING_VALIDATION_FAILURE_RESPONSE = (
-    "Mình chưa tạo được bài viết đáp ứng đầy đủ yêu cầu về ngôn ngữ, độ dài và định dạng. "
-    "Vui lòng thử lại."
-)
-TRANSLATION_VALIDATION_FAILURE_RESPONSE = (
-    "Mình chưa tạo được bản dịch đầy đủ và đúng định dạng cho phần được yêu cầu. Vui lòng thử lại."
-)
-FORMAT_VALIDATION_FAILURE_RESPONSE = (
-    "Mình chưa tạo được câu trả lời đúng định dạng được yêu cầu. Vui lòng thử lại."
-)
 
 AMBIGUOUS_DOCUMENT_RESPONSE = (
     "Mình chưa xác định được bạn đang hỏi tài liệu nào vì có nhiều file phù hợp. "
@@ -338,12 +327,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             answer = selected
         else:
             generation_debug["retry_used"] = False
-        final_issues = writing_output_issues(answer, contract)
-        generation_debug["final_issues"] = final_issues
-        if final_issues:
-            generation_debug["fail_closed"] = True
-            generation_debug["blocked_issues"] = list(final_issues)
-            answer = WRITING_VALIDATION_FAILURE_RESPONSE
+        generation_debug["final_issues"] = writing_output_issues(answer, contract)
     else:
         allow_solution = bool(prepared.debug.get("intent_decision", {}).get("allow_solution", False))
         contract = response_output_contract(
@@ -396,33 +380,12 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             generation_debug["safe_fallback_used"] = True
             final_issues = response_output_issues(answer, contract)
         generation_debug["final_issues"] = final_issues
-        blocking_format_issue = any(
-            marker in issue
-            for issue in final_issues
-            for marker in (
-                "not written in",
-                "missing question numbers",
-                "malformed Markdown table",
-                "conversation role prefix",
-            )
-        )
-        if final_issues and (prepared.query_intent == "translate_questions" or blocking_format_issue):
-            generation_debug["fail_closed"] = True
-            generation_debug["blocked_issues"] = list(final_issues)
-            answer = (
-                TRANSLATION_VALIDATION_FAILURE_RESPONSE
-                if prepared.query_intent == "translate_questions"
-                else FORMAT_VALIDATION_FAILURE_RESPONSE
-            )
     return answer
 
 
 def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> bool:
     return (
-        (
-            prepared.route_used == "base_model"
-            and direct_request_requires_structured_review(message)
-        )
+        prepared.route_used == "base_model"
         or is_writing_response(prepared)
         or prepared.query_intent == "translate_questions"
         or (
@@ -430,17 +393,6 @@ def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> b
             and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
         )
     )
-
-
-DIRECT_STRUCTURED_REVIEW_RE = re.compile(
-    r"\b(?:kế\s*hoạch|lộ\s*trình|lịch(?:\s+học)?|bảng|plan|roadmap|schedule|timetable|table)\b",
-    re.IGNORECASE,
-)
-
-
-def direct_request_requires_structured_review(message: str) -> bool:
-    """Buffer direct answers only when their requested structure needs validation."""
-    return bool(DIRECT_STRUCTURED_REVIEW_RE.search(message))
 
 
 def is_writing_response(prepared: "ChatPreparation") -> bool:
@@ -497,7 +449,6 @@ def conversation_state_for_result(
         last_route=route,
         last_intent=prepared.query_intent,
         rag_affinity=affinity,
-        user_profile=user_profile_for_request(req),
     )
     prepared.debug["conversation_state"] = {
         "input": req.conversation_state.model_dump() if req.conversation_state else None,
@@ -884,61 +835,6 @@ def effective_affinity(req: ChatRequest) -> ChatAffinity | None:
     return req.affinity
 
 
-CURRENT_BAND_PATTERNS = (
-    re.compile(
-        r"\b(?:hiện\s*tại|currently)\b\s*(?:tôi|mình|i\s+am)?\s*(?:đang|ở|at)?\s*"
-        r"(?:band\s*)?([0-9](?:[.,][0-9])?)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\b(?:tôi|mình)\s+(?:đang\s+|ở\s+)?band\s*([0-9](?:[.,][0-9])?)\b", re.IGNORECASE),
-    re.compile(r"\b(?:i\s+am|i'm|my\s+(?:current\s+)?band\s+is)\s+(?:at\s+)?(?:band\s*)?([0-9](?:[.,][0-9])?)\b", re.IGNORECASE),
-)
-TARGET_BAND_PATTERNS = (
-    re.compile(r"\b(?:mục\s*tiêu|đạt|lên)\b.{0,24}?\b(?:band\s*)?([0-9](?:[.,][0-9])?)\b", re.IGNORECASE),
-    re.compile(r"\b(?:target|reach|aim(?:ing)?\s+for)\b.{0,24}?\b(?:band\s*)?([0-9](?:[.,][0-9])?)\b", re.IGNORECASE),
-)
-STUDY_DURATION_PATTERN = re.compile(
-    r"\b(?:trong(?:\s+vòng)?|within|over|for)\s+([0-9]{1,3})\s*(?:tháng|months?)\b",
-    re.IGNORECASE,
-)
-
-
-def _first_band_value(message: str, patterns: tuple[re.Pattern[str], ...]) -> float | None:
-    for pattern in patterns:
-        match = pattern.search(message)
-        if match:
-            value = float(match.group(1).replace(",", "."))
-            if 0 <= value <= 9:
-                return value
-    return None
-
-
-def user_profile_for_request(req: ChatRequest) -> ChatUserProfile:
-    previous = req.conversation_state.user_profile if req.conversation_state else ChatUserProfile()
-    current_band = _first_band_value(req.message, CURRENT_BAND_PATTERNS)
-    target_band = _first_band_value(req.message, TARGET_BAND_PATTERNS)
-    duration_match = STUDY_DURATION_PATTERN.search(req.message)
-    duration = int(duration_match.group(1)) if duration_match else None
-    return ChatUserProfile(
-        current_band=current_band if current_band is not None else previous.current_band,
-        target_band=target_band if target_band is not None else previous.target_band,
-        study_duration_months=(
-            duration if duration is not None and 1 <= duration <= 120 else previous.study_duration_months
-        ),
-    )
-
-
-def user_profile_prompt_context(profile: ChatUserProfile) -> str:
-    facts = []
-    if profile.current_band is not None:
-        facts.append(f"- Current IELTS band: {profile.current_band:g}")
-    if profile.target_band is not None:
-        facts.append(f"- Target IELTS band: {profile.target_band:g}")
-    if profile.study_duration_months is not None:
-        facts.append(f"- Study duration: {profile.study_duration_months} months")
-    return "\n".join(facts)
-
-
 def gateway_state_context(req: ChatRequest) -> str:
     if not req.conversation_state:
         return ""
@@ -1032,13 +928,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         gateway_debug = {"used": True, **gateway_decision.to_debug()}
 
     if route == "direct":
-        user_profile = user_profile_for_request(req)
         return ChatPreparation(
-            prompt=direct_answer_prompt(
-                message,
-                req.conversation_history,
-                user_profile_prompt_context(user_profile),
-            ),
+            prompt=direct_answer_prompt(message, req.conversation_history),
             static_response=None,
             route_used="base_model",
             sources=[],
@@ -1054,7 +945,6 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 },
                 "retrieval": {"skipped": True, "final_context": []},
                 "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
-                "user_profile": user_profile.model_dump(exclude_none=True),
                 "source_count": 0,
             },
             query_intent="direct",
@@ -1244,9 +1134,6 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         if structured_sources:
             source_limit = 50 if query_intent == "document_overview" else settings.rag_top_k
             sources = structured_sources[:source_limit]
-        elif query_intent == "solve_questions":
-            sources = []
-            retrieval_method = "structured_question_no_match"
         elif query_intent == "document_overview":
             sources = await run_in_threadpool(
                 store.overview,
@@ -1358,11 +1245,6 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         "retrieval": {
             "method": retrieval_method,
             "structured_hits": len(structured_sources),
-            "structured_question_units": sum(
-                1
-                for source in structured_sources
-                if source.get("metadata", {}).get("unit_type") in {"question", "question_group"}
-            ),
             "before_filter_count": before_filter_count,
             "after_filter_count": len(sources),
             "evidence_candidate_count": evidence_candidate_count,
@@ -1470,11 +1352,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         )
 
     return ChatPreparation(
-        prompt=direct_answer_prompt(
-            message,
-            req.conversation_history,
-            user_profile_prompt_context(user_profile_for_request(req)),
-        ),
+        prompt=direct_answer_prompt(message, req.conversation_history),
         static_response=None,
         route_used="base_model",
         sources=[],
@@ -1673,26 +1551,12 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             has_token = False
             temperature = generation_temperature(prepared)
-            try:
-                async for token in stream_ollama(
-                    prepared.prompt or "",
-                    temperature=temperature,
-                ):
-                    has_token = True
-                    yield stream_event("token", token=token)
-            except OllamaRequestError as exc:
-                if has_token or exc.kind not in {"prompt_echo", "role_prefix"}:
-                    raise
-                logger.warning(
-                    "Rejected invalid stream prefix; retrying with reviewed generation",
-                    extra={"error_kind": exc.kind},
-                )
-                fallback_answer = await generate_answer(prepared, req.message)
-                if not fallback_answer.strip():
-                    fallback_answer = generation_fallback(prepared)
-                yield stream_event("token", token=fallback_answer)
-                yield stream_event("done")
-                return
+            async for token in stream_ollama(
+                prepared.prompt or "",
+                temperature=temperature,
+            ):
+                has_token = True
+                yield stream_event("token", token=token)
             if not has_token:
                 logger.warning("Ollama stream completed without visible tokens; retrying with non-stream request")
                 fallback_answer = await query_ollama(

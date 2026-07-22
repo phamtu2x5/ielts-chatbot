@@ -276,11 +276,6 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "passage_numbers": [2],
                     "question_ranges": [[14, 17]],
                 },
-                "user_profile": {
-                    "current_band": 5.5,
-                    "target_band": 6.5,
-                    "study_duration_months": 3,
-                },
             },
         )
 
@@ -289,64 +284,6 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.last_route, "direct")
         self.assertEqual(state.rag_affinity.document_ids, ["doc-1"])
         self.assertEqual(state.rag_affinity.passage_numbers, [2])
-        self.assertEqual(state.user_profile.current_band, 5.5)
-        self.assertEqual(state.user_profile.target_band, 6.5)
-        self.assertEqual(state.user_profile.study_duration_months, 3)
-
-    def test_user_profile_uses_only_facts_from_user_message_and_preserves_previous_values(self) -> None:
-        initial_request = main.ChatRequest(
-            message="Hiện tại tôi band 5.5, mục tiêu đạt 6.5 trong vòng 3 tháng.",
-        )
-        initial = main.user_profile_for_request(initial_request)
-
-        self.assertEqual(initial.current_band, 5.5)
-        self.assertEqual(initial.target_band, 6.5)
-        self.assertEqual(initial.study_duration_months, 3)
-
-        follow_up = main.ChatRequest(
-            message="Bạn nhớ trình độ của tôi không?",
-            conversation_history=[
-                {"role": "assistant", "content": "Bạn đang ở band 8.0."},
-            ],
-            conversation_state={
-                "last_route": "direct",
-                "last_intent": "direct",
-                "user_profile": initial.model_dump(),
-            },
-        )
-        preserved = main.user_profile_for_request(follow_up)
-
-        self.assertEqual(preserved.current_band, 5.5)
-        self.assertEqual(preserved.target_band, 6.5)
-        self.assertEqual(preserved.study_duration_months, 3)
-
-    def test_target_band_phrase_does_not_overwrite_current_band(self) -> None:
-        request = main.ChatRequest(
-            message="Hiện tại tôi muốn lên band 6.5.",
-            conversation_state={"user_profile": {"current_band": 5.5}},
-        )
-
-        profile = main.user_profile_for_request(request)
-
-        self.assertEqual(profile.current_band, 5.5)
-        self.assertEqual(profile.target_band, 6.5)
-
-    async def test_direct_prompt_receives_authoritative_user_profile(self) -> None:
-        with patch.object(
-            main,
-            "classify_chat_route",
-            AsyncMock(return_value=_gateway_decision("direct", "direct")),
-        ):
-            prepared = await main.prepare_chat(
-                main.ChatRequest(
-                    message="Bạn nhớ tôi band bao nhiêu không?",
-                    conversation_state={"user_profile": {"current_band": 5.5}},
-                )
-            )
-
-        self.assertEqual(prepared.route_used, "base_model")
-        self.assertIn("Current IELTS band: 5.5", prepared.prompt)
-        self.assertEqual(prepared.debug["user_profile"], {"current_band": 5.5})
 
     async def test_gateway_failure_without_document_basis_returns_safe_http_200_result(self) -> None:
         catalog = [
@@ -1019,76 +956,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={"intent_decision": {"allow_solution": True}},
             query_intent="solve_questions",
         )
-        model = AsyncMock(return_value="Đáp án C vì passage nêu trực tiếp chi tiết này.")
+        model = AsyncMock(return_value="C because it is explicitly discussed.")
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Trả lời Question 11.")
 
-        self.assertEqual(answer, "Đáp án C vì passage nêu trực tiếp chi tiết này.")
+        self.assertEqual(answer, "C because it is explicitly discussed.")
         self.assertEqual(model.await_count, 1)
         self.assertFalse(main.requires_reviewed_generation(prepared, "Trả lời Question 11."))
-
-    async def test_solve_does_not_fall_back_to_semantic_passage_without_exact_question(self) -> None:
-        catalog = [
-            {
-                "source_file": "reading.pdf",
-                "document_ids": ["doc-1"],
-                "mime_types": ["application/pdf"],
-            }
-        ]
-
-        class StrongPassageStore(_FakeChatStore):
-            def probe_with_catalog(self, query, top_k, document_ids=None, include_dense=True):
-                passage = {
-                    "document_id": "doc-1",
-                    "source_file": "reading.pdf",
-                    "text": "Semantically related passage text.",
-                    "metadata": {"unit_type": "passage", "passage_number": 1},
-                }
-                return (
-                    {
-                        "results": [passage],
-                        "has_hits": True,
-                        "has_strong_hits": True,
-                        "has_document_intent": True,
-                        "is_overview": False,
-                        "top_question_score": 0.0,
-                    },
-                    self.document_catalog(document_ids),
-                )
-
-        store = StrongPassageStore(catalog)
-        with (
-            patch.object(main, "get_store", return_value=store),
-            patch.object(
-                main,
-                "classify_chat_route",
-                AsyncMock(return_value=_gateway_decision("rag", "solve_questions")),
-            ),
-            patch.object(
-                main,
-                "classify_rag_intent",
-                AsyncMock(
-                    return_value=IntentClassifierDecision(
-                        intent="solve_questions",
-                        attempts=1,
-                        duration_seconds=0.01,
-                        raw_output_preview="solve_questions",
-                    )
-                ),
-            ),
-        ):
-            prepared = await main.prepare_chat(
-                main.ChatRequest(
-                    message="Trả lời Question 11 và giải thích.",
-                    document_ids=["doc-1"],
-                )
-            )
-
-        self.assertEqual(prepared.route_used, "vector_rag_no_match")
-        self.assertEqual(prepared.debug["retrieval"]["method"], "structured_question_no_match")
-        self.assertEqual(prepared.debug["retrieval"]["structured_question_units"], 0)
-        self.assertEqual(prepared.sources, [])
 
     def test_direct_generation_is_buffered_for_output_validation(self) -> None:
         prepared = main.ChatPreparation(
@@ -1101,48 +976,6 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(main.requires_reviewed_generation(prepared, "Lập kế hoạch học trong 3 tháng."))
-
-    def test_plain_direct_generation_uses_true_streaming(self) -> None:
-        prepared = main.ChatPreparation(
-            prompt="direct tips prompt",
-            static_response=None,
-            route_used="base_model",
-            sources=[],
-            debug={},
-            query_intent="direct",
-        )
-
-        self.assertFalse(main.requires_reviewed_generation(prepared, "Cho tôi 3 tips học IELTS."))
-        self.assertFalse(main.requires_reviewed_generation(prepared, "haha"))
-
-    async def test_invalid_direct_stream_prefix_falls_back_to_reviewed_generation(self) -> None:
-        prepared = main.ChatPreparation(
-            prompt="direct conversation prompt",
-            static_response=None,
-            route_used="base_model",
-            sources=[],
-            debug={},
-            query_intent="direct",
-        )
-
-        async def invalid_stream(*args, **kwargs):
-            raise main.OllamaRequestError("role_prefix", "invalid role prefix")
-            yield ""  # pragma: no cover
-
-        with (
-            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
-            patch.object(main, "stream_ollama", invalid_stream),
-            patch.object(main, "generate_answer", AsyncMock(return_value="Mình đang nghe đây.")) as fallback,
-        ):
-            response = await main.chat_stream(main.ChatRequest(message="haha"))
-            events = [json.loads(chunk) async for chunk in response.body_iterator]
-
-        self.assertEqual(
-            [event["token"] for event in events if event["type"] == "token"],
-            ["Mình đang nghe đây."],
-        )
-        self.assertEqual(events[-1]["type"], "done")
-        fallback.assert_awaited_once_with(prepared, "haha")
 
     async def test_direct_generation_retries_a_multiline_markdown_table(self) -> None:
         prepared = main.ChatPreparation(
@@ -1219,7 +1052,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("below 170", retry_prompt.lower())
         self.assertEqual(prepared.debug["generation"]["selected_candidate"], "retry")
 
-    async def test_writing_generation_fails_closed_when_both_candidates_are_invalid(self) -> None:
+    async def test_writing_generation_keeps_best_non_meta_candidate_after_retry(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded writing prompt",
             static_response=None,
@@ -1238,51 +1071,10 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "Viết bài IELTS Writing Task 1 dài 170-190 từ.",
             )
 
-        self.assertEqual(answer, main.WRITING_VALIDATION_FAILURE_RESPONSE)
+        self.assertEqual(answer, first)
         self.assertEqual(model.await_count, 2)
         self.assertEqual(prepared.debug["generation"]["selected_candidate"], "first")
         self.assertTrue(prepared.debug["generation"]["final_issues"])
-        self.assertTrue(prepared.debug["generation"]["fail_closed"])
-
-    async def test_translation_fails_closed_when_retry_is_still_incomplete(self) -> None:
-        prepared = main.ChatPreparation(
-            prompt="grounded translation prompt",
-            static_response=None,
-            route_used="vector_rag",
-            sources=[],
-            debug={"intent_decision": {"allow_solution": False}},
-            query_intent="translate_questions",
-        )
-        model = AsyncMock(side_effect=["Question one only.", "Chỉ có câu một."])
-
-        with patch.object(main, "query_ollama", model):
-            answer = await main.generate_answer(prepared, "Dịch Questions 1-4 sang tiếng Việt.")
-
-        self.assertEqual(answer, main.TRANSLATION_VALIDATION_FAILURE_RESPONSE)
-        self.assertEqual(model.await_count, 2)
-        self.assertTrue(prepared.debug["generation"]["fail_closed"])
-
-    async def test_markdown_table_fails_closed_when_retry_remains_malformed(self) -> None:
-        prepared = main.ChatPreparation(
-            prompt="direct plan prompt",
-            static_response=None,
-            route_used="base_model",
-            sources=[],
-            debug={},
-            query_intent="direct",
-        )
-        malformed = """| Giai đoạn | Hoạt động |
-| --- | --- |
-| Tuần 1-4 | - Luyện nghe
-- Luyện đọc |"""
-        model = AsyncMock(side_effect=[malformed, malformed])
-
-        with patch.object(main, "query_ollama", model):
-            answer = await main.generate_answer(prepared, "Lập kế hoạch học trong 3 tháng.")
-
-        self.assertEqual(answer, main.FORMAT_VALIDATION_FAILURE_RESPONSE)
-        self.assertEqual(model.await_count, 2)
-        self.assertTrue(prepared.debug["generation"]["fail_closed"])
 
     async def test_writing_semantic_answer_defaults_to_english(self) -> None:
         prepared = main.ChatPreparation(

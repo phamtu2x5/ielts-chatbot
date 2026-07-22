@@ -14,17 +14,10 @@ class ChatAffinity(BaseModel):
     question_ranges: List[List[int]] = Field(default_factory=list, max_length=20)
 
 
-class ChatUserProfile(BaseModel):
-    current_band: Optional[float] = Field(default=None, ge=0, le=9)
-    target_band: Optional[float] = Field(default=None, ge=0, le=9)
-    study_duration_months: Optional[int] = Field(default=None, ge=1, le=120)
-
-
 class ChatConversationState(BaseModel):
     last_route: Optional[Literal["direct", "rag", "clarify", "no_match"]] = None
     last_intent: Optional[str] = None
     rag_affinity: ChatAffinity = Field(default_factory=ChatAffinity)
-    user_profile: ChatUserProfile = Field(default_factory=ChatUserProfile)
 
 
 class ChatRequest(BaseModel):

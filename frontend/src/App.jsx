@@ -30,16 +30,6 @@ const routeLabels = {
   error: "Lỗi",
 };
 
-const untrustedHistoryRoutes = new Set([
-  "welcome",
-  "upload",
-  "error",
-  "vector_rag_ambiguous_document",
-  "vector_rag_no_match",
-  "route_undetermined",
-  "intent_undetermined",
-]);
-
 function routeLabel(route) {
   if (!route || route === "welcome") return "";
   return routeLabels[route] || route;
@@ -169,7 +159,7 @@ function completedConversationHistory(messages) {
       assistant.role !== "assistant" ||
       assistant.streaming ||
       !assistant.content?.trim() ||
-      untrustedHistoryRoutes.has(assistant.route_used)
+      ["welcome", "upload", "error"].includes(assistant.route_used)
     ) {
       continue;
     }
@@ -521,7 +511,6 @@ function App() {
                 passage_numbers: [],
                 question_ranges: [],
               },
-              user_profile: current?.user_profile || {},
             }));
           }
         }
@@ -634,7 +623,6 @@ function App() {
                   last_route: conversationState?.last_route || "rag",
                   last_intent: conversationState?.last_intent || null,
                   rag_affinity: nextAffinity,
-                  user_profile: conversationState?.user_profile || {},
                 };
               }
             }
