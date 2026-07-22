@@ -230,6 +230,16 @@ NO_RAG_MATCH_RESPONSE = (
     "Mình chưa tìm thấy nội dung phù hợp trong tài liệu đã upload để trả lời câu hỏi này. "
     "Bạn có thể hỏi rõ hơn theo tên bài, số trang, hoặc upload lại tài liệu nếu phần đó nằm trong bảng/ảnh chưa được trích xuất tốt."
 )
+WRITING_VALIDATION_FAILURE_RESPONSE = (
+    "Mình chưa tạo được bài viết đáp ứng đầy đủ yêu cầu về ngôn ngữ, độ dài và định dạng. "
+    "Vui lòng thử lại."
+)
+TRANSLATION_VALIDATION_FAILURE_RESPONSE = (
+    "Mình chưa tạo được bản dịch đầy đủ và đúng định dạng cho phần được yêu cầu. Vui lòng thử lại."
+)
+FORMAT_VALIDATION_FAILURE_RESPONSE = (
+    "Mình chưa tạo được câu trả lời đúng định dạng được yêu cầu. Vui lòng thử lại."
+)
 
 AMBIGUOUS_DOCUMENT_RESPONSE = (
     "Mình chưa xác định được bạn đang hỏi tài liệu nào vì có nhiều file phù hợp. "
@@ -328,7 +338,12 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             answer = selected
         else:
             generation_debug["retry_used"] = False
-        generation_debug["final_issues"] = writing_output_issues(answer, contract)
+        final_issues = writing_output_issues(answer, contract)
+        generation_debug["final_issues"] = final_issues
+        if final_issues:
+            generation_debug["fail_closed"] = True
+            generation_debug["blocked_issues"] = list(final_issues)
+            answer = WRITING_VALIDATION_FAILURE_RESPONSE
     else:
         allow_solution = bool(prepared.debug.get("intent_decision", {}).get("allow_solution", False))
         contract = response_output_contract(
@@ -381,6 +396,24 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             generation_debug["safe_fallback_used"] = True
             final_issues = response_output_issues(answer, contract)
         generation_debug["final_issues"] = final_issues
+        blocking_format_issue = any(
+            marker in issue
+            for issue in final_issues
+            for marker in (
+                "not written in",
+                "missing question numbers",
+                "malformed Markdown table",
+                "conversation role prefix",
+            )
+        )
+        if final_issues and (prepared.query_intent == "translate_questions" or blocking_format_issue):
+            generation_debug["fail_closed"] = True
+            generation_debug["blocked_issues"] = list(final_issues)
+            answer = (
+                TRANSLATION_VALIDATION_FAILURE_RESPONSE
+                if prepared.query_intent == "translate_questions"
+                else FORMAT_VALIDATION_FAILURE_RESPONSE
+            )
     return answer
 
 

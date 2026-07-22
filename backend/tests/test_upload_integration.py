@@ -1019,12 +1019,12 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={"intent_decision": {"allow_solution": True}},
             query_intent="solve_questions",
         )
-        model = AsyncMock(return_value="C because it is explicitly discussed.")
+        model = AsyncMock(return_value="Đáp án C vì passage nêu trực tiếp chi tiết này.")
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Trả lời Question 11.")
 
-        self.assertEqual(answer, "C because it is explicitly discussed.")
+        self.assertEqual(answer, "Đáp án C vì passage nêu trực tiếp chi tiết này.")
         self.assertEqual(model.await_count, 1)
         self.assertFalse(main.requires_reviewed_generation(prepared, "Trả lời Question 11."))
 
@@ -1219,7 +1219,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("below 170", retry_prompt.lower())
         self.assertEqual(prepared.debug["generation"]["selected_candidate"], "retry")
 
-    async def test_writing_generation_keeps_best_non_meta_candidate_after_retry(self) -> None:
+    async def test_writing_generation_fails_closed_when_both_candidates_are_invalid(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded writing prompt",
             static_response=None,
@@ -1238,10 +1238,51 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "Viết bài IELTS Writing Task 1 dài 170-190 từ.",
             )
 
-        self.assertEqual(answer, first)
+        self.assertEqual(answer, main.WRITING_VALIDATION_FAILURE_RESPONSE)
         self.assertEqual(model.await_count, 2)
         self.assertEqual(prepared.debug["generation"]["selected_candidate"], "first")
         self.assertTrue(prepared.debug["generation"]["final_issues"])
+        self.assertTrue(prepared.debug["generation"]["fail_closed"])
+
+    async def test_translation_fails_closed_when_retry_is_still_incomplete(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded translation prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": False}},
+            query_intent="translate_questions",
+        )
+        model = AsyncMock(side_effect=["Question one only.", "Chỉ có câu một."])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "Dịch Questions 1-4 sang tiếng Việt.")
+
+        self.assertEqual(answer, main.TRANSLATION_VALIDATION_FAILURE_RESPONSE)
+        self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["fail_closed"])
+
+    async def test_markdown_table_fails_closed_when_retry_remains_malformed(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct plan prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+        malformed = """| Giai đoạn | Hoạt động |
+| --- | --- |
+| Tuần 1-4 | - Luyện nghe
+- Luyện đọc |"""
+        model = AsyncMock(side_effect=[malformed, malformed])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "Lập kế hoạch học trong 3 tháng.")
+
+        self.assertEqual(answer, main.FORMAT_VALIDATION_FAILURE_RESPONSE)
+        self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["fail_closed"])
 
     async def test_writing_semantic_answer_defaults_to_english(self) -> None:
         prepared = main.ChatPreparation(
