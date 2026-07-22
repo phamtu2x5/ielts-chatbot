@@ -30,6 +30,16 @@ const routeLabels = {
   error: "Lỗi",
 };
 
+const untrustedHistoryRoutes = new Set([
+  "welcome",
+  "upload",
+  "error",
+  "vector_rag_ambiguous_document",
+  "vector_rag_no_match",
+  "route_undetermined",
+  "intent_undetermined",
+]);
+
 function routeLabel(route) {
   if (!route || route === "welcome") return "";
   return routeLabels[route] || route;
@@ -159,7 +169,7 @@ function completedConversationHistory(messages) {
       assistant.role !== "assistant" ||
       assistant.streaming ||
       !assistant.content?.trim() ||
-      ["welcome", "upload", "error"].includes(assistant.route_used)
+      untrustedHistoryRoutes.has(assistant.route_used)
     ) {
       continue;
     }
