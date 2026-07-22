@@ -565,6 +565,27 @@ async def query_ollama(
                 response = await client.post(OLLAMA_API_URL, json=payload)
                 response.raise_for_status()
                 data = response.json()
+                raw_text = data.get("response") or ""
+                visible_text = clean_response(raw_text)
+                if not visible_text:
+                    thinking = data.get("thinking") or ""
+                    if attempt < max_attempts:
+                        continue
+                    raise OllamaRequestError(
+                        "empty_response",
+                        "Ollama returned an empty visible response.",
+                        attempts=attempt,
+                        metadata={
+                            "response_keys": sorted(data.keys()),
+                            "done": data.get("done"),
+                            "done_reason": data.get("done_reason"),
+                            "prompt_eval_count": data.get("prompt_eval_count"),
+                            "eval_count": data.get("eval_count"),
+                            "response_length": len(raw_text),
+                            "thinking_length": len(thinking),
+                            "think_requested": settings.ollama_think,
+                        },
+                    )
                 break
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
@@ -599,22 +620,6 @@ async def query_ollama(
     text = visible_text if clean_output else raw_text.strip()
     if looks_like_prompt_echo(visible_text, prompt):
         raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt instead of answering.")
-    if not visible_text:
-        thinking = data.get("thinking") or ""
-        raise OllamaRequestError(
-            "empty_response",
-            "Ollama returned an empty visible response.",
-            metadata={
-                "response_keys": sorted(data.keys()),
-                "done": data.get("done"),
-                "done_reason": data.get("done_reason"),
-                "prompt_eval_count": data.get("prompt_eval_count"),
-                "eval_count": data.get("eval_count"),
-                "response_length": len(raw_text),
-                "thinking_length": len(thinking),
-                "think_requested": settings.ollama_think,
-            },
-        )
     return text
 
 
