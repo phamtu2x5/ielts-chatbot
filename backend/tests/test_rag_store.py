@@ -38,7 +38,6 @@ from app.intent import (
 from app.llm import (
     clean_response,
     has_malformed_markdown_table,
-    intent_from_action_target,
     likely_contains_solution,
     looks_like_prompt_echo,
     rag_prompt,
@@ -840,28 +839,28 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             llm,
             "query_ollama",
-            AsyncMock(return_value='{"action":"show","target":"questions"}'),
+            AsyncMock(return_value='{"intent":"show_questions"}'),
         ):
             decision = await llm.classify_rag_intent("Show Questions 1-4")
         self.assertEqual(decision.intent, "show_questions")
-        self.assertEqual(decision.action, "show")
-        self.assertEqual(decision.target, "questions")
 
     async def test_intent_classifier_fails_closed_after_invalid_output(self) -> None:
         with patch.object(
             llm,
             "query_ollama",
-            AsyncMock(return_value='{"action":"generate","target":"table"}'),
+            AsyncMock(return_value='{"intent":"unsupported_intent"}'),
         ):
             decision = await llm.classify_rag_intent("Show Questions 1-4")
         self.assertEqual(decision.intent, "undetermined")
         self.assertEqual(decision.fallback_reason, "invalid_intent_output")
 
-    def test_action_target_intents_cover_overview_solve_and_grounded_qa(self) -> None:
-        self.assertEqual(intent_from_action_target("overview", "document"), "document_overview")
-        self.assertEqual(intent_from_action_target("solve", "questions"), "solve_questions")
-        self.assertEqual(intent_from_action_target("show", "writing_prompt"), "show_writing_prompt")
-        self.assertEqual(intent_from_action_target("answer", "passage"), "semantic_qa")
+    def test_intent_classifier_prompt_requests_final_enum_without_intermediate_labels(self) -> None:
+        prompt = llm.intent_classifier_prompt("Summarize the uploaded document")
+        self.assertIn('"intent":"<allowed enum>"', prompt)
+        self.assertIn("document_overview", prompt)
+        self.assertIn("semantic_qa", prompt)
+        self.assertNotIn('"action"', prompt)
+        self.assertNotIn('"target"', prompt)
 
     async def test_target_resolver_accepts_catalog_refs(self) -> None:
         catalog = "- D1: first.pdf\n- D2: second.pdf"

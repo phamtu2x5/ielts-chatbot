@@ -31,30 +31,6 @@ ROUTING_INTENTS = (
     "show_writing_prompt",
     "writing_generation",
 )
-INTENT_ACTIONS = (
-    "overview",
-    "show",
-    "translate",
-    "explain",
-    "solve",
-    "extract",
-    "lookup",
-    "calculate",
-    "compare",
-    "generate",
-    "answer",
-)
-INTENT_TARGETS = (
-    "document",
-    "passage",
-    "questions",
-    "table",
-    "flowchart",
-    "diagram",
-    "writing_prompt",
-    "writing_task",
-    "content",
-)
 ASSISTANT_STYLE = """You are an IELTS preparation assistant for Vietnamese learners.
 Default to Vietnamese unless the user clearly asks for another language or is practicing an English answer.
 Write in a concise, neutral, and coherent tutoring style.
@@ -95,8 +71,6 @@ class IntentClassifierDecision:
     duration_seconds: float
     raw_output_preview: str
     fallback_reason: str | None = None
-    action: str | None = None
-    target: str | None = None
 
     def to_debug(self) -> dict:
         return {
@@ -105,8 +79,6 @@ class IntentClassifierDecision:
             "duration_seconds": self.duration_seconds,
             "raw_output_preview": self.raw_output_preview,
             "fallback_reason": self.fallback_reason,
-            "action": self.action,
-            "target": self.target,
         }
 
 
@@ -711,11 +683,8 @@ ROUTE_RESPONSE_SCHEMA = {
 }
 INTENT_RESPONSE_SCHEMA = {
     "type": "object",
-    "properties": {
-        "action": {"type": "string", "enum": list(INTENT_ACTIONS)},
-        "target": {"type": "string", "enum": list(INTENT_TARGETS)},
-    },
-    "required": ["action", "target"],
+    "properties": {"intent": {"type": "string", "enum": list(ROUTING_INTENTS)}},
+    "required": ["intent"],
     "additionalProperties": False,
 }
 
@@ -855,61 +824,23 @@ def direct_answer_prompt(
 
 def intent_classifier_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
     history_text = format_history(history)
+    intents = ", ".join(ROUTING_INTENTS)
     parts = [
-        "Classify the requested action and target for this uploaded-document request.",
-        f"Allowed actions: {', '.join(INTENT_ACTIONS)}.",
-        f"Allowed targets: {', '.join(INTENT_TARGETS)}.",
-        'Return one JSON object only: {"action":"<allowed action>","target":"<allowed target>"}.',
-        "Use overview+document for a whole-document outline or summary of all sections.",
-        "Use show+writing_prompt when the user asks what a Writing prompt requires without writing the answer.",
-        "Use solve+questions only when the user asks to answer, solve, choose, or determine an answer.",
-        "Use answer+content for factual or reasoning questions about passage content.",
-        "Use explain+questions only to explain question wording, task type, or method without answering.",
-        "Use lookup+table for one exact table value; calculate+table for arithmetic; compare+table for comparisons.",
+        "Classify this uploaded-document request into exactly one final intent enum.",
+        f"Allowed enums: {intents}.",
+        'Return one JSON object only: {"intent":"<allowed enum>"}.',
+        "Use document_overview for a whole-document outline or summary of all sections.",
+        "Use show_writing_prompt when the user asks what a Writing prompt requires without writing an answer.",
+        "Use solve_questions only when the user asks to answer, solve, choose, or determine question answers.",
+        "Use semantic_qa for factual, evidence, explanation, or reasoning questions about passage content.",
+        "Use explain_questions only to explain question wording, task type, or method without answering.",
+        "Use table_cell for one exact table value, table_calculation for arithmetic, and table_comparison for comparisons.",
         "Negative constraints such as 'do not solve' or 'do not write' override solution generation.",
     ]
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Current user message:\n{message}")
     return "\n\n".join(parts)
-
-
-def intent_from_action_target(action: str, target: str) -> str | None:
-    direct_pairs = {
-        ("overview", "document"): "document_overview",
-        ("show", "document"): "document_overview",
-        ("extract", "document"): "document_overview",
-        ("show", "questions"): "show_questions",
-        ("extract", "questions"): "show_questions",
-        ("translate", "questions"): "translate_questions",
-        ("explain", "questions"): "explain_questions",
-        ("solve", "questions"): "solve_questions",
-        ("answer", "questions"): "solve_questions",
-        ("show", "table"): "show_table",
-        ("extract", "table"): "extract_table",
-        ("lookup", "table"): "table_cell",
-        ("calculate", "table"): "table_calculation",
-        ("compare", "table"): "table_comparison",
-        ("show", "flowchart"): "show_flowchart",
-        ("extract", "flowchart"): "show_flowchart",
-        ("show", "diagram"): "show_diagram",
-        ("extract", "diagram"): "show_diagram",
-        ("show", "writing_prompt"): "show_writing_prompt",
-        ("extract", "writing_prompt"): "show_writing_prompt",
-        ("explain", "writing_prompt"): "show_writing_prompt",
-        ("show", "writing_task"): "show_writing_prompt",
-        ("generate", "writing_task"): "writing_generation",
-    }
-    if (action, target) in direct_pairs:
-        return direct_pairs[(action, target)]
-    if action in {"answer", "overview", "translate", "explain", "lookup", "show"} and target in {
-        "content",
-        "passage",
-        "document",
-        "writing_task",
-    }:
-        return "semantic_qa"
-    return None
 
 
 async def classify_rag_intent(
@@ -931,21 +862,14 @@ async def classify_rag_intent(
                 max_attempts=1,
             )
             payload = _parse_json_object(last_raw, "invalid_intent_output")
-            action = payload.get("action")
-            target = payload.get("target")
-            intent = intent_from_action_target(action, target)
-            if action not in INTENT_ACTIONS or target not in INTENT_TARGETS or intent not in ROUTING_INTENTS:
-                raise OllamaRequestError(
-                    "invalid_intent_output",
-                    "Intent classifier returned an unsupported action-target pair.",
-                )
+            intent = payload.get("intent")
+            if intent not in ROUTING_INTENTS:
+                raise OllamaRequestError("invalid_intent_output", "Intent classifier returned an invalid enum.")
             return IntentClassifierDecision(
                 intent=intent,
                 attempts=attempt,
                 duration_seconds=round(time.perf_counter() - started, 3),
                 raw_output_preview=_visible_raw_output(last_raw)[:160],
-                action=action,
-                target=target,
             )
         except OllamaRequestError as exc:
             last_error = exc.kind
