@@ -241,6 +241,24 @@ def format_history(history: Optional[List[ChatMessage]]) -> str:
     return "\n".join(lines)
 
 
+def format_route_history(history: Optional[List[ChatMessage]]) -> str:
+    """Keep only the latest completed exchange needed for route continuity."""
+    if not history:
+        return ""
+
+    selected = history[-2:]
+    per_message_limit = 1_200
+    lines: list[str] = []
+    for msg in selected:
+        content = msg.content.strip()
+        if len(content) > per_message_limit:
+            half = (per_message_limit - 5) // 2
+            content = f"{content[:half]}\n...\n{content[-half:]}"
+        role = "User" if msg.role == "user" else "Assistant"
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
 def clean_response(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
@@ -696,7 +714,7 @@ def route_classifier_prompt(
     conversation_state: str = "",
     compact: bool = False,
 ) -> str:
-    history_text = format_history(history)
+    history_text = format_route_history(history)
     if compact:
         parts = [
             "Classify whether this IELTS chatbot request requires uploaded document content.",
@@ -773,7 +791,7 @@ async def classify_chat_route(
             last_raw = await query_ollama(
                 prompt,
                 temperature=0.0,
-                num_predict=64,
+                num_predict=32,
                 response_format=ROUTE_RESPONSE_SCHEMA,
                 clean_output=False,
                 max_attempts=1,

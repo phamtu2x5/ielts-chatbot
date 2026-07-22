@@ -49,6 +49,7 @@ from app.llm import (
     writing_output_issues,
     writing_retry_prompt,
 )
+from app.schemas import ChatMessage
 from app.structured_store import StructuredDocumentStore
 from app.table_operations import (
     comparison_row,
@@ -775,6 +776,36 @@ class LocalVectorStoreTests(unittest.TestCase):
 
 
 class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
+    def test_route_classifier_prompt_keeps_only_latest_exchange(self) -> None:
+        history = [
+            ChatMessage(role="user", content="Old document question"),
+            ChatMessage(role="assistant", content="Old document answer"),
+            ChatMessage(role="user", content="Latest user turn"),
+            ChatMessage(role="assistant", content="Latest assistant turn"),
+        ]
+
+        prompt = llm.route_classifier_prompt("Why?", history)
+
+        self.assertNotIn("Old document question", prompt)
+        self.assertNotIn("Old document answer", prompt)
+        self.assertIn("User: Latest user turn", prompt)
+        self.assertIn("Assistant: Latest assistant turn", prompt)
+        self.assertIn("Current user message:\nWhy?", prompt)
+
+    def test_route_classifier_prompt_bounds_long_recent_messages(self) -> None:
+        history = [
+            ChatMessage(role="user", content="A" * 4_000),
+            ChatMessage(role="assistant", content="B" * 4_000),
+        ]
+
+        prompt = llm.route_classifier_prompt("Hello", history)
+        history_text = prompt.split("Previous conversation:\n", 1)[1].split(
+            "\n\nCurrent user message:", 1
+        )[0]
+
+        self.assertLessEqual(len(history_text), 2_430)
+        self.assertIn("\n...\n", history_text)
+
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')
         with patch.object(llm, "query_ollama", model):
@@ -784,6 +815,7 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_args.kwargs["temperature"], 0.0)
         self.assertFalse(model.await_args.kwargs["clean_output"])
         self.assertEqual(model.await_args.kwargs["max_attempts"], 1)
+        self.assertEqual(model.await_args.kwargs["num_predict"], 32)
         self.assertEqual(model.await_args.kwargs["response_format"], llm.ROUTE_RESPONSE_SCHEMA)
 
     async def test_route_classifier_accepts_rag_json(self) -> None:
