@@ -521,6 +521,7 @@ function App() {
                 passage_numbers: [],
                 question_ranges: [],
               },
+              user_profile: current?.user_profile || {},
             }));
           }
         }
@@ -633,6 +634,7 @@ function App() {
                   last_route: conversationState?.last_route || "rag",
                   last_intent: conversationState?.last_intent || null,
                   rag_affinity: nextAffinity,
+                  user_profile: conversationState?.user_profile || {},
                 };
               }
             }

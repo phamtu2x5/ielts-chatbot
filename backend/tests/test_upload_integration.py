@@ -276,6 +276,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "passage_numbers": [2],
                     "question_ranges": [[14, 17]],
                 },
+                "user_profile": {
+                    "current_band": 5.5,
+                    "target_band": 6.5,
+                    "study_duration_months": 3,
+                },
             },
         )
 
@@ -284,6 +289,64 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.last_route, "direct")
         self.assertEqual(state.rag_affinity.document_ids, ["doc-1"])
         self.assertEqual(state.rag_affinity.passage_numbers, [2])
+        self.assertEqual(state.user_profile.current_band, 5.5)
+        self.assertEqual(state.user_profile.target_band, 6.5)
+        self.assertEqual(state.user_profile.study_duration_months, 3)
+
+    def test_user_profile_uses_only_facts_from_user_message_and_preserves_previous_values(self) -> None:
+        initial_request = main.ChatRequest(
+            message="Hiện tại tôi band 5.5, mục tiêu đạt 6.5 trong vòng 3 tháng.",
+        )
+        initial = main.user_profile_for_request(initial_request)
+
+        self.assertEqual(initial.current_band, 5.5)
+        self.assertEqual(initial.target_band, 6.5)
+        self.assertEqual(initial.study_duration_months, 3)
+
+        follow_up = main.ChatRequest(
+            message="Bạn nhớ trình độ của tôi không?",
+            conversation_history=[
+                {"role": "assistant", "content": "Bạn đang ở band 8.0."},
+            ],
+            conversation_state={
+                "last_route": "direct",
+                "last_intent": "direct",
+                "user_profile": initial.model_dump(),
+            },
+        )
+        preserved = main.user_profile_for_request(follow_up)
+
+        self.assertEqual(preserved.current_band, 5.5)
+        self.assertEqual(preserved.target_band, 6.5)
+        self.assertEqual(preserved.study_duration_months, 3)
+
+    def test_target_band_phrase_does_not_overwrite_current_band(self) -> None:
+        request = main.ChatRequest(
+            message="Hiện tại tôi muốn lên band 6.5.",
+            conversation_state={"user_profile": {"current_band": 5.5}},
+        )
+
+        profile = main.user_profile_for_request(request)
+
+        self.assertEqual(profile.current_band, 5.5)
+        self.assertEqual(profile.target_band, 6.5)
+
+    async def test_direct_prompt_receives_authoritative_user_profile(self) -> None:
+        with patch.object(
+            main,
+            "classify_chat_route",
+            AsyncMock(return_value=_gateway_decision("direct", "direct")),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Bạn nhớ tôi band bao nhiêu không?",
+                    conversation_state={"user_profile": {"current_band": 5.5}},
+                )
+            )
+
+        self.assertEqual(prepared.route_used, "base_model")
+        self.assertIn("Current IELTS band: 5.5", prepared.prompt)
+        self.assertEqual(prepared.debug["user_profile"], {"current_band": 5.5})
 
     async def test_gateway_failure_without_document_basis_returns_safe_http_200_result(self) -> None:
         catalog = [

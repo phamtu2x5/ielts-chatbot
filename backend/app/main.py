@@ -50,6 +50,7 @@ from .schemas import (
     ChatConversationState,
     ChatRequest,
     ChatResponse,
+    ChatUserProfile,
     SearchRequest,
     SearchResponse,
     StatsResponse,
@@ -449,6 +450,7 @@ def conversation_state_for_result(
         last_route=route,
         last_intent=prepared.query_intent,
         rag_affinity=affinity,
+        user_profile=user_profile_for_request(req),
     )
     prepared.debug["conversation_state"] = {
         "input": req.conversation_state.model_dump() if req.conversation_state else None,
@@ -835,6 +837,61 @@ def effective_affinity(req: ChatRequest) -> ChatAffinity | None:
     return req.affinity
 
 
+CURRENT_BAND_PATTERNS = (
+    re.compile(
+        r"\b(?:hiện\s*tại|currently)\b\s*(?:tôi|mình|i\s+am)?\s*(?:đang|ở|at)?\s*"
+        r"(?:band\s*)?([0-9](?:[.,][0-9])?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:tôi|mình)\s+(?:đang\s+|ở\s+)?band\s*([0-9](?:[.,][0-9])?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:i\s+am|i'm|my\s+(?:current\s+)?band\s+is)\s+(?:at\s+)?(?:band\s*)?([0-9](?:[.,][0-9])?)\b", re.IGNORECASE),
+)
+TARGET_BAND_PATTERNS = (
+    re.compile(r"\b(?:mục\s*tiêu|đạt|lên)\b.{0,24}?\b(?:band\s*)?([0-9](?:[.,][0-9])?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:target|reach|aim(?:ing)?\s+for)\b.{0,24}?\b(?:band\s*)?([0-9](?:[.,][0-9])?)\b", re.IGNORECASE),
+)
+STUDY_DURATION_PATTERN = re.compile(
+    r"\b(?:trong(?:\s+vòng)?|within|over|for)\s+([0-9]{1,3})\s*(?:tháng|months?)\b",
+    re.IGNORECASE,
+)
+
+
+def _first_band_value(message: str, patterns: tuple[re.Pattern[str], ...]) -> float | None:
+    for pattern in patterns:
+        match = pattern.search(message)
+        if match:
+            value = float(match.group(1).replace(",", "."))
+            if 0 <= value <= 9:
+                return value
+    return None
+
+
+def user_profile_for_request(req: ChatRequest) -> ChatUserProfile:
+    previous = req.conversation_state.user_profile if req.conversation_state else ChatUserProfile()
+    current_band = _first_band_value(req.message, CURRENT_BAND_PATTERNS)
+    target_band = _first_band_value(req.message, TARGET_BAND_PATTERNS)
+    duration_match = STUDY_DURATION_PATTERN.search(req.message)
+    duration = int(duration_match.group(1)) if duration_match else None
+    return ChatUserProfile(
+        current_band=current_band if current_band is not None else previous.current_band,
+        target_band=target_band if target_band is not None else previous.target_band,
+        study_duration_months=(
+            duration if duration is not None and 1 <= duration <= 120 else previous.study_duration_months
+        ),
+    )
+
+
+def user_profile_prompt_context(profile: ChatUserProfile) -> str:
+    facts = []
+    if profile.current_band is not None:
+        facts.append(f"- Current IELTS band: {profile.current_band:g}")
+    if profile.target_band is not None:
+        facts.append(f"- Target IELTS band: {profile.target_band:g}")
+    if profile.study_duration_months is not None:
+        facts.append(f"- Study duration: {profile.study_duration_months} months")
+    return "\n".join(facts)
+
+
 def gateway_state_context(req: ChatRequest) -> str:
     if not req.conversation_state:
         return ""
@@ -928,8 +985,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         gateway_debug = {"used": True, **gateway_decision.to_debug()}
 
     if route == "direct":
+        user_profile = user_profile_for_request(req)
         return ChatPreparation(
-            prompt=direct_answer_prompt(message, req.conversation_history),
+            prompt=direct_answer_prompt(
+                message,
+                req.conversation_history,
+                user_profile_prompt_context(user_profile),
+            ),
             static_response=None,
             route_used="base_model",
             sources=[],
@@ -945,6 +1007,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 },
                 "retrieval": {"skipped": True, "final_context": []},
                 "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
+                "user_profile": user_profile.model_dump(exclude_none=True),
                 "source_count": 0,
             },
             query_intent="direct",
@@ -1352,7 +1415,11 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         )
 
     return ChatPreparation(
-        prompt=direct_answer_prompt(message, req.conversation_history),
+        prompt=direct_answer_prompt(
+            message,
+            req.conversation_history,
+            user_profile_prompt_context(user_profile_for_request(req)),
+        ),
         static_response=None,
         route_used="base_model",
         sources=[],

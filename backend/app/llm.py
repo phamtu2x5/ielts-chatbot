@@ -803,6 +803,7 @@ async def classify_chat_route(
 def direct_answer_prompt(
     message: str,
     history: Optional[List[ChatMessage]] = None,
+    user_profile: str = "",
 ) -> str:
     history_text = format_history(history)
     parts = [
@@ -821,6 +822,11 @@ def direct_answer_prompt(
         "Do not refer to uploaded files, ask the user to choose a document, or invent personal details.",
         "If important personal information is missing, make reasonable assumptions and label them briefly instead of refusing to help.",
     ]
+    if user_profile:
+        parts.append(
+            "Known user facts explicitly provided by the user. Treat these as authoritative and do not claim they are unknown:\n"
+            + user_profile
+        )
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Current user message:\n{message}")
