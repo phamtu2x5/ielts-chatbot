@@ -806,6 +806,19 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(history_text), 2_430)
         self.assertIn("\n...\n", history_text)
 
+    def test_route_classifier_uses_document_dependency_not_topic_domain(self) -> None:
+        prompt = llm.route_classifier_prompt("Explain a common technology concept.")
+        compact_prompt = llm.route_classifier_prompt(
+            "Explain a common technology concept.",
+            compact=True,
+        )
+
+        self.assertIn("general-knowledge questions on any topic", prompt)
+        self.assertIn("if the uploaded files were unavailable", prompt)
+        self.assertIn("Do not choose rag merely because the topic is outside IELTS", prompt)
+        self.assertIn("regardless of topic", compact_prompt)
+        self.assertIn("only when uploaded material is necessary", compact_prompt)
+
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')
         with patch.object(llm, "query_ollama", model):
@@ -945,6 +958,12 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("full requested timeline without gaps", prompt)
         self.assertIn("every row on exactly one physical line", prompt)
         self.assertIn("do not duplicate or skip periods", prompt)
+
+    def test_direct_answer_prompt_accepts_general_knowledge_requests(self) -> None:
+        prompt = llm.direct_answer_prompt("Explain a common technology concept.")
+
+        self.assertIn("Answer this request from general knowledge", prompt)
+        self.assertNotIn("Answer this general IELTS request", prompt)
 
     def test_malformed_markdown_table_detects_multiline_cells(self) -> None:
         malformed = """| Period | Activities | Time |

@@ -1451,7 +1451,9 @@ async def warmup() -> dict:
                 temperature=0.2,
                 num_predict=192,
             )
-            direct_check = await classify_chat_route("Give me one concise IELTS Speaking tip.")
+            direct_check = await classify_chat_route(
+                "Explain a common technology concept in one sentence."
+            )
             rag_check = await classify_chat_route("Summarize the content of the uploaded document.")
             intent_check = await classify_rag_intent("List Questions 1-4 without solving them.")
             gateway_ok = (

@@ -717,15 +717,18 @@ def route_classifier_prompt(
     history_text = format_route_history(history)
     if compact:
         parts = [
-            "Classify whether this IELTS chatbot request requires uploaded document content.",
+            "Classify whether answering this request requires reading uploaded document content.",
+            "Choose direct when it can be answered from general knowledge or conversation alone, regardless of topic.",
+            "Choose rag only when uploaded material is necessary to answer correctly.",
             'Return JSON only: {"route":"direct"} or {"route":"rag"}.',
         ]
     else:
         parts = [
             "You are the semantic direct-or-document classifier for an IELTS chatbot.",
-            "Choose rag when the answer requires facts, wording, data, evidence, translation, or transformation from uploaded material.",
-            "Choose direct for general IELTS advice, greetings, grammar help, study plans, and ordinary conversation.",
-            "General IELTS advice, greetings, grammar help, study plans, and ordinary conversation are direct even when documents exist.",
+            "Choose rag only when answering correctly requires reading facts, wording, data, evidence, or other content from uploaded material.",
+            "Use this counterfactual test: if the uploaded files were unavailable, could a general assistant still answer the request correctly from general knowledge and conversation alone? If yes, choose direct.",
+            "Choose direct for general-knowledge questions on any topic, general IELTS advice, greetings, grammar help, study plans, and ordinary conversation.",
+            "Do not choose rag merely because the topic is outside IELTS, unfamiliar, or uploaded documents happen to exist.",
             "A follow-up that depends on the preceding document-grounded exchange requires uploaded material.",
             "Do not answer the user, classify intent, choose a document, or explain the decision.",
             'Return one JSON object only: {"route":"direct"} or {"route":"rag"}.',
@@ -821,7 +824,7 @@ def direct_answer_prompt(
     history_text = format_history(history)
     parts = [
         ASSISTANT_STYLE,
-        "Answer this general IELTS request without using uploaded-document content.",
+        "Answer this request from general knowledge and conversation without using uploaded-document content.",
         "Be concise in wording, but complete in substance. Do not shorten an answer by omitting actionable detail.",
         "Adapt depth and format to the task instead of always being brief:",
         "- Greetings and simple confirmations: answer in one or two natural sentences.",
