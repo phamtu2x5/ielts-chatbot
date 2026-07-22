@@ -1040,6 +1040,48 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(main.requires_reviewed_generation(prepared, "Lập kế hoạch học trong 3 tháng."))
 
+    def test_plain_direct_generation_uses_true_streaming(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct tips prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+
+        self.assertFalse(main.requires_reviewed_generation(prepared, "Cho tôi 3 tips học IELTS."))
+        self.assertFalse(main.requires_reviewed_generation(prepared, "haha"))
+
+    async def test_invalid_direct_stream_prefix_falls_back_to_reviewed_generation(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct conversation prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+
+        async def invalid_stream(*args, **kwargs):
+            raise main.OllamaRequestError("role_prefix", "invalid role prefix")
+            yield ""  # pragma: no cover
+
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "stream_ollama", invalid_stream),
+            patch.object(main, "generate_answer", AsyncMock(return_value="Mình đang nghe đây.")) as fallback,
+        ):
+            response = await main.chat_stream(main.ChatRequest(message="haha"))
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        self.assertEqual(
+            [event["token"] for event in events if event["type"] == "token"],
+            ["Mình đang nghe đây."],
+        )
+        self.assertEqual(events[-1]["type"], "done")
+        fallback.assert_awaited_once_with(prepared, "haha")
+
     async def test_direct_generation_retries_a_multiline_markdown_table(self) -> None:
         prepared = main.ChatPreparation(
             prompt="direct plan prompt",

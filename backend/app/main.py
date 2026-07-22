@@ -386,7 +386,10 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
 
 def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> bool:
     return (
-        prepared.route_used == "base_model"
+        (
+            prepared.route_used == "base_model"
+            and direct_request_requires_structured_review(message)
+        )
         or is_writing_response(prepared)
         or prepared.query_intent == "translate_questions"
         or (
@@ -394,6 +397,17 @@ def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> b
             and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
         )
     )
+
+
+DIRECT_STRUCTURED_REVIEW_RE = re.compile(
+    r"\b(?:kế\s*hoạch|lộ\s*trình|lịch(?:\s+học)?|bảng|plan|roadmap|schedule|timetable|table)\b",
+    re.IGNORECASE,
+)
+
+
+def direct_request_requires_structured_review(message: str) -> bool:
+    """Buffer direct answers only when their requested structure needs validation."""
+    return bool(DIRECT_STRUCTURED_REVIEW_RE.search(message))
 
 
 def is_writing_response(prepared: "ChatPreparation") -> bool:
@@ -1618,12 +1632,26 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             has_token = False
             temperature = generation_temperature(prepared)
-            async for token in stream_ollama(
-                prepared.prompt or "",
-                temperature=temperature,
-            ):
-                has_token = True
-                yield stream_event("token", token=token)
+            try:
+                async for token in stream_ollama(
+                    prepared.prompt or "",
+                    temperature=temperature,
+                ):
+                    has_token = True
+                    yield stream_event("token", token=token)
+            except OllamaRequestError as exc:
+                if has_token or exc.kind not in {"prompt_echo", "role_prefix"}:
+                    raise
+                logger.warning(
+                    "Rejected invalid stream prefix; retrying with reviewed generation",
+                    extra={"error_kind": exc.kind},
+                )
+                fallback_answer = await generate_answer(prepared, req.message)
+                if not fallback_answer.strip():
+                    fallback_answer = generation_fallback(prepared)
+                yield stream_event("token", token=fallback_answer)
+                yield stream_event("done")
+                return
             if not has_token:
                 logger.warning("Ollama stream completed without visible tokens; retrying with non-stream request")
                 fallback_answer = await query_ollama(

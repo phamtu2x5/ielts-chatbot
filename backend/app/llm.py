@@ -667,6 +667,16 @@ async def stream_ollama(
                     buffer_prefix = " ".join(guard_buffer.split()).lower()
                     if looks_like_prompt_echo(guard_buffer, prompt):
                         raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt while streaming.")
+                    role_match = re.match(r"(?i)^\s*(user|assistant|system)\b", guard_buffer)
+                    if role_match:
+                        role_suffix = guard_buffer[role_match.end() :]
+                        if re.match(r"^\s*:", role_suffix):
+                            raise OllamaRequestError(
+                                "role_prefix",
+                                "Ollama started the streamed answer with a conversation role prefix.",
+                            )
+                        if not role_suffix or role_suffix.isspace():
+                            continue
                     if buffer_prefix and not prompt_prefix.startswith(buffer_prefix):
                         guard_released = True
                         yield guard_buffer
