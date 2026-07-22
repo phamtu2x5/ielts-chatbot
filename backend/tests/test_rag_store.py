@@ -844,6 +844,30 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             decision = await llm.classify_rag_intent("Show Questions 1-4")
         self.assertEqual(decision.intent, "show_questions")
 
+    async def test_intent_classifier_rejects_enum_outside_candidates(self) -> None:
+        with patch.object(
+            llm,
+            "query_ollama",
+            AsyncMock(return_value='{"intent":"solve_questions"}'),
+        ):
+            decision = await llm.classify_rag_intent(
+                "Explain the passage argument.",
+                allowed_intents=("document_overview", "semantic_qa"),
+            )
+        self.assertEqual(decision.intent, "undetermined")
+        self.assertEqual(decision.fallback_reason, "invalid_intent_output")
+
+    def test_intent_classifier_prompt_lists_only_candidates(self) -> None:
+        prompt = llm.intent_classifier_prompt(
+            "Explain the passage argument.",
+            allowed_intents=("document_overview", "semantic_qa"),
+        )
+        allowed_line = next(line for line in prompt.splitlines() if line.startswith("Allowed enums:"))
+        self.assertIn("document_overview", allowed_line)
+        self.assertIn("semantic_qa", allowed_line)
+        self.assertNotIn("solve_questions", allowed_line)
+        self.assertNotIn("Use solve_questions", prompt)
+
     async def test_intent_classifier_fails_closed_after_invalid_output(self) -> None:
         with patch.object(
             llm,

@@ -681,12 +681,13 @@ ROUTE_RESPONSE_SCHEMA = {
     "required": ["route"],
     "additionalProperties": False,
 }
-INTENT_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {"intent": {"type": "string", "enum": list(ROUTING_INTENTS)}},
-    "required": ["intent"],
-    "additionalProperties": False,
-}
+def intent_response_schema(allowed_intents: tuple[str, ...]) -> dict:
+    return {
+        "type": "object",
+        "properties": {"intent": {"type": "string", "enum": list(allowed_intents)}},
+        "required": ["intent"],
+        "additionalProperties": False,
+    }
 
 
 def route_classifier_prompt(
@@ -822,35 +823,88 @@ def direct_answer_prompt(
     return "\n\n".join(parts)
 
 
-def intent_classifier_prompt(message: str, history: Optional[List[ChatMessage]] = None) -> str:
+def intent_classifier_prompt(
+    message: str,
+    history: Optional[List[ChatMessage]] = None,
+    allowed_intents: tuple[str, ...] = ROUTING_INTENTS,
+) -> str:
     history_text = format_history(history)
-    intents = ", ".join(ROUTING_INTENTS)
+    intents = ", ".join(allowed_intents)
     parts = [
         "Classify this uploaded-document request into exactly one final intent enum.",
         f"Allowed enums: {intents}.",
         'Return one JSON object only: {"intent":"<allowed enum>"}.',
         "Classify the operation the user explicitly requests, not merely the document content mentioned.",
-        "Use document_overview when the requested scope is the whole document or an inventory of its passages, sections, tasks, sample answers, or question groups. A no-solve constraint does not change an overview into show_questions.",
-        "Use show_questions only when the requested output is the wording, instructions, options, translation, or explanation of specific numbered Reading questions or a specified question group. Do not use it for a document inventory or for a Writing task.",
-        "Use show_writing_prompt when the user asks for the topic, requirements, instructions, or discussion directions of a Writing task without composing any part of the response.",
-        "Use writing_generation when the user asks to write an overview, introduction, body paragraph, outline, or complete Writing response.",
-        "Use solve_questions whenever the user explicitly asks to answer, solve, choose, determine, or give the answer to numbered Reading questions, including when evidence or an explanation is also requested. Do not use solve_questions merely because the user asks to rank, compare, or calculate facts described in a passage or sample answer.",
-        "Use semantic_qa for factual, evidence, explanation, or reasoning questions about passage content.",
-        "Use explain_questions only to explain question wording, task type, or method without answering.",
-        "Use table_cell, table_calculation, or table_comparison only when the requested operation explicitly targets a table, its cells, rows, columns, or values.",
-        "A comparison or explanation of facts discussed in a passage or sample answer is semantic_qa, even when those facts originally came from a visual.",
-        "Apply negative constraints only to the action they forbid. 'Do not solve' prevents solve_questions, but 'write an overview without an introduction or body' is still writing_generation.",
-        "Boundary examples:",
-        '- "Describe every passage and its question groups; do not solve" -> document_overview.',
-        '- "List the Writing tasks and sample answers in this document by page" -> document_overview.',
-        '- "Show Questions 11-13 with their options; do not answer" -> show_questions.',
-        '- "Answer Question 11 and cite evidence" -> solve_questions.',
-        '- "What topic and two directions does this Writing Task ask about? Do not write the essay" -> show_writing_prompt.',
-        '- "Write only an overview; do not write the introduction or body" -> writing_generation.',
-        '- "Compare two rows in the table" -> table_comparison.',
-        '- "How does the sample answer compare two regions?" -> semantic_qa.',
-        '- "Rank the countries by the figures described in this sample answer" -> semantic_qa.',
     ]
+    allowed = set(allowed_intents)
+    if "document_overview" in allowed:
+        parts.append(
+            "Use document_overview when the requested scope is the whole document or an inventory of its passages, sections, tasks, sample answers, or question groups. A no-solve constraint does not change an overview into show_questions."
+        )
+    if "show_questions" in allowed:
+        parts.append(
+            "Use show_questions only when the requested output is the wording, instructions, options, translation, or explanation of specific numbered Reading questions or a specified question group. Do not use it for a document inventory or for a Writing task."
+        )
+    if "show_writing_prompt" in allowed:
+        parts.append(
+            "Use show_writing_prompt when the user asks for the topic, requirements, instructions, or discussion directions of a Writing task without composing any part of the response."
+        )
+    if "writing_generation" in allowed:
+        parts.append(
+            "Use writing_generation when the user asks to write an overview, introduction, body paragraph, outline, or complete Writing response."
+        )
+    if "solve_questions" in allowed:
+        parts.append(
+            "Use solve_questions whenever the user explicitly asks to answer, solve, choose, determine, or give the answer to numbered Reading questions, including when evidence or an explanation is also requested. Do not use solve_questions merely because the user asks to rank, compare, or calculate facts described in a passage or sample answer."
+        )
+    if "semantic_qa" in allowed:
+        parts.extend(
+            [
+                "Use semantic_qa for factual, evidence, explanation, or reasoning questions about passage content.",
+                "A comparison or explanation of facts discussed in a passage or sample answer is semantic_qa, even when those facts originally came from a visual.",
+            ]
+        )
+    if "explain_questions" in allowed:
+        parts.append(
+            "Use explain_questions only to explain question wording, task type, or method without answering."
+        )
+    if allowed & {"table_cell", "table_calculation", "table_comparison"}:
+        parts.append(
+            "Use table_cell, table_calculation, or table_comparison only when the requested operation explicitly targets a table, its cells, rows, columns, or values."
+        )
+    parts.append(
+        "Apply negative constraints only to the action they forbid. 'Do not solve' prevents solve_questions, but 'write an overview without an introduction or body' is still writing_generation."
+    )
+    examples = {
+        "document_overview": [
+            '- "Describe every passage and its question groups; do not solve" -> document_overview.',
+            '- "List the Writing tasks and sample answers in this document by page" -> document_overview.',
+        ],
+        "show_questions": [
+            '- "Show Questions 11-13 with their options; do not answer" -> show_questions.'
+        ],
+        "solve_questions": ['- "Answer Question 11 and cite evidence" -> solve_questions.'],
+        "show_writing_prompt": [
+            '- "What topic and two directions does this Writing Task ask about? Do not write the essay" -> show_writing_prompt.'
+        ],
+        "writing_generation": [
+            '- "Write only an overview; do not write the introduction or body" -> writing_generation.'
+        ],
+        "table_comparison": ['- "Compare two rows in the table" -> table_comparison.'],
+        "semantic_qa": [
+            '- "How does the sample answer compare two regions?" -> semantic_qa.',
+            '- "Rank the countries by the figures described in this sample answer" -> semantic_qa.',
+        ],
+    }
+    selected_examples = [
+        example
+        for intent, intent_examples in examples.items()
+        if intent in allowed
+        for example in intent_examples
+    ]
+    if selected_examples:
+        parts.append("Boundary examples:")
+        parts.extend(selected_examples)
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Current user message:\n{message}")
@@ -860,24 +914,36 @@ def intent_classifier_prompt(message: str, history: Optional[List[ChatMessage]] 
 async def classify_rag_intent(
     message: str,
     history: Optional[List[ChatMessage]] = None,
+    allowed_intents: tuple[str, ...] = ROUTING_INTENTS,
 ) -> IntentClassifierDecision:
+    allowed_intents = tuple(
+        intent for intent in ROUTING_INTENTS if intent in set(allowed_intents)
+    )
+    if not allowed_intents:
+        return IntentClassifierDecision(
+            intent="undetermined",
+            attempts=0,
+            duration_seconds=0.0,
+            raw_output_preview="",
+            fallback_reason="no_allowed_intents",
+        )
     started = time.perf_counter()
     last_raw = ""
     last_error: str | None = None
     for attempt in range(1, 3):
-        prompt = intent_classifier_prompt(message, history)
+        prompt = intent_classifier_prompt(message, history, allowed_intents)
         try:
             last_raw = await query_ollama(
                 prompt,
                 temperature=0.0,
                 num_predict=96,
-                response_format=INTENT_RESPONSE_SCHEMA,
+                response_format=intent_response_schema(allowed_intents),
                 clean_output=False,
                 max_attempts=1,
             )
             payload = _parse_json_object(last_raw, "invalid_intent_output")
             intent = payload.get("intent")
-            if intent not in ROUTING_INTENTS:
+            if intent not in allowed_intents:
                 raise OllamaRequestError("invalid_intent_output", "Intent classifier returned an invalid enum.")
             return IntentClassifierDecision(
                 intent=intent,

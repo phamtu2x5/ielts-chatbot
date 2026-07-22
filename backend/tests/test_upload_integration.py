@@ -201,6 +201,50 @@ class _FakeChatStore:
 
 
 class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    def test_intent_candidates_exclude_question_actions_without_question_target(self) -> None:
+        candidates = main.allowed_rag_intents(
+            "Why does the author reject this idea?",
+            [{"unit_types": ["passage", "question", "question_group"]}],
+            None,
+        )
+
+        self.assertIn("semantic_qa", candidates)
+        self.assertNotIn("solve_questions", candidates)
+        self.assertNotIn("explain_questions", candidates)
+
+    def test_intent_candidates_include_question_actions_for_range_or_affinity(self) -> None:
+        explicit = main.allowed_rag_intents(
+            "Explain Questions 11-13 without answering.",
+            [{"unit_types": ["passage", "question", "question_group"]}],
+            None,
+        )
+        follow_up = main.allowed_rag_intents(
+            "Explain them without answering.",
+            [{"unit_types": ["passage", "question", "question_group"]}],
+            main.ChatAffinity(question_ranges=[[11, 13]]),
+        )
+
+        self.assertIn("explain_questions", explicit)
+        self.assertIn("explain_questions", follow_up)
+        self.assertIn("solve_questions", explicit)
+
+    def test_intent_candidates_require_structured_table_for_table_operations(self) -> None:
+        without_table = main.allowed_rag_intents(
+            "Compare the facts discussed in this sample answer.",
+            [{"unit_types": ["writing_task", "sample_answer"]}],
+            None,
+        )
+        with_table = main.allowed_rag_intents(
+            "Compare the values in this table.",
+            [{"unit_types": ["writing_prompt", "writing_table", "table_row"]}],
+            None,
+        )
+
+        self.assertIn("semantic_qa", without_table)
+        self.assertNotIn("table_comparison", without_table)
+        self.assertIn("table_comparison", with_table)
+        self.assertIn("show_table", without_table)
+
     async def asyncSetUp(self) -> None:
         self.intent_patcher = patch.object(
             main,

@@ -20,11 +20,13 @@ from .intent import (
     dedupe_sources,
     filter_sources_for_intent,
     has_explicit_no_solution_constraint,
+    parse_question_ranges,
     semantic_intent_decision,
 )
 from .llm import (
     OLLAMA_MODEL,
     OLLAMA_NUM_PREDICT,
+    ROUTING_INTENTS,
     OllamaRequestError,
     RouteGatewayDecision,
     classify_rag_intent,
@@ -835,6 +837,44 @@ def effective_affinity(req: ChatRequest) -> ChatAffinity | None:
     return req.affinity
 
 
+QUESTION_TARGET_INTENTS = {
+    "show_questions",
+    "translate_questions",
+    "explain_questions",
+    "solve_questions",
+}
+STRUCTURED_TABLE_OPERATION_INTENTS = {
+    "table_cell",
+    "table_calculation",
+    "table_comparison",
+}
+TABLE_UNIT_TYPES = {"table", "table_row", "writing_table"}
+
+
+def allowed_rag_intents(
+    message: str,
+    catalog: list[dict[str, Any]],
+    affinity: ChatAffinity | None,
+) -> tuple[str, ...]:
+    """Remove intents that require structured targets absent from this turn."""
+    has_question_target = bool(parse_question_ranges(message)) or bool(
+        affinity and affinity.question_ranges
+    )
+    unit_types = {
+        str(unit_type)
+        for item in catalog
+        for unit_type in item.get("unit_types", [])
+    }
+    has_structured_table = bool(unit_types & TABLE_UNIT_TYPES)
+
+    excluded: set[str] = set()
+    if not has_question_target:
+        excluded.update(QUESTION_TARGET_INTENTS)
+    if not has_structured_table:
+        excluded.update(STRUCTURED_TABLE_OPERATION_INTENTS)
+    return tuple(intent for intent in ROUTING_INTENTS if intent not in excluded)
+
+
 def gateway_state_context(req: ChatRequest) -> str:
     if not req.conversation_state:
         return ""
@@ -1047,8 +1087,23 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             query_intent=("ambiguous_document" if len(allowed_scope_ids) > 1 else "document_no_match"),
         )
 
-    intent_classifier = await classify_rag_intent(message, req.conversation_history)
+    scoped_catalog = [
+        item
+        for item in full_catalog
+        if any(document_id in scope_ids for document_id in item.get("document_ids", []))
+    ]
+    candidate_intents = allowed_rag_intents(message, scoped_catalog, affinity)
+    intent_classifier = await classify_rag_intent(
+        message,
+        req.conversation_history,
+        candidate_intents,
+    )
     if intent_classifier.intent == "undetermined":
+        classifier_debug = intent_classifier.to_debug()
+        classifier_debug["allowed_intents"] = list(candidate_intents)
+        classifier_debug["excluded_intents"] = [
+            intent for intent in ROUTING_INTENTS if intent not in candidate_intents
+        ]
         debug = {
             "route_decision": "rag",
             "query_intent": "intent_undetermined",
@@ -1058,7 +1113,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 "resolved_document_ids": scope_ids,
                 "requested_scope": scope.to_debug(),
             },
-            "intent_classifier": intent_classifier.to_debug(),
+            "intent_classifier": classifier_debug,
             "target_resolution": scope.to_debug(),
             "catalog": catalog,
             "probe": compact_probe_debug(probe),
@@ -1083,6 +1138,10 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     query_intent = intent_decision.intent
     intent_debug = intent_decision.to_debug()
     intent_debug["classifier"] = intent_classifier.to_debug()
+    intent_debug["allowed_intents"] = list(candidate_intents)
+    intent_debug["excluded_intents"] = [
+        intent for intent in ROUTING_INTENTS if intent not in candidate_intents
+    ]
 
     if scope_ids:
         catalog = [
