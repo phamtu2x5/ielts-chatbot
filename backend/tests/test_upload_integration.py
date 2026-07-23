@@ -350,7 +350,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.conversation_state.last_route, "no_match")
         self.assertEqual(response.sources, [])
 
-    async def test_single_explicit_document_never_calls_target_resolver(self) -> None:
+    async def test_single_explicit_document_still_uses_direct_rag_gateway(self) -> None:
         catalog = [
             {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]},
             {"source_file": "other.pdf", "document_ids": ["doc-2"], "mime_types": ["application/pdf"]},
@@ -371,10 +371,9 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
         target.assert_not_awaited()
-        gateway.assert_not_awaited()
-        self.assertNotEqual(prepared.route_used, "vector_rag_ambiguous_document")
-        self.assertEqual(prepared.debug["document_resolution"]["resolved_document_ids"], ["doc-1"])
-        self.assertEqual(prepared.debug["route_gateway"]["reason"], "explicit_current_turn_document_scope")
+        gateway.assert_awaited_once()
+        self.assertEqual(prepared.route_used, "base_model")
+        self.assertEqual(prepared.debug["route_decision"], "direct")
 
     async def test_intent_failure_does_not_fall_back_to_semantic_qa(self) -> None:
         catalog = [
@@ -389,6 +388,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
+            patch.object(
+                main,
+                "classify_chat_route",
+                AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
+            ),
             patch.object(main, "classify_rag_intent", AsyncMock(return_value=failed_intent)),
         ):
             prepared = await main.prepare_chat(
@@ -695,6 +699,19 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "classify_chat_route",
                 AsyncMock(return_value=_gateway_decision("rag", "semantic_qa", reason="follow-up")),
             ),
+            patch.object(
+                main,
+                "resolve_rag_target",
+                AsyncMock(
+                    return_value=TargetResolverDecision(
+                        document_refs=("D1",),
+                        action="selected",
+                        attempts=1,
+                        duration_seconds=0.01,
+                        raw_output_preview='{"action":"selected","document_refs":["D1"]}',
+                    )
+                ),
+            ),
         ):
             prepared = await main.prepare_chat(
                 main.ChatRequest(
@@ -702,7 +719,6 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     conversation_history=[
                         {"role": "user", "content": "Trả lời Question 4 trong Reading Test 2"}
                     ],
-                    document_ids=["doc-2", "doc-4"],
                     affinity={
                         "document_ids": ["doc-2"],
                         "passage_numbers": [1],
@@ -711,7 +727,10 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-        self.assertEqual(prepared.debug["target_resolution"]["method"], "conversation_affinity")
+        self.assertEqual(
+            prepared.debug["document_resolution"]["method"],
+            "semantic_target_with_affinity",
+        )
         self.assertTrue(all(ids == ["doc-2"] for ids in store.routing_document_ids))
         self.assertEqual(len(store.routing_queries), 1)
         self.assertIn("Trả lời Question 4", store.routing_queries[0])

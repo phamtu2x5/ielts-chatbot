@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -11,7 +12,7 @@ if str(REPO_DIR) not in sys.path:
     sys.path.insert(0, str(REPO_DIR))
 
 from backend.tools.chat_evaluation import (
-    case_request_document_ids,
+    ask_chat,
     capture_case,
     compact_upload_result,
     verify_corpus,
@@ -52,21 +53,9 @@ class ChatEvaluationManifestTests(unittest.TestCase):
         self.assertTrue(REQUIRED_CATEGORIES.issubset(categories))
         for case in cases:
             self.assertTrue(case["query"].strip())
-            self.assertTrue(set(case["target_files"]).issubset(filenames))
-            self.assertIn(case.get("request_scope", "target_files"), {"target_files", "all_uploaded"})
+            self.assertTrue(set(case["expected_target_files"]).issubset(filenames))
             self.assertNotIn("expected_intent", case)
             self.assertNotIn("answer_terms", case)
-
-    def test_direct_router_cases_can_run_with_all_uploaded_documents_active(self) -> None:
-        uploaded = {"reading.pdf": "doc-reading", "writing.png": "doc-writing"}
-        document_ids = case_request_document_ids(
-            {
-                "target_files": [],
-                "request_scope": "all_uploaded",
-            },
-            uploaded,
-        )
-        self.assertEqual(document_ids, ["doc-reading", "doc-writing"])
 
     def test_corpus_hash_mismatch_is_rejected_before_requests(self) -> None:
         manifest = {
@@ -84,7 +73,7 @@ class ChatEvaluationManifestTests(unittest.TestCase):
             "id": "sample",
             "category": "semantic_qa",
             "query": "Question",
-            "target_files": ["sample.pdf"],
+            "expected_target_files": ["sample.pdf"],
         }
         result = {
             "http_status": 200,
@@ -109,9 +98,17 @@ class ChatEvaluationManifestTests(unittest.TestCase):
             },
         }
         source_index = {}
-        capture = capture_case(case, result, source_index, ["doc-1"])
+        capture = capture_case(case, result, source_index)
         self.assertEqual(capture["answer"], "Nội dung nói về Mars.")
-        self.assertEqual(capture["request_document_ids"], ["doc-1"])
+        self.assertEqual(capture["expected_target_files"], ["sample.pdf"])
+        self.assertEqual(
+            capture["request_context"],
+            {
+                "document_ids": None,
+                "document_scope": "available",
+                "conversation_state": None,
+            },
+        )
         self.assertEqual(capture["resolved_document_ids"], [])
         self.assertEqual(
             capture["sources"],
@@ -139,7 +136,7 @@ class ChatEvaluationManifestTests(unittest.TestCase):
             "id": "state",
             "category": "semantic_qa",
             "query": "Tại sao?",
-            "target_files": ["sample.pdf"],
+            "expected_target_files": ["sample.pdf"],
         }
         state = {
             "last_route": "rag",
@@ -167,17 +164,17 @@ class ChatEvaluationManifestTests(unittest.TestCase):
                     },
                 },
             },
-            request_document_ids=["doc-1"],
         )
         self.assertEqual(capture["conversation_state"], state)
         self.assertEqual(capture["resolved_document_ids"], ["doc-1"])
+        self.assertEqual(capture["request_context"]["document_ids"], None)
 
     def test_capture_preserves_http_error_detail(self) -> None:
         case = {
             "id": "error",
             "category": "writing_generation",
             "query": "Viết overview.",
-            "target_files": ["writing.png"],
+            "expected_target_files": ["writing.png"],
         }
         capture = capture_case(
             case,
@@ -186,11 +183,46 @@ class ChatEvaluationManifestTests(unittest.TestCase):
                 "duration_seconds": 0.2,
                 "response": {"detail": "Ollama unavailable"},
             },
-            request_document_ids=["doc-writing"],
         )
 
         self.assertEqual(capture["error_detail"], {"detail": "Ollama unavailable"})
-        self.assertEqual(capture["request_document_ids"], ["doc-writing"])
+        self.assertEqual(capture["request_context"]["document_ids"], None)
+
+    @patch("backend.tools.chat_evaluation.request_ndjson")
+    def test_chat_capture_uses_product_stream_without_oracle_scope(self, request_ndjson) -> None:
+        request_ndjson.return_value = (
+            200,
+            [
+                {
+                    "type": "metadata",
+                    "route_used": "vector_rag",
+                    "sources": [{"source_file": "resolved.pdf"}],
+                    "debug": {"query_intent": "semantic_qa"},
+                    "conversation_state": {"last_route": "rag"},
+                },
+                {"type": "token", "token": "Grounded "},
+                {"type": "token", "token": "answer."},
+                {"type": "done"},
+            ],
+        )
+
+        result = ask_chat("http://backend", "Question", 30.0)
+
+        request_url, payload, timeout = request_ndjson.call_args.args
+        request_body = json.loads(payload.decode("utf-8"))
+        self.assertEqual(request_url, "http://backend/chat/stream")
+        self.assertEqual(timeout, 30.0)
+        self.assertEqual(
+            request_body,
+            {
+                "message": "Question",
+                "document_ids": None,
+                "document_scope": "available",
+                "conversation_state": None,
+            },
+        )
+        self.assertEqual(result["response"]["response"], "Grounded answer.")
+        self.assertEqual(result["response"]["route_used"], "vector_rag")
 
     def test_upload_capture_omits_large_extraction_debug(self) -> None:
         result = {

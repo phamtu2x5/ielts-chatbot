@@ -338,7 +338,6 @@ function App() {
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [pendingFiles, setPendingFiles] = useState([]);
-  const [activeDocumentIds, setActiveDocumentIds] = useState([]);
   const [conversationState, setConversationState] = useState(null);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -499,9 +498,6 @@ function App() {
         }
         setIsUploading(false);
         if (uploadedFiles.length) {
-          setActiveDocumentIds((current) => [
-            ...new Set([...current, ...uploadedFiles.map((data) => data.document_id)]),
-          ]);
           if (uploadedFiles.length === 1) {
             setConversationState((current) => ({
               last_route: current?.last_route || null,
@@ -576,7 +572,7 @@ function App() {
           conversation_history: history,
           document_ids: uploadedFiles.length
             ? uploadedFiles.map((data) => data.document_id)
-            : activeDocumentIds,
+            : null,
           document_scope: uploadedFiles.length ? "explicit" : "available",
           affinity: uploadedFiles.length ? null : conversationState?.rag_affinity || null,
           conversation_state: uploadedFiles.length ? null : conversationState,

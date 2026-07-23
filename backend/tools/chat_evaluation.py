@@ -72,6 +72,34 @@ def request_json(
         return exc.code, detail
 
 
+def request_ndjson(
+    url: str,
+    payload: bytes,
+    timeout: float,
+) -> tuple[int, list[dict[str, Any]]]:
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            events = [
+                json.loads(line.decode("utf-8"))
+                for line in response
+                if line.strip()
+            ]
+            return response.status, events
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            detail: dict[str, Any] = json.loads(body)
+        except json.JSONDecodeError:
+            detail = {"detail": body}
+        return exc.code, [{"type": "error", "detail": detail}]
+
+
 def multipart_file(path: Path) -> tuple[bytes, str]:
     boundary = f"----ielts-chat-evaluation-{uuid4().hex}"
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -106,32 +134,54 @@ def ask_chat(
     base_url: str,
     message: str,
     timeout: float,
-    document_ids: list[str] | None = None,
-    document_scope: str = "auto",
     conversation_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = json.dumps(
         {
             "message": message,
-            "document_ids": document_ids or None,
-            "document_scope": document_scope,
+            "document_ids": None,
+            "document_scope": "available",
             "conversation_state": conversation_state,
         },
         ensure_ascii=False,
     ).encode("utf-8")
     started = time.perf_counter()
-    status, response = request_json(
-        "POST",
-        f"{base_url}/chat",
+    status, events = request_ndjson(
+        f"{base_url}/chat/stream",
         payload,
-        {"Content-Type": "application/json"},
         timeout,
     )
-    return {
+    response: dict[str, Any] = {
+        "response": "",
+        "route_used": None,
+        "sources": [],
+        "debug": {},
+        "conversation_state": None,
+    }
+    stream_error: Any = None
+    for event in events:
+        event_type = event.get("type")
+        if event_type == "metadata":
+            response.update(
+                {
+                    "route_used": event.get("route_used"),
+                    "sources": event.get("sources") or [],
+                    "debug": event.get("debug") or {},
+                    "conversation_state": event.get("conversation_state"),
+                }
+            )
+        elif event_type == "token":
+            response["response"] += str(event.get("token") or "")
+        elif event_type == "error":
+            stream_error = event.get("detail") or event.get("message") or event
+    result = {
         "http_status": status,
         "duration_seconds": round(time.perf_counter() - started, 3),
         "response": response,
     }
+    if stream_error is not None:
+        result["error"] = stream_error
+    return result
 
 
 def source_reference_id(source: dict[str, Any]) -> str:
@@ -220,7 +270,6 @@ def capture_case(
     case: dict[str, Any],
     result: dict[str, Any],
     source_index: dict[str, dict[str, Any]] | None = None,
-    request_document_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     response = result.get("response") or {}
     raw_sources = response.get("sources") or []
@@ -232,9 +281,12 @@ def capture_case(
         "id": case["id"],
         "category": case["category"],
         "query": case["query"],
-        "target_files": case.get("target_files", []),
-        "request_scope": case.get("request_scope", "target_files"),
-        "request_document_ids": request_document_ids or [],
+        "expected_target_files": case.get("expected_target_files", []),
+        "request_context": {
+            "document_ids": None,
+            "document_scope": "available",
+            "conversation_state": None,
+        },
         "http_status": result.get("http_status"),
         "duration_seconds": result.get("duration_seconds"),
         "request_error": result.get("error"),
@@ -273,24 +325,6 @@ def merge_document_catalog(
             catalog_by_file[source_file] = entry
 
 
-def case_request_document_ids(
-    case: dict[str, Any],
-    uploaded_document_ids: dict[str, str],
-) -> list[str]:
-    request_scope = case.get("request_scope", "target_files")
-    if request_scope == "all_uploaded":
-        filenames = uploaded_document_ids
-    elif request_scope == "target_files":
-        filenames = case.get("target_files", [])
-    else:
-        raise ValueError(f"Unsupported request_scope: {request_scope}")
-    return [
-        uploaded_document_ids[filename]
-        for filename in filenames
-        if filename in uploaded_document_ids
-    ]
-
-
 def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     manifest = load_manifest(args.manifest)
     corpus_files = verify_corpus(manifest, args.corpus_dir)
@@ -304,49 +338,15 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
             except Exception as exc:
                 upload_results.append({"filename": path.name, "http_status": None, "error": repr(exc)})
 
-    failed_upload_files = {
-        item["filename"] for item in upload_results if item.get("http_status") != 200
-    }
-    if args.skip_upload:
-        uploaded_document_ids = {
-            str(document["filename"]): str(document["sha256"])
-            for document in manifest.get("documents", [])
-        }
-    else:
-        uploaded_document_ids = {
-            item["filename"]: str((item.get("response") or {}).get("document_id"))
-            for item in upload_results
-            if item.get("http_status") == 200 and (item.get("response") or {}).get("document_id")
-        }
-
     case_results: list[dict[str, Any]] = []
     source_index: dict[str, dict[str, Any]] = {}
     document_catalog_by_file: dict[str, dict[str, Any]] = {}
     for case in select_cases(manifest, args.case):
-        blocked_files = sorted(set(case.get("target_files", [])) & failed_upload_files)
-        if blocked_files:
-            case_results.append(
-                capture_case(
-                    case,
-                    {
-                        "http_status": None,
-                        "duration_seconds": None,
-                        "response": {},
-                        "error": f"target upload failed: {', '.join(blocked_files)}",
-                    },
-                    source_index,
-                    [],
-                )
-            )
-            continue
-        request_document_ids = case_request_document_ids(case, uploaded_document_ids)
         try:
             raw_result = ask_chat(
                 base_url,
                 case["query"],
                 args.chat_timeout,
-                request_document_ids,
-                "explicit" if case.get("request_scope", "target_files") == "target_files" else "available",
             )
         except Exception as exc:
             raw_result = {
@@ -365,7 +365,6 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
                 case,
                 raw_result,
                 source_index,
-                request_document_ids,
             )
         )
 
@@ -375,7 +374,7 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         for item in case_results
     )
     report = {
-        "schema_version": "1.2",
+        "schema_version": "1.3",
         "question_set_name": manifest.get("name"),
         "manifest_schema_version": manifest.get("schema_version"),
         "base_url": base_url,

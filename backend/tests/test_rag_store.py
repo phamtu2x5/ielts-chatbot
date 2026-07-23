@@ -29,7 +29,7 @@ except ImportError:
     sys.modules["sentence_transformers"] = sentence_transformers_stub
 
 from app import llm, rag
-from app.document_scope import apply_document_affinity, resolve_document_scope
+from app.document_scope import resolve_document_scope
 from app.intent import (
     filter_sources_for_intent,
     has_explicit_no_solution_constraint,
@@ -360,14 +360,8 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertFalse(ambiguous.ambiguous)
         self.assertEqual(ambiguous.method, "unresolved")
 
-        affinity_scope = apply_document_affinity(ambiguous, catalog, ["doc-2"])
-        self.assertEqual(affinity_scope.resolved_document_ids, ["doc-2"])
-        self.assertEqual(affinity_scope.method, "conversation_affinity")
-        self.assertFalse(affinity_scope.ambiguous)
-
-        explicit_scope = apply_document_affinity(resolved, catalog, ["doc-4"])
-        self.assertEqual(explicit_scope.resolved_document_ids, ["doc-2"])
-        self.assertEqual(explicit_scope.method, "catalog_reference")
+        self.assertEqual(ambiguous.resolved_document_ids, [])
+        self.assertEqual(resolved.resolved_document_ids, ["doc-2"])
 
     def test_explicit_document_scope_only_limits_allowed_documents(self) -> None:
         catalog = [
@@ -949,6 +943,19 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             decision = await llm.resolve_rag_target("Use second.pdf", catalog)
         self.assertEqual(decision.action, "selected")
         self.assertEqual(decision.document_refs, ("D2",))
+
+    def test_target_resolver_treats_affinity_as_weak_context(self) -> None:
+        prompt = llm.target_resolver_prompt(
+            "Passage 2 nói gì?",
+            "- D1: test-2.pdf\n- D2: test-4.pdf",
+            [ChatMessage(role="user", content="Tóm tắt Test 2")],
+            ("D1",),
+        )
+
+        self.assertIn("weak context, not a required scope", prompt)
+        self.assertIn("Previous successful RAG document candidates: D1", prompt)
+        self.assertIn("Tóm tắt Test 2", prompt)
+        self.assertIn("Current user message:\nPassage 2 nói gì?", prompt)
 
     def test_direct_answer_prompt_requires_depth_for_tips_and_plans(self) -> None:
         prompt = llm.direct_answer_prompt("Lên kế hoạch học IELTS trong ba tháng")

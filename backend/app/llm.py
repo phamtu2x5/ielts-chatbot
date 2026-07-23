@@ -983,20 +983,39 @@ async def classify_rag_intent(
     )
 
 
-def target_resolver_prompt(message: str, catalog_context: str) -> str:
-    return "\n\n".join(
-        [
-            "Resolve which uploaded document the request targets using catalog metadata only.",
-            'Return JSON only with action "selected", "all", or "clarify" and a document_refs array.',
-            "Use ALL only for an explicit request about the whole uploaded collection.",
-            "Use CLARIFY only when multiple documents remain genuinely plausible.",
-            f"Catalog:\n{catalog_context}",
-            f"User message:\n{message}",
-        ]
-    )
+def target_resolver_prompt(
+    message: str,
+    catalog_context: str,
+    history: Optional[List[ChatMessage]] = None,
+    affinity_document_refs: tuple[str, ...] = (),
+) -> str:
+    history_text = format_route_history(history)
+    parts = [
+        "Resolve which uploaded document the current request targets using catalog metadata and conversation context.",
+        'Return JSON only with action "selected", "all", or "clarify" and a document_refs array.',
+        "Use ALL only for an explicit request about the whole available or attached collection.",
+        "Use CLARIFY when multiple documents remain genuinely plausible.",
+        "Previous-document candidates are weak context, not a required scope. Reuse one only when the current message is a coherent follow-up to that successful document exchange.",
+        "A current file name, title, or conflicting target overrides previous-document candidates.",
+        f"Catalog:\n{catalog_context}",
+    ]
+    if affinity_document_refs:
+        parts.append(
+            "Previous successful RAG document candidates: "
+            + ", ".join(affinity_document_refs)
+        )
+    if history_text:
+        parts.append(f"Recent successful conversation:\n{history_text}")
+    parts.append(f"Current user message:\n{message}")
+    return "\n\n".join(parts)
 
 
-async def resolve_rag_target(message: str, catalog_context: str) -> TargetResolverDecision:
+async def resolve_rag_target(
+    message: str,
+    catalog_context: str,
+    history: Optional[List[ChatMessage]] = None,
+    affinity_document_refs: tuple[str, ...] = (),
+) -> TargetResolverDecision:
     started = time.perf_counter()
     last_raw = ""
     last_error: str | None = None
@@ -1013,7 +1032,12 @@ async def resolve_rag_target(message: str, catalog_context: str) -> TargetResolv
     for attempt in range(1, 3):
         try:
             last_raw = await query_ollama(
-                target_resolver_prompt(message, catalog_context),
+                target_resolver_prompt(
+                    message,
+                    catalog_context,
+                    history,
+                    affinity_document_refs,
+                ),
                 temperature=0.0,
                 num_predict=128,
                 response_format=response_schema,

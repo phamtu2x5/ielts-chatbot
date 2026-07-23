@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from .config import settings
-from .document_scope import DocumentScope, apply_document_affinity, resolve_document_scope
+from .document_scope import DocumentScope, resolve_document_scope
 from .document_pipeline import DocumentProcessor
 from .intent import (
     dedupe_sources,
@@ -795,9 +795,9 @@ class ChatPreparation:
     query_intent: str = "direct"
 
 
-def affinity_retrieval_query(req: ChatRequest, scope: DocumentScope) -> str:
+def affinity_retrieval_query(req: ChatRequest, use_affinity_context: bool) -> str:
     message = req.message.strip()
-    if scope.method != "conversation_affinity" or not req.conversation_history:
+    if not use_affinity_context or not req.conversation_history:
         return message
 
     previous_user_message = next(
@@ -936,36 +936,19 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         req.document_scope,
     )
     affinity = effective_affinity(req)
-    scope = apply_document_affinity(
-        scope,
-        full_catalog,
-        affinity.document_ids if affinity else None,
-    )
     allowed_scope_ids = scope.allowed_document_ids
     catalog = [
         item
         for item in full_catalog
         if any(document_id in allowed_scope_ids for document_id in item.get("document_ids", []))
     ]
-    if scope.request_mode == "explicit" and scope.resolved_document_ids:
-        route = "rag"
-        gateway_debug = {
-            "used": False,
-            "route": "rag",
-            "attempts": 0,
-            "duration_seconds": 0.0,
-            "raw_output_preview": "",
-            "fallback_reason": None,
-            "reason": "explicit_current_turn_document_scope",
-        }
-    else:
-        gateway_decision = await classify_chat_route(
-            message,
-            req.conversation_history,
-            gateway_state_context(req),
-        )
-        route = gateway_decision.route
-        gateway_debug = {"used": True, **gateway_decision.to_debug()}
+    gateway_decision = await classify_chat_route(
+        message,
+        req.conversation_history,
+        gateway_state_context(req),
+    )
+    route = gateway_decision.route
+    gateway_debug = {"used": True, **gateway_decision.to_debug()}
 
     if route == "direct":
         return ChatPreparation(
@@ -993,7 +976,6 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     has_safe_rag_fallback = bool(
         (scope.request_mode == "explicit" and scope.resolved_document_ids)
         or (scope.document_grounded and scope.resolved_document_ids)
-        or (affinity and affinity.document_ids)
     )
     if route == "undetermined" and not has_safe_rag_fallback:
         return ChatPreparation(
@@ -1018,13 +1000,24 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         gateway_debug["fallback_reason"] = "valid_document_scope_or_rag_affinity"
 
     gateway_context = format_document_catalog_context(catalog)
+    affinity_document_refs = tuple(
+        reference
+        for reference, document_id in gateway_context.document_refs.items()
+        if affinity and document_id in affinity.document_ids
+    )
     scope_ids = list(scope.resolved_document_ids)
     needs_target_model = not scope_ids and len(allowed_scope_ids) > 1
     target_decision = (
-        await resolve_rag_target(message, gateway_context.text)
+        await resolve_rag_target(
+            message,
+            gateway_context.text,
+            req.conversation_history,
+            affinity_document_refs,
+        )
         if needs_target_model
         else None
     )
+    use_affinity_context = False
 
     if not scope_ids and len(allowed_scope_ids) == 1:
         scope_ids = list(allowed_scope_ids)
@@ -1044,7 +1037,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "method": "semantic_target",
             **target_decision.to_debug(),
             "invalid_refs": invalid_refs,
+            "affinity_candidate_refs": list(affinity_document_refs),
         }
+        use_affinity_context = bool(
+            set(target_decision.document_refs).intersection(affinity_document_refs)
+        )
+        if use_affinity_context:
+            document_resolution_debug["method"] = "semantic_target_with_affinity"
     else:
         document_resolution_debug = {
             "method": "semantic_target_clarify",
@@ -1092,7 +1091,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         for item in full_catalog
         if any(document_id in scope_ids for document_id in item.get("document_ids", []))
     ]
-    candidate_intents = allowed_rag_intents(message, scoped_catalog, affinity)
+    intent_affinity = affinity if use_affinity_context else None
+    candidate_intents = allowed_rag_intents(message, scoped_catalog, intent_affinity)
     intent_classifier = await classify_rag_intent(
         message,
         req.conversation_history,
@@ -1150,7 +1150,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             if any(document_id in scope_ids for document_id in item.get("document_ids", []))
         ]
 
-    retrieval_query = affinity_retrieval_query(req, scope)
+    retrieval_query = affinity_retrieval_query(req, use_affinity_context)
     probe_top_k = max(settings.rag_probe_top_k, settings.rag_top_k)
 
     if stats["chunks"] > 0 and route == "rag" and query_intent == "semantic_qa":
@@ -1269,7 +1269,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 )
             evidence_context_count = len(evidence_context)
             sources = dedupe_sources(sources + question_context + evidence_context)
-        elif query_intent == "semantic_qa" and scope.method == "conversation_affinity" and sources:
+        elif query_intent == "semantic_qa" and use_affinity_context and sources:
             passage_context = await run_in_threadpool(
                 store.passage_context_for_sources,
                 sources,

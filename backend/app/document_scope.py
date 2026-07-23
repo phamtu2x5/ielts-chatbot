@@ -94,16 +94,29 @@ def resolve_document_scope(
             request_mode,
         )
 
-    if request_mode == "explicit" and allowed:
+    if request_mode == "explicit" and len(allowed) == 1:
         return DocumentScope(
             requested,
             allowed,
             allowed,
             [entry.get("source_file", "unknown") for entry in allowed_entries],
-            "explicit_request" if len(allowed) > 1 else "explicit_single",
+            "explicit_single",
             False,
             False,
-            "The client explicitly selected these documents for the current request.",
+            "The client attached one document to the current request.",
+            request_mode,
+        )
+
+    if request_mode == "explicit" and len(allowed) > 1:
+        return DocumentScope(
+            requested,
+            allowed,
+            [],
+            [entry.get("source_file", "unknown") for entry in allowed_entries],
+            "explicit_multiple",
+            False,
+            False,
+            "The current request attached multiple documents; target resolution is still required.",
             request_mode,
         )
 
@@ -135,42 +148,6 @@ def resolve_document_scope(
         "Multiple documents remain possible and the query does not identify one uniquely.",
         request_mode,
     )
-
-
-def apply_document_affinity(
-    scope: DocumentScope,
-    catalog: list[dict[str, Any]],
-    affinity_document_ids: list[str] | None,
-) -> DocumentScope:
-    """Use client-carried conversation context only when this query did not select a document."""
-    if scope.method not in {"ambiguous", "unresolved"} or not affinity_document_ids:
-        return scope
-
-    allowed_affinity = [
-        document_id
-        for document_id in dict.fromkeys(affinity_document_ids)
-        if document_id in scope.allowed_document_ids
-    ]
-    if len(allowed_affinity) != 1:
-        return scope
-
-    matched_files = [
-        item.get("source_file", "unknown")
-        for item in catalog
-        if any(document_id in allowed_affinity for document_id in item.get("document_ids", []))
-    ]
-    return DocumentScope(
-        requested_document_ids=scope.requested_document_ids,
-        allowed_document_ids=scope.allowed_document_ids,
-        resolved_document_ids=allowed_affinity,
-        matched_files=matched_files,
-        method="conversation_affinity",
-        ambiguous=False,
-        document_grounded=scope.document_grounded,
-        reason="The current query did not select a document, so the previous turn's document scope was reused.",
-        request_mode=scope.request_mode,
-    )
-
 
 def _filename_match_score(normalized_query: str, source_file: str) -> float:
     stem = normalize_reference(Path(source_file).stem)
