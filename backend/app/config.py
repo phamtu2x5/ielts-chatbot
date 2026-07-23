@@ -45,6 +45,9 @@ class AppSettings:
         default_factory=lambda: float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
     )
     ollama_think: bool = field(default_factory=lambda: _env_bool("OLLAMA_THINK", False))
+    ollama_classifier_seed: int = field(
+        default_factory=lambda: int(os.getenv("OLLAMA_CLASSIFIER_SEED", "42"))
+    )
 
     embedding_model_name: str = field(
         default_factory=lambda: os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
