@@ -159,9 +159,12 @@ def ask_chat(
         "conversation_state": None,
     }
     stream_error: Any = None
+    stream_completed = False
+    metadata_received = False
     for event in events:
         event_type = event.get("type")
         if event_type == "metadata":
+            metadata_received = True
             response.update(
                 {
                     "route_used": event.get("route_used"),
@@ -172,6 +175,8 @@ def ask_chat(
             )
         elif event_type == "token":
             response["response"] += str(event.get("token") or "")
+        elif event_type == "done":
+            stream_completed = True
         elif event_type == "error":
             stream_error = event.get("detail") or event.get("message") or event
     result = {
@@ -181,6 +186,10 @@ def ask_chat(
     }
     if stream_error is not None:
         result["error"] = stream_error
+    elif status == 200 and not stream_completed:
+        result["error"] = "stream_ended_without_done"
+    elif status == 200 and not metadata_received:
+        result["error"] = "stream_missing_metadata"
     return result
 
 

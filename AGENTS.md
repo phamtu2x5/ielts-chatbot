@@ -133,13 +133,14 @@ PROJECT_HANDOFF.md
 `PROJECT_HANDOFF.md` is local/project context and may be stale. Do not treat it
 as the source of truth when it conflicts with current code or `README.md`.
 
-The Colab notebook is outside this repo:
+The Colab notebook is tracked at the repository root:
 
 ```text
-/Users/phamvantu/Desktop/Elsa-Speaker/IELTS_Chatbot_Standalone_Colab.ipynb
+IELTS_Chatbot_Standalone_Colab.ipynb
 ```
 
-Editing that notebook requires filesystem access outside the repo.
+Keep notebook setup changes in the same commit as the runtime changes they
+depend on so Colab cannot pull a mismatched setup.
 
 ## 4. Coding Conventions
 
@@ -253,9 +254,11 @@ Chat/RAG pipeline:
 
 ```text
 User query
--> allowed document catalog + compact semantic routing candidates
--> one structured LLM gateway decides route, intent, and target documents/sections
--> validate gateway references and explicit no-solve/no-writing constraints
+-> Patch 0 semantic gateway returns only a direct/rag JSON classification
+-> document resolution from current attachments, catalog metadata, semantic
+   target selection, and weak conversation affinity
+-> Patch 1 enum-only RAG intent classification
+-> validate document scope and explicit no-solve/no-writing constraints
 -> structured lookup when possible
 -> metadata-filtered retrieval
 -> parent/context expansion when needed
@@ -271,6 +274,18 @@ Structured lookup finds the document unit.
 Semantic retrieval finds evidence.
 Generation policy decides whether the LLM may solve.
 ```
+
+Patch boundaries:
+
+- Patch 0 owns only direct versus RAG. It must not answer, choose a document, or
+  choose an intent. Direct generation is a separate step after classification.
+- Document resolution runs only after a RAG decision. Same-turn attachments are
+  explicit scope; prior affinity is a weak hint, never a hard document lock.
+- Patch 1 owns only the final RAG intent enum after the document is resolved.
+- The frontend and evaluation runner use `/chat/stream`; `/chat` is a compatible
+  non-streaming facade over the same `prepare_chat(...)` pipeline.
+- Evaluation ground truth such as `expected_target_files` is report-only and
+  must never be sent as `document_ids` in the 66-case requests.
 
 Intent policy:
 

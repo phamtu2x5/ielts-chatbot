@@ -223,6 +223,27 @@ class ChatEvaluationManifestTests(unittest.TestCase):
         )
         self.assertEqual(result["response"]["response"], "Grounded answer.")
         self.assertEqual(result["response"]["route_used"], "vector_rag")
+        self.assertNotIn("error", result)
+
+    @patch("backend.tools.chat_evaluation.request_ndjson")
+    def test_chat_capture_marks_an_incomplete_product_stream(self, request_ndjson) -> None:
+        request_ndjson.return_value = (
+            200,
+            [
+                {
+                    "type": "metadata",
+                    "route_used": "base_model",
+                    "sources": [],
+                    "debug": {"query_intent": "direct"},
+                },
+                {"type": "token", "token": "Partial answer"},
+            ],
+        )
+
+        result = ask_chat("http://backend", "Question", 30.0)
+
+        self.assertEqual(result["response"]["response"], "Partial answer")
+        self.assertEqual(result["error"], "stream_ended_without_done")
 
     def test_upload_capture_omits_large_extraction_debug(self) -> None:
         result = {

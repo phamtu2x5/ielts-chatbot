@@ -574,7 +574,6 @@ function App() {
             ? uploadedFiles.map((data) => data.document_id)
             : null,
           document_scope: uploadedFiles.length ? "explicit" : "available",
-          affinity: uploadedFiles.length ? null : conversationState?.rag_affinity || null,
           conversation_state: uploadedFiles.length ? null : conversationState,
         }),
       });
@@ -587,6 +586,7 @@ function App() {
       const decoder = new TextDecoder();
       let buffer = "";
       let pendingConversationState = null;
+      let streamCompleted = false;
 
       while (true) {
         const { value, done } = await reader.read();
@@ -647,6 +647,7 @@ function App() {
               )
             );
           } else if (eventData.type === "done") {
+            streamCompleted = true;
             if (pendingConversationState) {
               setConversationState(pendingConversationState);
             }
@@ -678,6 +679,9 @@ function App() {
             throw new Error(eventData.message || "Yêu cầu không thành công");
           }
         }
+      }
+      if (!streamCompleted) {
+        throw new Error("Kết nối bị ngắt trước khi nhận xong câu trả lời.");
       }
     } catch (error) {
       setMessages((current) =>

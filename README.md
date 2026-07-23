@@ -32,16 +32,44 @@ Upload text/PDF/DOCX/image
 -> structure-aware chunks, with semantic chunk fallback for general documents
 -> sentence-transformers embedding
 -> local vector store
--> semantic gateway either answers directly or returns [[RAG]]
--> resolve the target document from client scope, catalog metadata, or conversation affinity
--> classify the RAG intent with a separate enum-only model call
+-> Patch 0: semantic gateway returns only {"route":"direct|rag"}
+-> resolve the target document from same-turn attachments, exact catalog metadata,
+   semantic catalog selection, or weak conversation affinity
+-> Patch 1: classify the RAG action with a separate enum-only model call
 -> run structured lookup or metadata-filtered retrieval inside the resolved scope
 -> deterministic renderer or Ollama answer with grounded context
 ```
 
 `/chat` and `/chat/stream` accept an optional client-carried `conversation_state`.
 The backend returns the updated state after each turn so successful document
-affinity can be reused by follow-ups without mixing it into the direct/RAG gateway.
+affinity can be offered to target resolution as weak follow-up context without
+mixing it into the direct/RAG gateway or forcing later questions into that file.
+Both endpoints call the same `prepare_chat(...)` pipeline; the frontend and the
+66-case capture runner use `/chat/stream`.
+
+### Current chat patch boundaries
+
+The current baseline intentionally separates routing responsibilities:
+
+1. **Patch 0 - direct/RAG gateway** receives the user message, filtered successful
+   history, and compact route state. It returns only a JSON `direct` or `rag`
+   classification. It does not answer, choose a file, or choose an RAG action.
+   A `direct` decision is followed by the normal direct-generation prompt.
+2. **Document resolution** runs only after a `rag` decision. A document attached in the
+   current turn is an explicit allowed scope. Without a current attachment, all
+   indexed documents are candidates; exact catalog references and the semantic
+   target resolver choose the target. Previous RAG affinity is only a weak hint.
+3. **Patch 1 - RAG intent classifier** runs only after document resolution and
+   returns one allowed final intent enum such as `document_overview`,
+   `show_questions`, `translate_questions`, `solve_questions`, or `semantic_qa`.
+4. Structured lookup/retrieval and generation then operate only inside the
+   resolved document scope.
+
+The 66-case runner follows this same product path through `/chat/stream`. It sends
+`document_ids=null`, `document_scope="available"`, and no conversation state for
+each independent case. `expected_target_files` remains report-only ground truth;
+it is never included in the chat request, so it cannot leak the answer document
+to the router. Follow-up behavior is covered separately by conversation tests.
 
 ## Run Locally
 
@@ -89,10 +117,10 @@ The Colab runtime is configured for OCR with RapidOCR and PyTorch CUDA. DocLayou
 
 ## Run On Colab
 
-Use the companion notebook kept outside this repo in the project folder:
+Use the companion notebook tracked at the repository root:
 
 ```text
-../IELTS_Chatbot_Standalone_Colab.ipynb
+IELTS_Chatbot_Standalone_Colab.ipynb
 ```
 
 Set:
@@ -193,16 +221,17 @@ backend with all models warmed up, then run:
 python backend/tools/chat_evaluation.py --base-url http://127.0.0.1:2222
 ```
 
-The runner verifies and uploads all seven files in `docs/`, sends the 66 questions
+The runner verifies and uploads all seven files in `docs/`, sends the 66 independent questions
 from `backend/evaluation/chat_corpus_v2.json`, and writes the raw answers, routes,
 resolved document IDs, conversation state, sources and debug metadata under
 `backend/data/chat_evaluation/`. It does not
 score answer quality; the report is reviewed manually. Use `--skip-upload` when
 the same corpus is already indexed, or repeat `--case CASE_ID` to collect selected
-cases. The direct-router cases deliberately run while all uploaded document IDs
-are active, so they expose false RAG routing without tying the question to a
-specific document. The previous 19-question set is retired because it does not
-represent the expanded corpus.
+cases. Every case runs with the whole indexed catalog available but without
+oracle document IDs. The direct-router cases therefore expose false RAG routing,
+while document cases also measure whether target resolution selects the correct
+file. The previous 19-question set is retired because it does not represent the
+expanded corpus.
 
 ## Notes
 

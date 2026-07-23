@@ -685,7 +685,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ["doc-a"],
         )
 
-    async def test_follow_up_affinity_limits_retrieval_to_previous_document(self) -> None:
+    async def test_resolver_selected_affinity_document_limits_follow_up_retrieval(self) -> None:
         catalog = [
             {"source_file": "reading-2.pdf", "document_ids": ["doc-2"], "mime_types": ["application/pdf"]},
             {"source_file": "reading-4.pdf", "document_ids": ["doc-4"], "mime_types": ["application/pdf"]},
