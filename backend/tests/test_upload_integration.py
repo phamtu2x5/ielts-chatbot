@@ -278,7 +278,13 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.intent_patcher.stop()
         self.target_patcher.stop()
 
-    async def test_chat_stream_uses_the_same_completed_preparation_as_chat(self) -> None:
+    def test_chat_stream_is_the_only_chat_endpoint(self) -> None:
+        paths = {route.path for route in main.app.routes}
+
+        self.assertIn("/chat/stream", paths)
+        self.assertNotIn("/chat", paths)
+
+    async def test_chat_stream_uses_completed_preparation(self) -> None:
         prepared = main.ChatPreparation(
             prompt=None,
             static_response="Xin chào",
@@ -329,7 +335,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.rag_affinity.document_ids, ["doc-1"])
         self.assertEqual(state.rag_affinity.passage_numbers, [2])
 
-    async def test_gateway_failure_without_document_basis_returns_safe_http_200_result(self) -> None:
+    async def test_gateway_failure_without_document_basis_streams_safe_result(self) -> None:
         catalog = [
             {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]}
         ]
@@ -344,11 +350,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
             patch.object(main, "classify_chat_route", AsyncMock(return_value=gateway)),
         ):
-            response = await main.chat(main.ChatRequest(message="Tell me something useful."))
+            response = await main.chat_stream(main.ChatRequest(message="Tell me something useful."))
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
 
-        self.assertEqual(response.route_used, "route_undetermined")
-        self.assertEqual(response.conversation_state.last_route, "no_match")
-        self.assertEqual(response.sources, [])
+        metadata = next(event for event in events if event["type"] == "metadata")
+        self.assertEqual(metadata["route_used"], "route_undetermined")
+        self.assertEqual(metadata["conversation_state"]["last_route"], "no_match")
+        self.assertEqual(metadata["sources"], [])
+        self.assertTrue(any(event["type"] == "done" for event in events))
 
     async def test_single_explicit_document_still_uses_direct_rag_gateway(self) -> None:
         catalog = [
@@ -407,23 +416,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.static_response, main.INTENT_UNDETERMINED_RESPONSE)
         self.assertEqual(prepared.sources, [])
 
-    async def test_chat_converts_gateway_failure_to_502(self) -> None:
+    async def test_chat_stream_reports_gateway_failure(self) -> None:
         failure = main.OllamaRequestError("empty_response", "router returned no content")
         with patch.object(main, "prepare_chat", AsyncMock(side_effect=failure)):
-            with self.assertRaises(main.HTTPException) as raised:
-                await main.chat(main.ChatRequest(message="xin chào"))
+            response = await main.chat_stream(main.ChatRequest(message="xin chào"))
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
 
-        self.assertEqual(raised.exception.status_code, 502)
-        self.assertEqual(raised.exception.detail["ollama"]["kind"], "empty_response")
-
-    async def test_chat_preserves_explicit_http_errors(self) -> None:
-        failure = main.HTTPException(status_code=409, detail="conflict")
-        with patch.object(main, "prepare_chat", AsyncMock(side_effect=failure)):
-            with self.assertRaises(main.HTTPException) as raised:
-                await main.chat(main.ChatRequest(message="xin chào"))
-
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(raised.exception.detail, "conflict")
+        error = next(event for event in events if event["type"] == "error")
+        self.assertEqual(error["detail"]["ollama"]["kind"], "empty_response")
 
     def test_evidence_query_prefers_child_question_and_removes_options(self) -> None:
         sources = [
@@ -719,10 +719,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     conversation_history=[
                         {"role": "user", "content": "Trả lời Question 4 trong Reading Test 2"}
                     ],
-                    affinity={
-                        "document_ids": ["doc-2"],
-                        "passage_numbers": [1],
-                        "question_ranges": [[1, 4]],
+                    conversation_state={
+                        "last_route": "rag",
+                        "last_intent": "solve_questions",
+                        "rag_affinity": {
+                            "document_ids": ["doc-2"],
+                            "passage_numbers": [1],
+                            "question_ranges": [[1, 4]],
+                        },
                     },
                 )
             )
@@ -760,7 +764,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         {"role": "user", "content": "Trả lời Question 4 trong Reading Test 2"}
                     ],
                     document_ids=["doc-2", "doc-4"],
-                    affinity={"document_ids": ["doc-2"]},
+                    conversation_state={
+                        "last_route": "rag",
+                        "last_intent": "solve_questions",
+                        "rag_affinity": {"document_ids": ["doc-2"]},
+                    },
                 )
             )
 

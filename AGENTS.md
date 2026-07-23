@@ -282,8 +282,7 @@ Patch boundaries:
 - Document resolution runs only after a RAG decision. Same-turn attachments are
   explicit scope; prior affinity is a weak hint, never a hard document lock.
 - Patch 1 owns only the final RAG intent enum after the document is resolved.
-- The frontend and evaluation runner use `/chat/stream`; `/chat` is a compatible
-  non-streaming facade over the same `prepare_chat(...)` pipeline.
+- The frontend and evaluation runner use `/chat/stream`, the only chat endpoint.
 - Evaluation ground truth such as `expected_target_files` is report-only and
   must never be sent as `document_ids` in the 66-case requests.
 

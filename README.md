@@ -40,12 +40,11 @@ Upload text/PDF/DOCX/image
 -> deterministic renderer or Ollama answer with grounded context
 ```
 
-`/chat` and `/chat/stream` accept an optional client-carried `conversation_state`.
-The backend returns the updated state after each turn so successful document
+`/chat/stream` accepts an optional client-carried `conversation_state`. The
+backend returns the updated state after each turn so successful document
 affinity can be offered to target resolution as weak follow-up context without
 mixing it into the direct/RAG gateway or forcing later questions into that file.
-Both endpoints call the same `prepare_chat(...)` pipeline; the frontend and the
-66-case capture runner use `/chat/stream`.
+The frontend and the 66-case capture runner use this single chat endpoint.
 
 ### Current chat patch boundaries
 

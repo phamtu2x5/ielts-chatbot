@@ -51,7 +51,6 @@ from .schemas import (
     ChatAffinity,
     ChatConversationState,
     ChatRequest,
-    ChatResponse,
     SearchRequest,
     SearchResponse,
     StatsResponse,
@@ -411,7 +410,7 @@ def conversation_state_for_result(
     req: ChatRequest,
     prepared: "ChatPreparation",
 ) -> ChatConversationState:
-    previous_affinity = effective_affinity(req) or ChatAffinity()
+    previous_affinity = conversation_affinity(req) or ChatAffinity()
     if prepared.route_used == "base_model":
         route = "direct"
         affinity = previous_affinity
@@ -812,7 +811,7 @@ def affinity_retrieval_query(req: ChatRequest, use_affinity_context: bool) -> st
         return message
 
     affinity_hints: list[str] = []
-    affinity = effective_affinity(req)
+    affinity = conversation_affinity(req)
     if affinity:
         if affinity.passage_numbers:
             affinity_hints.append(
@@ -831,10 +830,10 @@ def affinity_retrieval_query(req: ChatRequest, use_affinity_context: bool) -> st
     return f"{previous_user_message}\nFollow-up: {message}{suffix}"
 
 
-def effective_affinity(req: ChatRequest) -> ChatAffinity | None:
+def conversation_affinity(req: ChatRequest) -> ChatAffinity | None:
     if req.conversation_state and req.conversation_state.rag_affinity.document_ids:
         return req.conversation_state.rag_affinity
-    return req.affinity
+    return None
 
 
 QUESTION_TARGET_INTENTS = {
@@ -935,7 +934,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         req.document_ids,
         req.document_scope,
     )
-    affinity = effective_affinity(req)
+    affinity = conversation_affinity(req)
     allowed_scope_ids = scope.allowed_document_ids
     catalog = [
         item
@@ -1548,35 +1547,6 @@ async def warmup() -> dict:
         "duration_seconds": round(time.perf_counter() - started, 2),
         "results": results,
     }
-
-
-@app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
-    if not req.message.strip():
-        raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung câu hỏi")
-
-    try:
-        prepared = await prepare_chat(req)
-        answer = prepared.static_response
-        if answer is None and prepared.prompt is not None:
-            answer = await generate_answer(prepared, req.message)
-            if not answer.strip():
-                answer = generation_fallback(prepared)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Chat request failed")
-        raise HTTPException(
-            status_code=502,
-            detail=ollama_failure_detail(exc),
-        ) from exc
-    return ChatResponse(
-        response=answer or "",
-        route_used=prepared.route_used,
-        sources=prepared.sources,
-        debug=prepared.debug,
-        conversation_state=conversation_state_for_result(req, prepared),
-    )
 
 
 @app.post("/chat/stream")

@@ -25,15 +25,6 @@ class ChatRequest(BaseModel):
     conversation_history: Optional[List[ChatMessage]] = Field(default=None, max_length=20)
     document_ids: Optional[List[str]] = Field(default=None, max_length=50)
     document_scope: Literal["auto", "explicit", "available"] = "auto"
-    affinity: Optional[ChatAffinity] = None
-    conversation_state: Optional[ChatConversationState] = None
-
-
-class ChatResponse(BaseModel):
-    response: str
-    route_used: str
-    sources: List[Dict[str, Any]] = Field(default_factory=list)
-    debug: Optional[Dict[str, Any]] = None
     conversation_state: Optional[ChatConversationState] = None
 
 
