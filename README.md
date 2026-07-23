@@ -87,7 +87,7 @@ cp .env.example .env
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 2222
+uvicorn app.main:app --host 0.0.0.0 --port 8765
 ```
 
 Start frontend:
@@ -107,7 +107,7 @@ http://127.0.0.1:8000
 Warm up large models before opening the UI:
 
 ```bash
-curl -s -X POST http://127.0.0.1:2222/warmup
+curl -s -X POST http://127.0.0.1:8765/warmup
 ```
 
 This loads the Ollama LLM, embedding model, and RapidOCR model up front so the first real user request is smoother.
@@ -217,7 +217,7 @@ To collect end-to-end answers and RAG diagnostics for manual review, start the
 backend with all models warmed up, then run:
 
 ```bash
-python backend/tools/chat_evaluation.py --base-url http://127.0.0.1:2222
+python backend/tools/chat_evaluation.py --base-url http://127.0.0.1:8765
 ```
 
 The runner verifies and uploads all seven files in `docs/`, sends the 66 independent questions

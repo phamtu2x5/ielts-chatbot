@@ -413,7 +413,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Collect chatbot answers and RAG debug data for manual review."
     )
-    parser.add_argument("--base-url", default="http://127.0.0.1:2222")
+    parser.add_argument("--base-url", default="http://127.0.0.1:8765")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--corpus-dir", type=Path, default=DEFAULT_CORPUS_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
