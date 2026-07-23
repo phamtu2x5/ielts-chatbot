@@ -283,6 +283,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("/chat/stream", paths)
         self.assertNotIn("/chat", paths)
+        self.assertIn("/documents/upload", paths)
+        self.assertNotIn("/rag/upload-pdf", paths)
 
     async def test_chat_stream_uses_completed_preparation(self) -> None:
         prepared = main.ChatPreparation(

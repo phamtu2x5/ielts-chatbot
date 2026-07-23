@@ -1610,7 +1610,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
 
 @app.post("/documents/upload", response_model=UploadResponse)
-@app.post("/rag/upload-pdf", response_model=UploadResponse)
 async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     upload_started = time.perf_counter()
     upload_timing: dict[str, Any] = {}

@@ -108,46 +108,6 @@ function downloadJson(filename, data) {
   URL.revokeObjectURL(url);
 }
 
-function affinityFromMetadata(eventData) {
-  if (!eventData.route_used?.startsWith("vector_rag")) return null;
-
-  const sources = eventData.sources || [];
-  const resolvedIds =
-    eventData.debug?.document_resolution?.resolved_document_ids ||
-    eventData.debug?.target_resolution?.resolved_document_ids ||
-    [];
-  const documentIds = [
-    ...new Set([
-      ...sources.map((source) => source.document_id).filter(Boolean),
-      ...resolvedIds,
-    ]),
-  ];
-  if (!documentIds.length) return null;
-
-  const passageNumbers = [
-    ...new Set(
-      sources
-        .map((source) => source.metadata?.passage_number)
-        .filter((value) => Number.isInteger(value))
-    ),
-  ];
-  const questionRanges = [];
-  const seenRanges = new Set();
-  for (const source of sources) {
-    const range = source.metadata?.question_range;
-    if (!Array.isArray(range) || range.length !== 2) continue;
-    const key = `${range[0]}-${range[1]}`;
-    if (seenRanges.has(key)) continue;
-    seenRanges.add(key);
-    questionRanges.push(range);
-  }
-  return {
-    document_ids: documentIds,
-    passage_numbers: passageNumbers,
-    question_ranges: questionRanges,
-  };
-}
-
 function completedConversationHistory(messages) {
   const completed = [];
   for (let index = 0; index < messages.length; index += 1) {
@@ -159,7 +119,15 @@ function completedConversationHistory(messages) {
       assistant.role !== "assistant" ||
       assistant.streaming ||
       !assistant.content?.trim() ||
-      ["welcome", "upload", "error"].includes(assistant.route_used)
+      [
+        "welcome",
+        "upload",
+        "error",
+        "vector_rag_ambiguous_document",
+        "vector_rag_no_match",
+        "route_undetermined",
+        "intent_undetermined",
+      ].includes(assistant.route_used)
     ) {
       continue;
     }
@@ -612,15 +580,6 @@ function App() {
           } else if (eventData.type === "metadata") {
             if (eventData.conversation_state) {
               pendingConversationState = eventData.conversation_state;
-            } else {
-              const nextAffinity = affinityFromMetadata(eventData);
-              if (nextAffinity) {
-                pendingConversationState = {
-                  last_route: conversationState?.last_route || "rag",
-                  last_intent: conversationState?.last_intent || null,
-                  rag_affinity: nextAffinity,
-                };
-              }
             }
             setMessages((current) =>
               current.map((message) =>
