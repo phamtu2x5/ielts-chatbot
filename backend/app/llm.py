@@ -1,4 +1,3 @@
-import hashlib
 import json
 import re
 import time
@@ -54,7 +53,6 @@ class RouteGatewayDecision:
     duration_seconds: float
     raw_output_preview: str
     fallback_reason: str | None = None
-    attempt_trace: tuple[dict[str, object], ...] = ()
 
     def to_debug(self) -> dict:
         return {
@@ -63,7 +61,6 @@ class RouteGatewayDecision:
             "duration_seconds": self.duration_seconds,
             "raw_output_preview": self.raw_output_preview,
             "fallback_reason": self.fallback_reason,
-            "attempt_trace": [dict(item) for item in self.attempt_trace],
         }
 
 
@@ -791,7 +788,6 @@ async def classify_chat_route(
     started = time.perf_counter()
     last_raw = ""
     last_error: str | None = None
-    attempt_trace: list[dict[str, object]] = []
     for attempt in range(1, 3):
         prompt = route_classifier_prompt(
             message,
@@ -799,8 +795,6 @@ async def classify_chat_route(
             conversation_state,
             compact=attempt == 2,
         )
-        attempt_started = time.perf_counter()
-        prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         try:
             last_raw = await query_ollama(
                 prompt,
@@ -812,42 +806,20 @@ async def classify_chat_route(
                 seed=settings.ollama_classifier_seed,
             )
             route = parse_gateway_response(last_raw)
-            attempt_trace.append(
-                {
-                    "attempt": attempt,
-                    "prompt_hash": prompt_hash,
-                    "duration_seconds": round(time.perf_counter() - attempt_started, 3),
-                    "status": "ok",
-                    "route": route,
-                    "raw_output_preview": _visible_raw_output(last_raw)[:500],
-                }
-            )
             return RouteGatewayDecision(
                 route=route,
                 attempts=attempt,
                 duration_seconds=round(time.perf_counter() - started, 3),
                 raw_output_preview=_visible_raw_output(last_raw)[:500],
-                attempt_trace=tuple(attempt_trace),
             )
         except OllamaRequestError as exc:
             last_error = exc.kind
-            attempt_trace.append(
-                {
-                    "attempt": attempt,
-                    "prompt_hash": prompt_hash,
-                    "duration_seconds": round(time.perf_counter() - attempt_started, 3),
-                    "status": "error",
-                    "error_kind": exc.kind,
-                    "raw_output_preview": _visible_raw_output(last_raw)[:500],
-                }
-            )
     return RouteGatewayDecision(
         route="undetermined",
         attempts=2,
         duration_seconds=round(time.perf_counter() - started, 3),
         raw_output_preview=_visible_raw_output(last_raw)[:500],
         fallback_reason=last_error or "invalid_gateway_output",
-        attempt_trace=tuple(attempt_trace),
     )
 
 

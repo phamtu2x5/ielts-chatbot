@@ -825,10 +825,6 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_args.kwargs["num_predict"], 32)
         self.assertEqual(model.await_args.kwargs["response_format"], llm.ROUTE_RESPONSE_SCHEMA)
         self.assertEqual(model.await_args.kwargs["seed"], llm.settings.ollama_classifier_seed)
-        self.assertEqual(len(decision.attempt_trace), 1)
-        self.assertEqual(decision.attempt_trace[0]["status"], "ok")
-        self.assertEqual(decision.attempt_trace[0]["route"], "direct")
-        self.assertEqual(len(decision.attempt_trace[0]["prompt_hash"]), 64)
 
     async def test_route_classifier_accepts_rag_json(self) -> None:
         with patch.object(llm, "query_ollama", AsyncMock(return_value='{"route":"rag"}')):
@@ -853,10 +849,6 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(decision.route, "rag")
         self.assertEqual(model.await_count, 2)
-        self.assertEqual(len(decision.attempt_trace), 2)
-        self.assertEqual(decision.attempt_trace[0]["status"], "error")
-        self.assertEqual(decision.attempt_trace[0]["error_kind"], "invalid_gateway_output")
-        self.assertEqual(decision.attempt_trace[1]["status"], "ok")
 
     async def test_route_classifier_retries_one_empty_response(self) -> None:
         model = AsyncMock(
@@ -882,8 +874,6 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(decision.route, "undetermined")
         self.assertEqual(decision.attempts, 2)
-        self.assertEqual(len(decision.attempt_trace), 2)
-        self.assertTrue(all(item["status"] == "error" for item in decision.attempt_trace))
 
     async def test_intent_classifier_accepts_only_enum(self) -> None:
         with patch.object(
