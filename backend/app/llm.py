@@ -581,18 +581,17 @@ async def query_ollama(
         seed=seed,
     )
 
-    data: dict = {}
+    attempt_limit = max(1, max_attempts)
     async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
-        for attempt in range(1, max(1, max_attempts) + 1):
+        for attempt in range(1, attempt_limit + 1):
             try:
                 response = await client.post(OLLAMA_API_URL, json=payload)
                 response.raise_for_status()
                 data = response.json()
-                break
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
                 body = exc.response.text[:500] or None
-                if status_code >= 500 and attempt < max_attempts:
+                if status_code >= 500 and attempt < attempt_limit:
                     continue
                 raise OllamaRequestError(
                     "http_status",
@@ -602,7 +601,7 @@ async def query_ollama(
                     attempts=attempt,
                 ) from exc
             except httpx.RequestError as exc:
-                if attempt < max_attempts:
+                if attempt < attempt_limit:
                     continue
                 raise OllamaRequestError(
                     "transport",
@@ -617,28 +616,34 @@ async def query_ollama(
                     attempts=attempt,
                 ) from exc
 
-    raw_text = data.get("response") or ""
-    visible_text = clean_response(raw_text)
-    text = visible_text if clean_output else raw_text.strip()
-    if looks_like_prompt_echo(visible_text, prompt):
-        raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt instead of answering.")
-    if not visible_text:
-        thinking = data.get("thinking") or ""
-        raise OllamaRequestError(
-            "empty_response",
-            "Ollama returned an empty visible response.",
-            metadata={
-                "response_keys": sorted(data.keys()),
-                "done": data.get("done"),
-                "done_reason": data.get("done_reason"),
-                "prompt_eval_count": data.get("prompt_eval_count"),
-                "eval_count": data.get("eval_count"),
-                "response_length": len(raw_text),
-                "thinking_length": len(thinking),
-                "think_requested": settings.ollama_think,
-            },
-        )
-    return text
+            raw_text = data.get("response") or ""
+            visible_text = clean_response(raw_text)
+            text = visible_text if clean_output else raw_text.strip()
+            if looks_like_prompt_echo(visible_text, prompt):
+                raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt instead of answering.")
+            if visible_text:
+                return text
+            if attempt < attempt_limit:
+                continue
+
+            thinking = data.get("thinking") or ""
+            raise OllamaRequestError(
+                "empty_response",
+                "Ollama returned an empty visible response.",
+                attempts=attempt,
+                metadata={
+                    "response_keys": sorted(data.keys()),
+                    "done": data.get("done"),
+                    "done_reason": data.get("done_reason"),
+                    "prompt_eval_count": data.get("prompt_eval_count"),
+                    "eval_count": data.get("eval_count"),
+                    "response_length": len(raw_text),
+                    "thinking_length": len(thinking),
+                    "think_requested": settings.ollama_think,
+                },
+            )
+
+    raise OllamaRequestError("empty_response", "Ollama returned no response.", attempts=attempt_limit)
 
 
 async def stream_ollama(
