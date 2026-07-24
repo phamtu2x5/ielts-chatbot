@@ -802,7 +802,9 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("\n...\n", history_text)
 
     def test_route_classifier_prompt_includes_metadata_and_highlights_request(self) -> None:
-        document_context = "- file=reading.pdf; sections=Urban transport"
+        document_context = (
+            "- file=reading.pdf; attached_this_turn=true; sections=Urban transport"
+        )
 
         prompt = llm.route_classifier_prompt(
             "Translate Questions 1-4.",
@@ -814,6 +816,8 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("=== CURRENT REQUEST TO CLASSIFY ===\nTranslate Questions 1-4.", prompt)
         self.assertIn("translating uploaded content", prompt)
         self.assertIn("Do not choose DIRECT by guessing", prompt)
+        self.assertIn("attached_this_turn=true", prompt)
+        self.assertIn("not sufficient by itself to choose RAG", prompt)
 
     def test_route_classifier_uses_document_dependency_not_topic_domain(self) -> None:
         prompt = llm.route_classifier_prompt("Explain a common technology concept.")
@@ -826,6 +830,7 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("RAG: the answer needs to know or verify any specific content", prompt)
         self.assertNotIn("if the uploaded files were unavailable", prompt)
         self.assertIn("Do not choose DIRECT by guessing", compact_prompt)
+        self.assertIn("not an automatic RAG decision", compact_prompt)
         self.assertIn("Transforming a preceding direct answer remains DIRECT", compact_prompt)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:

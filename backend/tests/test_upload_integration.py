@@ -846,13 +846,18 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(message="Why did urban transport change?", document_ids=["doc-1"])
+                main.ChatRequest(
+                    message="Why did urban transport change?",
+                    document_ids=["doc-1"],
+                    document_scope="explicit",
+                )
             )
 
         state_context = gateway.await_args.args[2]
         document_context = gateway.await_args.args[3]
         self.assertEqual(state_context, "")
         self.assertIn("file=reading.pdf", document_context)
+        self.assertIn("attached_this_turn=true", document_context)
         self.assertIn("sections=Urban transport", document_context)
         self.assertNotIn("rail network expanded", document_context)
         self.assertLessEqual(len(document_context), main.settings.route_catalog_chars)
@@ -894,6 +899,26 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             all(len(line) <= main.settings.route_catalog_document_chars for line in document_lines)
         )
 
+    def test_route_catalog_marks_only_documents_attached_in_current_turn(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-reading"],
+                "document_types": ["ielts_reading"],
+            },
+            {
+                "source_file": "writing.png",
+                "document_ids": ["doc-writing"],
+                "document_types": ["ielts_writing_task_1"],
+            },
+        ]
+
+        context = main.format_route_catalog_context(catalog, ["doc-writing"])
+
+        reading_line, writing_line = context.splitlines()
+        self.assertNotIn("attached_this_turn", reading_line)
+        self.assertIn("attached_this_turn=true", writing_line)
+
     async def test_semantic_gateway_state_does_not_expose_document_references(self) -> None:
         catalog = [
             {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]}
@@ -920,10 +945,12 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
 
         state_context = gateway.await_args.args[2]
+        document_context = gateway.await_args.args[3]
         self.assertIn('"last_route": "rag"', state_context)
         self.assertIn('"has_rag_affinity": true', state_context)
         self.assertNotIn("doc-1", state_context)
         self.assertNotIn("14", state_context)
+        self.assertNotIn("attached_this_turn", document_context)
 
     async def test_gateway_can_request_rag_with_an_explicit_document_scope(self) -> None:
         catalog = [
