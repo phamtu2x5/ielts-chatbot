@@ -142,7 +142,7 @@ class StructuredDocumentStore:
 
     def document_catalog(self, document_ids: List[str] | None = None) -> List[Dict]:
         catalog: dict[str, Dict] = {}
-        for doc in self._docs_in_scope(document_ids):
+        for position, doc in enumerate(self._docs_in_scope(document_ids)):
             source_file = doc.get("source_file", "unknown")
             document_id = str(doc.get("document_id") or source_file)
             entry = catalog.setdefault(
@@ -163,8 +163,14 @@ class StructuredDocumentStore:
                     "target_descriptors": [],
                     "untitled_writing_parents": set(),
                     "sample_descriptors": {},
+                    "ingested_at": "",
+                    "_latest_position": -1,
                 },
             )
+            ingested_at = str(doc.get("ingested_at") or "")
+            if ingested_at > entry["ingested_at"]:
+                entry["ingested_at"] = ingested_at
+            entry["_latest_position"] = max(entry["_latest_position"], position)
             entry["chunks"] += 1
             entry["pages"].update(doc.get("pages") or [])
             if doc.get("document_id"):
@@ -213,7 +219,16 @@ class StructuredDocumentStore:
                     entry["sample_descriptors"].setdefault(parent_id, descriptor)
 
         results = []
-        for item in catalog.values():
+        ordered_items = sorted(
+            catalog.values(),
+            key=lambda item: (
+                bool(item["ingested_at"]),
+                item["ingested_at"],
+                item["_latest_position"],
+            ),
+            reverse=True,
+        )
+        for item in ordered_items:
             for parent_id in item["untitled_writing_parents"]:
                 descriptor = item["sample_descriptors"].get(parent_id)
                 if descriptor:
@@ -232,6 +247,7 @@ class StructuredDocumentStore:
                 "visual_types": sorted(item["visual_types"]),
                 "table_columns": item["table_columns"],
                 "target_descriptors": item["target_descriptors"],
+                "ingested_at": item["ingested_at"] or None,
             })
         return results
 

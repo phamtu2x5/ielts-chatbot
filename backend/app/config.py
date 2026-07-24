@@ -72,6 +72,12 @@ class AppSettings:
     target_descriptor_chars: int = field(
         default_factory=lambda: int(os.getenv("TARGET_DESCRIPTOR_CHARS", "220"))
     )
+    document_scope_min_match_score: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_SCOPE_MIN_MATCH_SCORE", "60"))
+    )
+    document_scope_match_margin: float = field(
+        default_factory=lambda: float(os.getenv("DOCUMENT_SCOPE_MATCH_MARGIN", "10"))
+    )
 
     embedding_model_name: str = field(
         default_factory=lambda: os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
@@ -103,6 +109,8 @@ class AppSettings:
             or self.target_catalog_chars <= 0
             or self.target_catalog_document_chars <= 0
             or self.target_descriptor_chars <= 0
+            or self.document_scope_min_match_score <= 0
+            or self.document_scope_match_margin <= 0
         ):
             raise ValueError("Route and target context limits must be positive.")
         if (

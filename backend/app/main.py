@@ -137,6 +137,8 @@ def format_context(sources: list[dict], max_chars_per_source: int | None = None)
 class DocumentCatalogContext:
     text: str
     document_refs: dict[str, str]
+    included_document_ids: tuple[str, ...] = ()
+    omitted_document_ids: tuple[str, ...] = ()
 
 
 def format_document_catalog_context(catalog: list[dict]) -> DocumentCatalogContext:
@@ -178,6 +180,13 @@ def format_document_catalog_context(catalog: list[dict]) -> DocumentCatalogConte
     return DocumentCatalogContext(
         text="\n".join(lines),
         document_refs=document_refs,
+        included_document_ids=tuple(document_refs.values()),
+        omitted_document_ids=tuple(
+            document_id
+            for item in catalog
+            for document_id in item.get("document_ids") or []
+            if document_id and document_id not in document_refs.values()
+        ),
     )
 
 
@@ -190,6 +199,18 @@ def format_route_catalog_context(
         return "Uploaded documents: none"
 
     attached = set(attached_document_ids or [])
+    catalog = [
+        *[
+            item
+            for item in catalog
+            if set(item.get("document_ids") or []).intersection(attached)
+        ],
+        *[
+            item
+            for item in catalog
+            if not set(item.get("document_ids") or []).intersection(attached)
+        ],
+    ]
     lines: list[str] = []
     for item in catalog:
         fields = [f"file={item.get('source_file', 'unknown')}"]
@@ -1000,17 +1021,33 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         for item in full_catalog
         if any(document_id in allowed_scope_ids for document_id in item.get("document_ids", []))
     ]
+    route_catalog_context = format_route_catalog_context(
+        full_catalog,
+        req.document_ids if req.document_scope == "explicit" else None,
+    )
     gateway_decision = await classify_chat_route(
         message,
         req.conversation_history,
         gateway_state_context(req),
-        format_route_catalog_context(
-            full_catalog,
-            req.document_ids if req.document_scope == "explicit" else None,
-        ),
+        route_catalog_context,
     )
     route = gateway_decision.route
-    gateway_debug = {"used": True, **gateway_decision.to_debug()}
+    route_catalog_count = sum(
+        line.startswith("- file=") for line in route_catalog_context.splitlines()
+    )
+    gateway_debug = {
+        "used": True,
+        **gateway_decision.to_debug(),
+        "catalog_context": {
+            "order": "same_turn_attachments_then_recent_ingestion",
+            "available_documents": len(full_catalog),
+            "included_documents": route_catalog_count,
+            "omitted_documents": max(0, len(full_catalog) - route_catalog_count),
+            "attached_document_ids": (
+                req.document_ids if req.document_scope == "explicit" else []
+            ),
+        },
+    }
 
     if route == "direct":
         return ChatPreparation(
@@ -1114,6 +1151,12 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "method": "semantic_target_clarify",
             **(target_decision.to_debug() if target_decision else {}),
         }
+    document_resolution_debug["catalog_context"] = {
+        "order": "recent_ingestion",
+        "available_document_ids": list(allowed_scope_ids),
+        "included_document_ids": list(gateway_context.included_document_ids),
+        "omitted_document_ids": list(gateway_context.omitted_document_ids),
+    }
 
     if not scope_ids:
         debug = {

@@ -975,6 +975,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(context.document_refs, {"D1": "doc-writing"})
+        self.assertEqual(context.included_document_ids, ("doc-writing",))
+        self.assertEqual(context.omitted_document_ids, ())
         self.assertIn("mime_types=image/png", context.text)
         self.assertIn("visual_types=table", context.text)
         self.assertIn("Smartphone Ownership 2024", context.text)
@@ -1019,9 +1021,28 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         context = main.format_route_catalog_context(catalog, ["doc-writing"])
 
-        reading_line, writing_line = context.splitlines()
+        writing_line, reading_line = context.splitlines()
         self.assertNotIn("attached_this_turn", reading_line)
         self.assertIn("attached_this_turn=true", writing_line)
+
+    def test_target_catalog_reports_documents_omitted_by_context_limit(self) -> None:
+        catalog = [
+            {
+                "source_file": f"reading-{index}.pdf",
+                "document_ids": [f"doc-{index}"],
+                "section_titles": ["A" * 1_000],
+            }
+            for index in range(20)
+        ]
+
+        context = main.format_document_catalog_context(catalog)
+
+        self.assertTrue(context.included_document_ids)
+        self.assertTrue(context.omitted_document_ids)
+        self.assertEqual(
+            set(context.included_document_ids).intersection(context.omitted_document_ids),
+            set(),
+        )
 
     async def test_semantic_gateway_state_does_not_expose_document_references(self) -> None:
         catalog = [

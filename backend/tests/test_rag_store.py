@@ -92,6 +92,7 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertEqual(store.stats()["chunks"], 1)
         self.assertEqual(store._docs[0]["chunk_id"], "a-2")
+        self.assertTrue(store._docs[0]["ingested_at"])
         self.assertEqual(store._embeddings.shape, (1, 2))
 
     def test_same_filename_documents_are_isolated_by_document_id(self) -> None:
@@ -107,6 +108,50 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual(store.stats()["documents"], 2)
         self.assertEqual({doc["document_id"] for doc in store._docs}, {"doc-a", "doc-b"})
         self.assertEqual(len(store.document_catalog()), 2)
+
+    def test_document_catalog_orders_recent_ingestion_first(self) -> None:
+        docs = [
+            {
+                "document_id": "doc-old",
+                "source_file": "old.pdf",
+                "ingested_at": "2026-07-20T08:00:00+00:00",
+                "metadata": {"unit_type": "passage"},
+            },
+            {
+                "document_id": "doc-new",
+                "source_file": "new.pdf",
+                "ingested_at": "2026-07-24T08:00:00+00:00",
+                "metadata": {"unit_type": "passage"},
+            },
+        ]
+
+        catalog = StructuredDocumentStore(lambda: docs).document_catalog()
+
+        self.assertEqual(
+            [item["document_ids"] for item in catalog],
+            [["doc-new"], ["doc-old"]],
+        )
+
+    def test_document_catalog_uses_chunk_position_for_legacy_index_order(self) -> None:
+        docs = [
+            {
+                "document_id": "doc-old",
+                "source_file": "old.pdf",
+                "metadata": {"unit_type": "passage"},
+            },
+            {
+                "document_id": "doc-new",
+                "source_file": "new.pdf",
+                "metadata": {"unit_type": "passage"},
+            },
+        ]
+
+        catalog = StructuredDocumentStore(lambda: docs).document_catalog()
+
+        self.assertEqual(
+            [item["document_ids"] for item in catalog],
+            [["doc-new"], ["doc-old"]],
+        )
 
     def test_reupload_replaces_only_matching_document_id(self) -> None:
         store = FakeVectorStore()
@@ -362,6 +407,37 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertEqual(ambiguous.resolved_document_ids, [])
         self.assertEqual(resolved.resolved_document_ids, ["doc-2"])
+
+    def test_document_scope_keeps_near_tied_filename_matches_unresolved(self) -> None:
+        catalog = [
+            {
+                "source_file": "Official IELTS Reading Test 2.pdf",
+                "document_ids": ["doc-official"],
+            },
+            {
+                "source_file": "Practice IELTS Reading Test 2 Extra.pdf",
+                "document_ids": ["doc-practice"],
+            },
+        ]
+
+        scope = resolve_document_scope("IELTS Reading Test 2", catalog)
+
+        self.assertEqual(scope.method, "unresolved")
+        self.assertEqual(scope.resolved_document_ids, [])
+
+    def test_document_scope_exact_match_uses_full_catalog(self) -> None:
+        catalog = [
+            {
+                "source_file": f"IELTS Reading Test {index}.pdf",
+                "document_ids": [f"doc-{index}"],
+            }
+            for index in range(1, 21)
+        ]
+
+        scope = resolve_document_scope("Summarize IELTS Reading Test 20", catalog)
+
+        self.assertEqual(scope.method, "catalog_reference")
+        self.assertEqual(scope.resolved_document_ids, ["doc-20"])
 
     def test_explicit_document_scope_only_limits_allowed_documents(self) -> None:
         catalog = [

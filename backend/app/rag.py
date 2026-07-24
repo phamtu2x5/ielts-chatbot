@@ -2,6 +2,7 @@ import json
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Callable, Dict, List, TypeVar
 
@@ -105,6 +106,8 @@ class LocalVectorStore:
         if not chunks:
             self.last_upsert_timing = {"chunks": 0, "total_seconds": 0.0}
             return 0
+        ingested_at = datetime.now(timezone.utc).isoformat()
+        chunks = [{**chunk, "ingested_at": ingested_at} for chunk in chunks]
         if any(not (chunk.get("retrieval_text") or chunk.get("text")) for chunk in chunks):
             raise ValueError("Every RAG chunk must contain text or retrieval_text.")
 

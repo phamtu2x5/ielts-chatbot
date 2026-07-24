@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .config import settings
+
 
 @dataclass(frozen=True)
 class DocumentScope:
@@ -75,7 +77,16 @@ def resolve_document_scope(
             scored.append((score, entry))
     scored.sort(key=lambda item: item[0], reverse=True)
 
-    if scored and (len(scored) == 1 or scored[0][0] > scored[1][0]):
+    top_score = scored[0][0] if scored else 0.0
+    second_score = scored[1][0] if len(scored) > 1 else 0.0
+    if (
+        scored
+        and top_score >= settings.document_scope_min_match_score
+        and (
+            len(scored) == 1
+            or top_score - second_score >= settings.document_scope_match_margin
+        )
+    ):
         entry = scored[0][1]
         resolved = [
             document_id
@@ -153,7 +164,7 @@ def _filename_match_score(normalized_query: str, source_file: str) -> float:
     stem = normalize_reference(Path(source_file).stem)
     if not stem:
         return 0.0
-    if stem in normalized_query:
+    if f" {stem} " in f" {normalized_query} ":
         return 100.0
     query_sequence = normalized_query.split()
     file_sequence = stem.split()
