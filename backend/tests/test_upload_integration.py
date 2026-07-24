@@ -894,26 +894,6 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             all(len(line) <= main.settings.route_catalog_document_chars for line in document_lines)
         )
 
-    def test_route_catalog_marks_only_documents_attached_in_current_turn(self) -> None:
-        catalog = [
-            {
-                "source_file": "reading.pdf",
-                "document_ids": ["doc-reading"],
-                "document_types": ["ielts_reading"],
-            },
-            {
-                "source_file": "writing.png",
-                "document_ids": ["doc-writing"],
-                "document_types": ["ielts_writing_task_1"],
-            },
-        ]
-
-        context = main.format_route_catalog_context(catalog, ["doc-writing"])
-
-        reading_line, writing_line = context.splitlines()
-        self.assertNotIn("attached_this_turn", reading_line)
-        self.assertIn("attached_this_turn=true", writing_line)
-
     async def test_semantic_gateway_state_does_not_expose_document_references(self) -> None:
         catalog = [
             {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]}

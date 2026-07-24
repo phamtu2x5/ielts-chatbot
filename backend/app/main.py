@@ -164,21 +164,14 @@ def format_document_catalog_context(catalog: list[dict]) -> DocumentCatalogConte
     )
 
 
-def format_route_catalog_context(
-    catalog: list[dict[str, Any]],
-    attached_document_ids: list[str] | None = None,
-) -> str:
+def format_route_catalog_context(catalog: list[dict[str, Any]]) -> str:
     """Build bounded, query-independent document signatures for Patch 0."""
     if not catalog:
         return "Uploaded documents: none"
 
-    attached = set(attached_document_ids or [])
     lines: list[str] = []
     for item in catalog:
         fields = [f"file={item.get('source_file', 'unknown')}"]
-        document_ids = set(item.get("document_ids") or [])
-        if document_ids & attached:
-            fields.append("attached_this_turn=true")
         for label, key in (
             ("document_type", "document_types"),
             ("task_type", "task_types"),
@@ -987,7 +980,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         message,
         req.conversation_history,
         gateway_state_context(req),
-        format_route_catalog_context(full_catalog, req.document_ids),
+        format_route_catalog_context(full_catalog),
     )
     route = gateway_decision.route
     gateway_debug = {"used": True, **gateway_decision.to_debug()}
