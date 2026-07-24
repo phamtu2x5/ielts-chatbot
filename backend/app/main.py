@@ -30,7 +30,9 @@ from .llm import (
     OllamaRequestError,
     RouteGatewayDecision,
     classify_rag_intent,
+    direct_chat_messages,
     direct_answer_prompt,
+    query_ollama_chat,
     query_ollama,
     rag_prompt,
     response_output_contract,
@@ -1010,6 +1012,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 "direct_generation": {
                     "used": True,
                     "response_contract": "adaptive_direct_answer",
+                    "primary_endpoint": "generate",
+                    "fallback_endpoint": "chat",
+                    "fallback_used": False,
                 },
                 "retrieval": {"skipped": True, "final_context": []},
                 "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
@@ -1635,13 +1640,63 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 has_token = True
                 yield stream_event("token", token=token)
             if not has_token:
-                logger.warning("Ollama stream completed without visible tokens; retrying with non-stream request")
-                fallback_answer = await query_ollama(
-                    prepared.prompt or "",
-                    temperature=temperature,
+                direct_fallback = (
+                    prepared.query_intent == "direct" and settings.ollama_chat_fallback
                 )
+                fallback_endpoint = "chat" if direct_fallback else "generate"
+                logger.warning(
+                    "Ollama stream completed without visible tokens; retrying via %s endpoint",
+                    fallback_endpoint,
+                )
+                generation_debug = prepared.debug.setdefault("direct_generation", {})
+                try:
+                    if direct_fallback:
+                        fallback_answer = await query_ollama_chat(
+                            direct_chat_messages(req.message, req.conversation_history),
+                            temperature=temperature,
+                        )
+                    else:
+                        fallback_answer = await query_ollama(
+                            prepared.prompt or "",
+                            temperature=temperature,
+                        )
+                except Exception as exc:
+                    generation_debug.update(
+                        {
+                            "fallback_used": True,
+                            "fallback_reason": "empty_stream",
+                            "fallback_endpoint": fallback_endpoint,
+                            "fallback_status": "failed",
+                            "fallback_error": (
+                                exc.kind if isinstance(exc, OllamaRequestError) else type(exc).__name__
+                            ),
+                        }
+                    )
+                    yield stream_event(
+                        "metadata",
+                        route_used=prepared.route_used,
+                        sources=prepared.sources,
+                        debug=prepared.debug,
+                        conversation_state=conversation_state_for_result(req, prepared).model_dump(),
+                    )
+                    raise
                 if not fallback_answer.strip():
                     fallback_answer = generation_fallback(prepared)
+                generation_debug.update(
+                    {
+                        "fallback_used": True,
+                        "fallback_reason": "empty_stream",
+                        "fallback_endpoint": fallback_endpoint,
+                        "fallback_status": "succeeded",
+                    }
+                )
+                yield stream_event(
+                    "metadata",
+                    route_used=prepared.route_used,
+                    sources=prepared.sources,
+                    debug=prepared.debug,
+                    conversation_state=conversation_state_for_result(req, prepared).model_dump(),
+                )
                 yield stream_event("token", token=fallback_answer)
             yield stream_event("done")
         except Exception as exc:

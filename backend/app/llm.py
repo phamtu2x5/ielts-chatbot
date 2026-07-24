@@ -12,6 +12,7 @@ from .schemas import ChatMessage
 
 
 OLLAMA_API_URL = settings.ollama_api_url
+OLLAMA_CHAT_API_URL = settings.ollama_chat_api_url
 OLLAMA_MODEL = settings.ollama_model
 OLLAMA_NUM_PREDICT = settings.ollama_num_predict
 ROUTING_INTENTS = (
@@ -222,9 +223,9 @@ class OllamaRequestError(RuntimeError):
         }
 
 
-def format_history(history: Optional[List[ChatMessage]]) -> str:
+def _selected_history(history: Optional[List[ChatMessage]]) -> list[ChatMessage]:
     if not history:
-        return ""
+        return []
 
     selected: list[ChatMessage] = []
     total_chars = 0
@@ -234,8 +235,12 @@ def format_history(history: Optional[List[ChatMessage]]) -> str:
             break
         selected.append(msg)
         total_chars += length
+    return list(reversed(selected))
+
+
+def format_history(history: Optional[List[ChatMessage]]) -> str:
     lines = []
-    for msg in reversed(selected):
+    for msg in _selected_history(history):
         role = "User" if msg.role == "user" else "Assistant"
         lines.append(f"{role}: {msg.content}")
     return "\n".join(lines)
@@ -563,6 +568,22 @@ def _ollama_payload(
     return payload
 
 
+def _ollama_chat_payload(
+    messages: list[dict[str, str]],
+    temperature: float,
+    num_predict: Optional[int],
+) -> dict:
+    payload = _ollama_payload(
+        "",
+        stream=False,
+        temperature=temperature,
+        num_predict=num_predict,
+    )
+    payload.pop("prompt")
+    payload["messages"] = messages
+    return payload
+
+
 async def query_ollama(
     prompt: str,
     temperature: float = 0.7,
@@ -644,6 +665,51 @@ async def query_ollama(
             )
 
     raise OllamaRequestError("empty_response", "Ollama returned no response.", attempts=attempt_limit)
+
+
+async def query_ollama_chat(
+    messages: list[dict[str, str]],
+    temperature: float = 0.7,
+    num_predict: Optional[int] = None,
+) -> str:
+    payload = _ollama_chat_payload(messages, temperature, num_predict)
+    try:
+        async with httpx.AsyncClient(timeout=settings.ollama_timeout_seconds) as client:
+            response = await client.post(OLLAMA_CHAT_API_URL, json=payload)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        raise OllamaRequestError(
+            "http_status",
+            f"Ollama chat returned HTTP {exc.response.status_code}.",
+            status_code=exc.response.status_code,
+            response_body=exc.response.text[:500] or None,
+        ) from exc
+    except httpx.RequestError as exc:
+        raise OllamaRequestError("transport", f"{type(exc).__name__}: {exc}") from exc
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise OllamaRequestError(
+            "invalid_json",
+            f"Ollama chat returned invalid JSON: {exc}",
+            response_body=response.text[:500] or None,
+        ) from exc
+
+    raw_text = data.get("message", {}).get("content") or ""
+    visible_text = clean_response(raw_text)
+    if not visible_text:
+        raise OllamaRequestError(
+            "empty_response",
+            "Ollama chat returned an empty visible response.",
+            metadata={
+                "response_keys": sorted(data.keys()),
+                "done": data.get("done"),
+                "done_reason": data.get("done_reason"),
+                "prompt_eval_count": data.get("prompt_eval_count"),
+                "eval_count": data.get("eval_count"),
+                "response_length": len(raw_text),
+            },
+        )
+    return visible_text
 
 
 async def stream_ollama(
@@ -846,12 +912,8 @@ async def classify_chat_route(
     )
 
 
-def direct_answer_prompt(
-    message: str,
-    history: Optional[List[ChatMessage]] = None,
-) -> str:
-    history_text = format_history(history)
-    parts = [
+def direct_answer_instructions() -> list[str]:
+    return [
         ASSISTANT_STYLE,
         "Answer this request from general knowledge and conversation without using uploaded-document content.",
         "Be concise in wording, but complete in substance. Do not shorten an answer by omitting actionable detail.",
@@ -867,10 +929,31 @@ def direct_answer_prompt(
         "Do not refer to uploaded files, ask the user to choose a document, or invent personal details.",
         "If important personal information is missing, make reasonable assumptions and label them briefly instead of refusing to help.",
     ]
+
+
+def direct_answer_prompt(
+    message: str,
+    history: Optional[List[ChatMessage]] = None,
+) -> str:
+    history_text = format_history(history)
+    parts = direct_answer_instructions()
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Current user message:\n{message}")
     return "\n\n".join(parts)
+
+
+def direct_chat_messages(
+    message: str,
+    history: Optional[List[ChatMessage]] = None,
+) -> list[dict[str, str]]:
+    messages = [{"role": "system", "content": "\n\n".join(direct_answer_instructions())}]
+    messages.extend(
+        {"role": item.role, "content": item.content}
+        for item in _selected_history(history)
+    )
+    messages.append({"role": "user", "content": message})
+    return messages
 
 
 def intent_classifier_prompt(

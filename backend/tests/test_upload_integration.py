@@ -309,6 +309,79 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         prepare.assert_awaited_once()
         self.assertEqual(prepare.await_args.kwargs, {})
 
+    async def test_empty_direct_stream_falls_back_to_chat_api(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct generate prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+
+        async def empty_stream(*args, **kwargs):
+            if False:
+                yield ""
+
+        chat_fallback = AsyncMock(return_value="Chào bạn.")
+        generate_fallback = AsyncMock(return_value="wrong endpoint")
+        request = main.ChatRequest(
+            message="xin chào",
+            conversation_history=[{"role": "user", "content": "hi"}],
+        )
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "stream_ollama", empty_stream),
+            patch.object(main, "query_ollama_chat", chat_fallback),
+            patch.object(main, "query_ollama", generate_fallback),
+        ):
+            response = await main.chat_stream(request)
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        self.assertEqual(
+            [event["token"] for event in events if event["type"] == "token"],
+            ["Chào bạn."],
+        )
+        chat_fallback.assert_awaited_once()
+        generate_fallback.assert_not_awaited()
+        messages = chat_fallback.await_args.args[0]
+        self.assertEqual(messages[-1], {"role": "user", "content": "xin chào"})
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        self.assertEqual(metadata["debug"]["direct_generation"]["fallback_endpoint"], "chat")
+        self.assertEqual(metadata["debug"]["direct_generation"]["fallback_status"], "succeeded")
+
+    async def test_empty_rag_stream_keeps_generate_fallback(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded RAG prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={},
+            query_intent="semantic_qa",
+        )
+
+        async def empty_stream(*args, **kwargs):
+            if False:
+                yield ""
+
+        chat_fallback = AsyncMock(return_value="wrong endpoint")
+        generate_fallback = AsyncMock(return_value="Grounded answer.")
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "stream_ollama", empty_stream),
+            patch.object(main, "query_ollama_chat", chat_fallback),
+            patch.object(main, "query_ollama", generate_fallback),
+        ):
+            response = await main.chat_stream(main.ChatRequest(message="Passage nói gì?"))
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        self.assertEqual(
+            [event["token"] for event in events if event["type"] == "token"],
+            ["Grounded answer."],
+        )
+        generate_fallback.assert_awaited_once_with("grounded RAG prompt", temperature=0.2)
+        chat_fallback.assert_not_awaited()
+
     async def test_direct_turn_preserves_previous_rag_affinity(self) -> None:
         prepared = main.ChatPreparation(
             prompt=None,

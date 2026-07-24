@@ -36,6 +36,12 @@ class AppSettings:
     ollama_api_url: str = field(
         default_factory=lambda: os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/generate")
     )
+    ollama_chat_api_url: str = field(
+        default_factory=lambda: os.getenv("OLLAMA_CHAT_API_URL", "http://127.0.0.1:11434/api/chat")
+    )
+    ollama_chat_fallback: bool = field(
+        default_factory=lambda: _env_bool("OLLAMA_CHAT_FALLBACK", True)
+    )
     ollama_model: str = field(
         default_factory=lambda: os.getenv("OLLAMA_MODEL", "hf.co/Zkare/Chatbot_Ielts_Assistant_v2:Q4_K_M")
     )

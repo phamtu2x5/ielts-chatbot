@@ -1048,6 +1048,50 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(payload["think"], False)
         self.assertNotIn("think", payload["options"])
 
+    def test_chat_payload_uses_role_messages_without_prompt(self) -> None:
+        messages = [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "Hello"},
+        ]
+
+        payload = llm._ollama_chat_payload(messages, 0.2, 64)
+
+        self.assertEqual(payload["messages"], messages)
+        self.assertNotIn("prompt", payload)
+        self.assertFalse(payload["stream"])
+        self.assertEqual(payload["options"]["num_predict"], 64)
+
+    async def test_chat_request_reads_assistant_message_content(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/api/chat")
+            return httpx.Response(
+                200,
+                json={"message": {"role": "assistant", "content": "Xin chào bạn."}},
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(llm.httpx, "AsyncClient", return_value=client):
+            answer = await llm.query_ollama_chat(
+                [{"role": "user", "content": "xin chào"}],
+                temperature=0.0,
+            )
+
+        self.assertEqual(answer, "Xin chào bạn.")
+
+    def test_direct_chat_messages_preserve_roles_and_current_request(self) -> None:
+        messages = llm.direct_chat_messages(
+            "Chi tiết hơn",
+            [
+                ChatMessage(role="user", content="Cho tôi ba tips."),
+                ChatMessage(role="assistant", content="Ba tips đây."),
+            ],
+        )
+
+        self.assertEqual([item["role"] for item in messages], ["system", "user", "assistant", "user"])
+        self.assertEqual(messages[-1]["content"], "Chi tiết hơn")
+        self.assertIn("general knowledge and conversation", messages[0]["content"])
+
     async def test_non_stream_request_does_not_expose_thinking_as_answer(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"response": "", "thinking": "private reasoning"}, request=request)
