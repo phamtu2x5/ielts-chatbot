@@ -308,14 +308,23 @@ function App() {
   const [pendingFiles, setPendingFiles] = useState([]);
   const [conversationState, setConversationState] = useState(null);
   const fileInputRef = useRef(null);
-  const messagesEndRef = useRef(null);
+  const messagesRef = useRef(null);
+  const shouldAutoScrollRef = useRef(true);
   const hasStreamingAssistant = messages.some((message) => message.streaming);
 
   const history = useMemo(() => completedConversationHistory(messages), [messages]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const container = messagesRef.current;
+    if (!container || !shouldAutoScrollRef.current) return;
+    container.scrollTop = container.scrollHeight;
   }, [messages, isSending]);
+
+  function handleMessagesScroll(event) {
+    const container = event.currentTarget;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    shouldAutoScrollRef.current = distanceFromBottom < 80;
+  }
 
   function exportDebug(message, index) {
     const previousQuestion = [...messages.slice(0, index)]
@@ -412,6 +421,7 @@ function App() {
     setInput("");
     setPendingFiles([]);
     setIsSending(true);
+    shouldAutoScrollRef.current = true;
     setMessages((current) => [
       ...current,
       {
@@ -682,7 +692,7 @@ function App() {
           </div>
         </header>
 
-        <div className="messages">
+        <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.map((message, index) => (
             <article key={message.id || `${message.role}-${index}`} className={`message ${message.role}`}>
               <div className="avatar">{message.role === "user" ? <UserRound size={17} /> : <Sparkles size={17} />}</div>
@@ -726,7 +736,6 @@ function App() {
               </div>
             </article>
           )}
-          <div ref={messagesEndRef} />
         </div>
 
         <form className="composer" onSubmit={sendMessage}>

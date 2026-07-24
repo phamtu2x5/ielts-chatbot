@@ -141,11 +141,13 @@ p {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
   padding: 22px 22px 28px;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  scroll-behavior: smooth;
 }
 
 .message {
@@ -608,8 +610,8 @@ textarea:focus {
   }
 
   .chatPanel {
-    height: 100vh;
-    min-height: 100vh;
+    height: 100dvh;
+    min-height: 100dvh;
     border: 0;
     border-radius: 0;
   }
