@@ -48,6 +48,15 @@ class AppSettings:
     ollama_classifier_seed: int = field(
         default_factory=lambda: int(os.getenv("OLLAMA_CLASSIFIER_SEED", "42"))
     )
+    route_history_message_chars: int = field(
+        default_factory=lambda: int(os.getenv("ROUTE_HISTORY_MESSAGE_CHARS", "600"))
+    )
+    route_catalog_chars: int = field(
+        default_factory=lambda: int(os.getenv("ROUTE_CATALOG_CHARS", "3000"))
+    )
+    route_catalog_document_chars: int = field(
+        default_factory=lambda: int(os.getenv("ROUTE_CATALOG_DOCUMENT_CHARS", "360"))
+    )
 
     embedding_model_name: str = field(
         default_factory=lambda: os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
@@ -72,6 +81,12 @@ class AppSettings:
             raise ValueError("OLLAMA_NUM_PREDICT and OLLAMA_NUM_CTX must be positive.")
         if self.ollama_timeout_seconds <= 0:
             raise ValueError("OLLAMA_TIMEOUT_SECONDS must be positive.")
+        if (
+            self.route_history_message_chars <= 0
+            or self.route_catalog_chars <= 0
+            or self.route_catalog_document_chars <= 0
+        ):
+            raise ValueError("Route context limits must be positive.")
         if (
             self.rag_top_k <= 0
             or self.rag_probe_top_k <= 0

@@ -784,7 +784,8 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Old document answer", prompt)
         self.assertIn("User: Latest user turn", prompt)
         self.assertIn("Assistant: Latest assistant turn", prompt)
-        self.assertIn("Current user message:\nWhy?", prompt)
+        self.assertIn("=== CURRENT REQUEST TO CLASSIFY ===\nWhy?", prompt)
+        self.assertTrue(prompt.rstrip().endswith("Earlier context is supporting context, not the request itself."))
 
     def test_route_classifier_prompt_bounds_long_recent_messages(self) -> None:
         history = [
@@ -794,11 +795,23 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
         prompt = llm.route_classifier_prompt("Hello", history)
         history_text = prompt.split("Previous conversation:\n", 1)[1].split(
-            "\n\nCurrent user message:", 1
+            "\n\n=== CURRENT REQUEST TO CLASSIFY ===", 1
         )[0]
 
-        self.assertLessEqual(len(history_text), 2_430)
+        self.assertLessEqual(len(history_text), 1_230)
         self.assertIn("\n...\n", history_text)
+
+    def test_route_classifier_prompt_includes_metadata_and_highlights_request(self) -> None:
+        document_context = "- file=reading.pdf; sections=Urban transport"
+
+        prompt = llm.route_classifier_prompt(
+            "Translate Questions 1-4.",
+            document_context=document_context,
+        )
+
+        self.assertIn("Uploaded material signatures (metadata only", prompt)
+        self.assertIn("file=reading.pdf", prompt)
+        self.assertIn("=== CURRENT REQUEST TO CLASSIFY ===\nTranslate Questions 1-4.", prompt)
 
     def test_route_classifier_uses_document_dependency_not_topic_domain(self) -> None:
         prompt = llm.route_classifier_prompt("Explain a common technology concept.")

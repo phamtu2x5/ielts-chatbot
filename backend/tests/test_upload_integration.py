@@ -808,7 +808,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(prepared.static_response)
         self.assertIn("Give me three IELTS Speaking tips.", prepared.prompt)
 
-    async def test_semantic_gateway_does_not_receive_catalog_or_retrieval_snippets(self) -> None:
+    async def test_semantic_gateway_receives_bounded_catalog_but_not_retrieval_snippets(self) -> None:
         catalog = [
             {
                 "source_file": "reading.pdf",
@@ -849,8 +849,13 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 main.ChatRequest(message="Why did urban transport change?", document_ids=["doc-1"])
             )
 
-        gateway_context = gateway.await_args.args[2]
-        self.assertEqual(gateway_context, "")
+        state_context = gateway.await_args.args[2]
+        document_context = gateway.await_args.args[3]
+        self.assertEqual(state_context, "")
+        self.assertIn("file=reading.pdf", document_context)
+        self.assertIn("sections=Urban transport", document_context)
+        self.assertNotIn("rail network expanded", document_context)
+        self.assertLessEqual(len(document_context), main.settings.route_catalog_chars)
         self.assertEqual(prepared.debug["document_resolution"]["resolved_document_ids"], ["doc-1"])
         self.assertEqual(store.routing_candidates, [
             {
@@ -866,6 +871,28 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 },
             }
         ])
+
+    def test_route_catalog_context_is_bounded_per_document_and_in_total(self) -> None:
+        catalog = [
+            {
+                "source_file": f"reading-{index}.pdf",
+                "document_ids": [f"doc-{index}"],
+                "document_types": ["ielts_reading"],
+                "section_titles": ["A" * 1_000],
+                "unit_types": ["passage", "question_group", "question"],
+            }
+            for index in range(20)
+        ]
+
+        context = main.format_route_catalog_context(catalog)
+
+        self.assertLessEqual(len(context), main.settings.route_catalog_chars)
+        self.assertIn("file=reading-0.pdf", context)
+        document_lines = [line for line in context.splitlines() if line.startswith("- file=")]
+        self.assertTrue(document_lines)
+        self.assertTrue(
+            all(len(line) <= main.settings.route_catalog_document_chars for line in document_lines)
+        )
 
     async def test_semantic_gateway_state_does_not_expose_document_references(self) -> None:
         catalog = [

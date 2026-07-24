@@ -247,7 +247,7 @@ def format_route_history(history: Optional[List[ChatMessage]]) -> str:
         return ""
 
     selected = history[-2:]
-    per_message_limit = 1_200
+    per_message_limit = settings.route_history_message_chars
     lines: list[str] = []
     for msg in selected:
         content = msg.content.strip()
@@ -717,6 +717,7 @@ def route_classifier_prompt(
     message: str,
     history: Optional[List[ChatMessage]] = None,
     conversation_state: str = "",
+    document_context: str = "",
     compact: bool = False,
 ) -> str:
     history_text = format_route_history(history)
@@ -742,7 +743,17 @@ def route_classifier_prompt(
         parts.append(f"Conversation state:\n{conversation_state}")
     if history_text:
         parts.append(f"Previous conversation:\n{history_text}")
-    parts.append(f"Current user message:\n{message}")
+    if document_context:
+        parts.append(
+            "Uploaded material signatures (metadata only; use them only to decide whether files are needed):\n"
+            f"{document_context}"
+        )
+    parts.append(
+        "=== CURRENT REQUEST TO CLASSIFY ===\n"
+        f"{message}\n"
+        "=== END CURRENT REQUEST ===\n"
+        "Classify this current request only. Earlier context is supporting context, not the request itself."
+    )
     return "\n\n".join(parts)
 
 
@@ -784,6 +795,7 @@ async def classify_chat_route(
     message: str,
     history: Optional[List[ChatMessage]] = None,
     conversation_state: str = "",
+    document_context: str = "",
 ) -> RouteGatewayDecision:
     started = time.perf_counter()
     last_raw = ""
@@ -793,6 +805,7 @@ async def classify_chat_route(
             message,
             history,
             conversation_state,
+            document_context,
             compact=attempt == 2,
         )
         try:

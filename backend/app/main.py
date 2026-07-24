@@ -164,6 +164,41 @@ def format_document_catalog_context(catalog: list[dict]) -> DocumentCatalogConte
     )
 
 
+def format_route_catalog_context(catalog: list[dict[str, Any]]) -> str:
+    """Build bounded, query-independent document signatures for Patch 0."""
+    if not catalog:
+        return "Uploaded documents: none"
+
+    lines: list[str] = []
+    for item in catalog:
+        fields = [f"file={item.get('source_file', 'unknown')}"]
+        for label, key in (
+            ("document_type", "document_types"),
+            ("task_type", "task_types"),
+            ("sections", "section_titles"),
+            ("passages", "passage_numbers"),
+            ("units", "unit_types"),
+        ):
+            values = [str(value) for value in item.get(key) or []]
+            if values:
+                fields.append(f"{label}={', '.join(values)}")
+        line = "- " + "; ".join(fields)
+        limit = settings.route_catalog_document_chars
+        if len(line) > limit:
+            line = line[: limit - 3].rstrip() + "..."
+        if lines and len("\n".join([*lines, line])) > settings.route_catalog_chars:
+            break
+        lines.append(line)
+
+    omitted = len(catalog) - len(lines)
+    if omitted > 0:
+        suffix = f"- {omitted} additional uploaded document(s) omitted by the route context limit."
+        available = settings.route_catalog_chars - len("\n".join(lines)) - 1
+        if available > 0:
+            lines.append(suffix[:available])
+    return "\n".join(lines)
+
+
 def evidence_query_for_sources(sources: list[dict[str, Any]], fallback: str) -> str:
     question_sources = [
         source
@@ -945,6 +980,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         message,
         req.conversation_history,
         gateway_state_context(req),
+        format_route_catalog_context(full_catalog),
     )
     route = gateway_decision.route
     gateway_debug = {"used": True, **gateway_decision.to_debug()}
