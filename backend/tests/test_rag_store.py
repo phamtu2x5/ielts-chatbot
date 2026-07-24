@@ -490,6 +490,81 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertEqual(catalog[0]["section_titles"], ["A General Passage Title"])
 
+    def test_document_catalog_exposes_visual_target_metadata(self) -> None:
+        store = FakeVectorStore()
+        prompt = self._chunk(
+            "writing-prompt",
+            "writing.png",
+            "The table shows internet access and smartphone ownership in three countries.",
+        )
+        prompt["document_id"] = "doc-writing"
+        prompt["metadata"] = {
+            "mime_type": "image/png",
+            "unit_type": "writing_prompt",
+            "document_type": "ielts_writing_task_1",
+            "task_type": "academic_task_1_table",
+        }
+        table = self._chunk("writing-table", "writing.png", "Structured table")
+        table["document_id"] = "doc-writing"
+        table["metadata"] = {
+            "mime_type": "image/png",
+            "unit_type": "writing_table",
+            "document_type": "ielts_writing_task_1",
+            "task_type": "academic_task_1_table",
+            "table": {
+                "type": "table",
+                "columns": ["Country", "Internet Access 2024", "Smartphone Ownership 2024"],
+                "rows": [],
+            },
+        }
+        store.upsert([prompt, table], "writing.png")
+
+        catalog = store.document_catalog()
+
+        self.assertEqual(catalog[0]["visual_types"], ["table"])
+        self.assertEqual(
+            catalog[0]["table_columns"],
+            ["Country", "Internet Access 2024", "Smartphone Ownership 2024"],
+        )
+        self.assertTrue(
+            any("smartphone ownership" in item.lower() for item in catalog[0]["target_descriptors"])
+        )
+
+    def test_document_catalog_uses_sample_topic_when_writing_task_has_no_title(self) -> None:
+        store = FakeVectorStore()
+        task = self._chunk("writing-task", "writing.pdf", "IELTS Writing Task 1 (line chart).")
+        task["document_id"] = "doc-writing"
+        task["metadata"] = {
+            "unit_type": "writing_task",
+            "parent_id": "writing-task-1",
+            "document_type": "ielts_writing_collection",
+            "visual_type": "line_chart",
+        }
+        sample = self._chunk(
+            "sample-answer",
+            "writing.pdf",
+            "The line chart compares three categories in Harbor City from 2010 to 2020. "
+            "The remaining answer discusses the trends.",
+        )
+        sample["document_id"] = "doc-writing"
+        sample["metadata"] = {
+            "unit_type": "sample_answer",
+            "parent_id": "writing-task-1",
+            "document_type": "ielts_writing_collection",
+            "visual_type": "line_chart",
+        }
+        store.upsert([task, sample], "writing.pdf")
+
+        catalog = store.document_catalog()
+
+        self.assertEqual(catalog[0]["visual_types"], ["line_chart"])
+        self.assertTrue(
+            any("Harbor City" in item for item in catalog[0]["target_descriptors"])
+        )
+        self.assertFalse(
+            any("remaining answer" in item.lower() for item in catalog[0]["target_descriptors"])
+        )
+
     def test_structured_lookup_filters_duplicate_question_ranges_by_document(self) -> None:
         store = FakeVectorStore()
         first = self._chunk("doc-a-questions", "a.pdf", "Questions 1-4")
@@ -974,6 +1049,7 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("weak context, not a required scope", prompt)
+        self.assertIn("For ALL or CLARIFY, return an empty document_refs array", prompt)
         self.assertIn("Previous successful RAG document candidates: D1", prompt)
         self.assertIn("Tóm tắt Test 2", prompt)
         self.assertIn("Current user message:\nPassage 2 nói gì?", prompt)

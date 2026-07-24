@@ -63,6 +63,15 @@ class AppSettings:
     route_catalog_document_chars: int = field(
         default_factory=lambda: int(os.getenv("ROUTE_CATALOG_DOCUMENT_CHARS", "360"))
     )
+    target_catalog_chars: int = field(
+        default_factory=lambda: int(os.getenv("TARGET_CATALOG_CHARS", "6000"))
+    )
+    target_catalog_document_chars: int = field(
+        default_factory=lambda: int(os.getenv("TARGET_CATALOG_DOCUMENT_CHARS", "900"))
+    )
+    target_descriptor_chars: int = field(
+        default_factory=lambda: int(os.getenv("TARGET_DESCRIPTOR_CHARS", "220"))
+    )
 
     embedding_model_name: str = field(
         default_factory=lambda: os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-m3")
@@ -91,8 +100,11 @@ class AppSettings:
             self.route_history_message_chars <= 0
             or self.route_catalog_chars <= 0
             or self.route_catalog_document_chars <= 0
+            or self.target_catalog_chars <= 0
+            or self.target_catalog_document_chars <= 0
+            or self.target_descriptor_chars <= 0
         ):
-            raise ValueError("Route context limits must be positive.")
+            raise ValueError("Route and target context limits must be positive.")
         if (
             self.rag_top_k <= 0
             or self.rag_probe_top_k <= 0

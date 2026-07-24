@@ -149,14 +149,29 @@ def format_document_catalog_context(catalog: list[dict]) -> DocumentCatalogConte
             if not document_id:
                 continue
             reference = f"D{index}"
+            fields = [f"- {reference}: {item.get('source_file', 'unknown')}"]
+            for label, key in (
+                ("mime_types", "mime_types"),
+                ("document_types", "document_types"),
+                ("task_types", "task_types"),
+                ("visual_types", "visual_types"),
+                ("section_titles", "section_titles"),
+                ("target_descriptors", "target_descriptors"),
+                ("table_columns", "table_columns"),
+                ("unit_types", "unit_types"),
+            ):
+                values = [str(value) for value in item.get(key) or []]
+                if not values:
+                    continue
+                field = f"{label}={'; '.join(values)}"
+                candidate = " | ".join([*fields, field])
+                if len(candidate) <= settings.target_catalog_document_chars:
+                    fields.append(field)
+            line = " | ".join(fields)
+            if len("\n".join([*lines, line])) > settings.target_catalog_chars:
+                break
             document_refs[reference] = document_id
-            lines.append(
-                f"- {reference}: {item.get('source_file', 'unknown')} | "
-                f"document_types={item.get('document_types') or []} | "
-                f"task_types={item.get('task_types') or []} | "
-                f"unit_types={item.get('unit_types') or []} | "
-                f"section_titles={item.get('section_titles') or []}"
-            )
+            lines.append(line)
     else:
         lines.append("Available uploaded documents: none")
 

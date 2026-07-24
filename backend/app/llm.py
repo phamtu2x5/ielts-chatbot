@@ -1105,8 +1105,12 @@ def target_resolver_prompt(
     parts = [
         "Resolve which uploaded document the current request targets using catalog metadata and conversation context.",
         'Return JSON only with action "selected", "all", or "clarify" and a document_refs array.',
+        "For SELECTED, return the matching document refs. For ALL or CLARIFY, return an empty document_refs array.",
         "Use ALL only for an explicit request about the whole available or attached collection.",
-        "Use CLARIFY when multiple documents remain genuinely plausible.",
+        "Select a document when one catalog entry uniquely matches the requested file, modality, document/task type, section/topic descriptor, visual type, or table columns.",
+        "A negative question still targets a document when the user clearly names its modality or type; whether the requested topic is absent is decided after document selection.",
+        "Do not let a possibly absent topic override a clear target such as an image, PDF, table, or named document.",
+        "Use CLARIFY only when multiple documents remain genuinely plausible after considering all catalog fields.",
         "Previous-document candidates are weak context, not a required scope. Reuse one only when the current message is a coherent follow-up to that successful document exchange.",
         "A current file name, title, or conflicting target overrides previous-document candidates.",
         f"Catalog:\n{catalog_context}",

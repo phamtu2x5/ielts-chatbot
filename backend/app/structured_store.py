@@ -1,6 +1,27 @@
 import re
 from typing import Callable, Dict, List
 
+from .config import settings
+
+
+def _append_unique(values: list[str], value: object) -> None:
+    normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+    if normalized and normalized.casefold() not in {item.casefold() for item in values}:
+        values.append(normalized)
+
+
+def _target_descriptor(text: object, sentence_count: int = 1) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not normalized:
+        return ""
+    sentence_ends = list(re.finditer(r"(?<=[.!?])(?:\s|$)", normalized))
+    sentence_end = sentence_ends[min(sentence_count, len(sentence_ends)) - 1] if sentence_ends else None
+    descriptor = normalized[: sentence_end.start()].strip() if sentence_end else normalized
+    limit = settings.target_descriptor_chars
+    if len(descriptor) > limit:
+        descriptor = descriptor[: limit - 3].rstrip() + "..."
+    return descriptor
+
 
 class StructuredDocumentStore:
     """Schema-first lookup over indexed document chunks.
@@ -137,6 +158,11 @@ class StructuredDocumentStore:
                     "document_types": set(),
                     "task_types": set(),
                     "section_titles": set(),
+                    "visual_types": set(),
+                    "table_columns": [],
+                    "target_descriptors": [],
+                    "untitled_writing_parents": set(),
+                    "sample_descriptors": {},
                 },
             )
             entry["chunks"] += 1
@@ -158,9 +184,41 @@ class StructuredDocumentStore:
                 title = metadata.get(title_key)
                 if title:
                     entry["section_titles"].add(str(title))
+            visual_type = metadata.get("visual_type")
+            if visual_type:
+                entry["visual_types"].add(str(visual_type))
+            table = metadata.get("table")
+            if isinstance(table, dict):
+                table_type = table.get("type")
+                if table_type:
+                    entry["visual_types"].add(str(table_type))
+                for column in table.get("columns") or []:
+                    _append_unique(entry["table_columns"], column)
 
-        return [
-            {
+            unit_type = metadata.get("unit_type")
+            parent_id = str(metadata.get("parent_id") or "")
+            descriptor = _target_descriptor(
+                doc.get("display_text") or doc.get("text"),
+                sentence_count=2 if unit_type == "writing_prompt" else 1,
+            )
+            if unit_type == "writing_prompt" and descriptor:
+                _append_unique(entry["target_descriptors"], descriptor)
+            elif unit_type == "writing_task" and not metadata.get("task_title"):
+                if descriptor:
+                    _append_unique(entry["target_descriptors"], descriptor)
+                if parent_id:
+                    entry["untitled_writing_parents"].add(parent_id)
+            elif unit_type == "sample_answer" and not metadata.get("task_title") and parent_id:
+                if descriptor:
+                    entry["sample_descriptors"].setdefault(parent_id, descriptor)
+
+        results = []
+        for item in catalog.values():
+            for parent_id in item["untitled_writing_parents"]:
+                descriptor = item["sample_descriptors"].get(parent_id)
+                if descriptor:
+                    _append_unique(item["target_descriptors"], descriptor)
+            results.append({
                 "source_file": item["source_file"],
                 "chunks": item["chunks"],
                 "pages": sorted(item["pages"]),
@@ -171,9 +229,11 @@ class StructuredDocumentStore:
                 "document_types": sorted(item["document_types"]),
                 "task_types": sorted(item["task_types"]),
                 "section_titles": sorted(item["section_titles"]),
-            }
-            for item in catalog.values()
-        ]
+                "visual_types": sorted(item["visual_types"]),
+                "table_columns": item["table_columns"],
+                "target_descriptors": item["target_descriptors"],
+            })
+        return results
 
     def question_context_for_sources(
         self,

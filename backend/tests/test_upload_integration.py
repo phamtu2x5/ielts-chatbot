@@ -950,6 +950,37 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             }
         ])
 
+    def test_target_catalog_context_includes_bounded_visual_descriptors(self) -> None:
+        context = main.format_document_catalog_context(
+            [
+                {
+                    "source_file": "writing.png",
+                    "document_ids": ["doc-writing"],
+                    "mime_types": ["image/png"],
+                    "document_types": ["ielts_writing_task_1"],
+                    "task_types": ["academic_task_1_table"],
+                    "unit_types": ["writing_prompt", "writing_table"],
+                    "section_titles": [],
+                    "visual_types": ["table"],
+                    "table_columns": [
+                        "Country",
+                        "Internet Access 2024",
+                        "Smartphone Ownership 2024",
+                    ],
+                    "target_descriptors": [
+                        "The table shows internet access and smartphone ownership in three countries."
+                    ],
+                }
+            ]
+        )
+
+        self.assertEqual(context.document_refs, {"D1": "doc-writing"})
+        self.assertIn("mime_types=image/png", context.text)
+        self.assertIn("visual_types=table", context.text)
+        self.assertIn("Smartphone Ownership 2024", context.text)
+        self.assertIn("internet access and smartphone ownership", context.text)
+        self.assertLessEqual(len(context.text), main.settings.target_catalog_chars)
+
     def test_route_catalog_context_is_bounded_per_document_and_in_total(self) -> None:
         catalog = [
             {
