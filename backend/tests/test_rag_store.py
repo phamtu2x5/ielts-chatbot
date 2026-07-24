@@ -812,6 +812,8 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Uploaded material signatures (metadata only", prompt)
         self.assertIn("file=reading.pdf", prompt)
         self.assertIn("=== CURRENT REQUEST TO CLASSIFY ===\nTranslate Questions 1-4.", prompt)
+        self.assertIn("showing, translating, extracting, summarizing", prompt)
+        self.assertIn("availability is not proof", prompt)
 
     def test_route_classifier_uses_document_dependency_not_topic_domain(self) -> None:
         prompt = llm.route_classifier_prompt("Explain a common technology concept.")
@@ -824,7 +826,7 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("if the uploaded files were unavailable", prompt)
         self.assertIn("Do not choose rag merely because the topic is outside IELTS", prompt)
         self.assertIn("regardless of topic", compact_prompt)
-        self.assertIn("only when uploaded material is necessary", compact_prompt)
+        self.assertIn("Transforming or expanding a preceding direct answer stays direct", compact_prompt)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')

@@ -724,18 +724,24 @@ def route_classifier_prompt(
     if compact:
         parts = [
             "Classify whether answering this request requires reading uploaded document content.",
-            "Choose direct when it can be answered from general knowledge or conversation alone, regardless of topic.",
-            "Choose rag only when uploaded material is necessary to answer correctly.",
+            "Decide where the information needed for the answer lives.",
+            "Choose rag when the request needs wording, facts, data, questions, images, tables, or evidence from uploaded material, including translation, extraction, summarization, answering, or checking whether material contains something.",
+            "Choose direct when it can be answered from general knowledge or the preceding direct conversation alone, regardless of topic.",
+            "Transforming or expanding a preceding direct answer stays direct; continuing a document-grounded answer stays rag.",
             'Return JSON only: {"route":"direct"} or {"route":"rag"}.',
         ]
     else:
         parts = [
             "You are the semantic direct-or-document classifier for an IELTS chatbot.",
-            "Choose rag only when answering correctly requires reading facts, wording, data, evidence, or other content from uploaded material.",
+            "First decide where the information needed to answer the CURRENT REQUEST lives: in uploaded material, or in general knowledge/the conversation.",
+            "Choose rag when answering correctly requires reading wording, facts, data, questions, answer options, images, tables, diagrams, evidence, or any other content from uploaded material.",
+            "Operations on uploaded content also require rag: showing, translating, extracting, summarizing, explaining, solving, comparing, calculating from, writing from, or checking whether the material contains something.",
+            "A named file, passage, question range, table, image, or phrase such as 'this document/material/image' is strong evidence for rag when the requested output depends on its contents.",
             "Use this counterfactual test: if the uploaded files were unavailable, could a general assistant still answer the request correctly from general knowledge and conversation alone? If yes, choose direct.",
             "Choose direct for general-knowledge questions on any topic, general IELTS advice, greetings, grammar help, study plans, and ordinary conversation.",
             "Do not choose rag merely because the topic is outside IELTS, unfamiliar, or uploaded documents happen to exist.",
-            "A follow-up that depends on the preceding document-grounded exchange requires uploaded material.",
+            "For follow-ups, use the prior successful route and content: expanding, reformatting, or applying a preceding direct answer remains direct unless the current request explicitly asks to use uploaded material; a follow-up that depends on a preceding document-grounded answer remains rag.",
+            "The uploaded catalog only describes what is available. Its presence alone is never a reason to choose rag.",
             "Do not answer the user, classify intent, choose a document, or explain the decision.",
             'Return one JSON object only: {"route":"direct"} or {"route":"rag"}.',
         ]
@@ -745,7 +751,7 @@ def route_classifier_prompt(
         parts.append(f"Previous conversation:\n{history_text}")
     if document_context:
         parts.append(
-            "Uploaded material signatures (metadata only; use them only to decide whether files are needed):\n"
+            "Uploaded material signatures (metadata only; availability is not proof that the request needs them):\n"
             f"{document_context}"
         )
     parts.append(
