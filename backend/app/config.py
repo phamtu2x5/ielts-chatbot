@@ -64,10 +64,10 @@ class AppSettings:
         default_factory=lambda: int(os.getenv("ROUTE_CATALOG_DOCUMENT_CHARS", "360"))
     )
     target_catalog_chars: int = field(
-        default_factory=lambda: int(os.getenv("TARGET_CATALOG_CHARS", "6000"))
+        default_factory=lambda: int(os.getenv("TARGET_CATALOG_CHARS", "3000"))
     )
     target_catalog_document_chars: int = field(
-        default_factory=lambda: int(os.getenv("TARGET_CATALOG_DOCUMENT_CHARS", "900"))
+        default_factory=lambda: int(os.getenv("TARGET_CATALOG_DOCUMENT_CHARS", "360"))
     )
     target_descriptor_chars: int = field(
         default_factory=lambda: int(os.getenv("TARGET_DESCRIPTOR_CHARS", "220"))
