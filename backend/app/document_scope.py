@@ -50,6 +50,56 @@ def normalize_reference(value: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", without_marks))
 
 
+def _requested_source_modalities(message: str) -> set[str]:
+    token_sequence = re.findall(
+        r"[\w]+",
+        unicodedata.normalize("NFC", message.casefold()),
+    )
+    tokens = set(token_sequence)
+    modalities: set[str] = set()
+    mentions_vietnamese_image = any(
+        token == "ảnh"
+        and (
+            index + 1 >= len(token_sequence)
+            or token_sequence[index + 1] != "hưởng"
+        )
+        for index, token in enumerate(token_sequence)
+    )
+    if mentions_vietnamese_image or tokens.intersection(
+        {"image", "photo", "picture", "screenshot"}
+    ):
+        modalities.add("image")
+    if "pdf" in tokens:
+        modalities.add("pdf")
+    return modalities
+
+
+def _source_modality_score(message: str, entry: dict[str, Any]) -> float:
+    requested = _requested_source_modalities(message)
+    if not requested:
+        return 0.0
+    mime_types = {
+        str(value).casefold()
+        for value in entry.get("mime_types") or []
+    }
+    suffix = Path(str(entry.get("source_file", ""))).suffix.casefold()
+    available: set[str] = set()
+    if any(value.startswith("image/") for value in mime_types) or suffix in {
+        ".bmp",
+        ".gif",
+        ".jpeg",
+        ".jpg",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".webp",
+    }:
+        available.add("image")
+    if "application/pdf" in mime_types or suffix == ".pdf":
+        available.add("pdf")
+    return 180.0 if requested.intersection(available) else 0.0
+
+
 def resolve_document_scope(
     message: str,
     catalog: list[dict[str, Any]],
@@ -92,7 +142,7 @@ def resolve_document_scope(
     title_weights = _title_token_weights(allowed_entries)
     scored: list[tuple[float, dict[str, Any]]] = []
     for entry in allowed_entries:
-        score = _catalog_match_score(normalized_query, entry, title_weights)
+        score = _catalog_match_score(message, normalized_query, entry, title_weights)
         if score > 0:
             scored.append((score, entry))
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -185,7 +235,7 @@ def _filename_match_score(normalized_query: str, source_file: str) -> float:
     if not stem:
         return 0.0
     if f" {stem} " in f" {normalized_query} ":
-        return 100.0
+        return 240.0
     query_sequence = normalized_query.split()
     file_sequence = stem.split()
     query_terms = set(query_sequence)
@@ -206,7 +256,8 @@ def _filename_match_score(normalized_query: str, source_file: str) -> float:
     if longest_phrase < 3:
         return 0.0
     return (
-        float(len(overlap))
+        160.0
+        + float(len(overlap))
         + len(overlap) / max(1, len(file_terms))
         + longest_phrase * 20.0
     )
@@ -301,12 +352,14 @@ def _longest_contiguous_match(first: list[str], second: list[str]) -> int:
 
 
 def _catalog_match_score(
+    message: str,
     normalized_query: str,
     entry: dict[str, Any],
     title_weights: dict[str, float] | None = None,
 ) -> float:
     return (
-        _filename_match_score(normalized_query, entry.get("source_file", ""))
+        _source_modality_score(message, entry)
+        + _filename_match_score(normalized_query, entry.get("source_file", ""))
         + _section_title_match_score(
             normalized_query,
             entry.get("section_titles") or [],
@@ -389,6 +442,7 @@ def rank_document_candidates(
     }
     for recency_rank, entry in enumerate(catalog):
         matched_fields: list[str] = []
+        modality_score = _source_modality_score(message, entry)
         filename_score = _filename_match_score(
             normalized_query,
             entry.get("source_file", ""),
@@ -398,7 +452,9 @@ def rank_document_candidates(
             entry.get("section_titles") or [],
             title_weights,
         )
-        score = filename_score + title_score
+        score = modality_score + filename_score + title_score
+        if modality_score:
+            matched_fields.append("source_modality")
         if filename_score:
             matched_fields.append("source_file")
         if title_score:

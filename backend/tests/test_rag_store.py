@@ -604,6 +604,85 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertEqual(scope.resolved_document_ids, ["doc-writing"])
 
+    def test_explicit_image_modality_outweighs_generic_writing_metadata(self) -> None:
+        catalog = [
+            {
+                "source_file": "IELTS Task 1 Essay.pdf",
+                "document_ids": ["doc-pdf"],
+                "mime_types": ["application/pdf"],
+                "document_types": ["ielts_writing_collection"],
+                "section_titles": ["IELTS Writing Task 1"],
+            },
+            {
+                "source_file": "writing-table.png",
+                "document_ids": ["doc-image"],
+                "mime_types": ["image/png"],
+                "document_types": ["ielts_writing_task_1"],
+                "visual_types": ["table"],
+            },
+        ]
+
+        scope = resolve_document_scope(
+            "Viết bài Writing Task 1 dựa hoàn toàn trên bảng trong ảnh.",
+            catalog,
+        )
+        ranked = rank_document_candidates(
+            "Ảnh Writing có chứa dữ liệu này không?",
+            catalog,
+            max_candidates=2,
+        )
+
+        self.assertEqual(scope.resolved_document_ids, ["doc-image"])
+        self.assertEqual(ranked[0].entry["document_ids"], ["doc-image"])
+        self.assertIn("source_modality", ranked[0].matched_fields)
+
+    def test_named_reading_file_outweighs_generic_task_section(self) -> None:
+        catalog = [
+            {
+                "source_file": "IZONE _ IELTS READING TEST 4.pdf",
+                "document_ids": ["doc-reading"],
+                "mime_types": ["application/pdf"],
+                "document_types": ["ielts_reading"],
+            },
+            {
+                "source_file": "IELTS Task 1 Essay.pdf",
+                "document_ids": ["doc-writing"],
+                "mime_types": ["application/pdf"],
+                "document_types": ["ielts_writing_collection"],
+                "section_titles": ["IELTS Writing Task 1"],
+            },
+        ]
+
+        scope = resolve_document_scope(
+            "Đề Task 1 ở cuối Reading Test 4 yêu cầu gì?",
+            catalog,
+        )
+
+        self.assertEqual(scope.resolved_document_ids, ["doc-reading"])
+
+    def test_vietnamese_impact_phrase_is_not_treated_as_image_modality(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-reading"],
+                "mime_types": ["application/pdf"],
+            },
+            {
+                "source_file": "writing-table.png",
+                "document_ids": ["doc-image"],
+                "mime_types": ["image/png"],
+            },
+        ]
+
+        ranked = rank_document_candidates(
+            "Hàng rào ảnh hưởng đến kangaroo như thế nào?",
+            catalog,
+            max_candidates=2,
+        )
+
+        self.assertNotIn("source_modality", ranked[0].matched_fields)
+        self.assertNotIn("source_modality", ranked[1].matched_fields)
+
     def test_candidate_ranking_uses_recency_only_after_relevance(self) -> None:
         catalog = [
             {
