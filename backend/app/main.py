@@ -1140,9 +1140,16 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         if needs_target_model
         else []
     )
+    evidence_candidates = [
+        candidate for candidate in ranked_candidates if candidate.matched_fields
+    ]
+    deterministic_candidate = (
+        evidence_candidates[0] if len(evidence_candidates) == 1 else None
+    )
+    resolver_candidates = evidence_candidates or ranked_candidates
     resolver_catalog = (
-        [candidate.entry for candidate in ranked_candidates]
-        if ranked_candidates
+        [candidate.entry for candidate in resolver_candidates]
+        if resolver_candidates
         else catalog
     )
     gateway_context = format_document_catalog_context(resolver_catalog, message)
@@ -1158,7 +1165,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             req.conversation_history,
             affinity_document_refs,
         )
-        if needs_target_model
+        if needs_target_model and deterministic_candidate is None
         else None
     )
     use_affinity_context = False
@@ -1169,6 +1176,17 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         document_resolution_debug = {"method": "single_allowed_document"}
     elif scope_ids:
         document_resolution_debug = {"method": scope.method}
+    elif deterministic_candidate is not None:
+        scope_ids = [
+            document_id
+            for document_id in deterministic_candidate.entry.get("document_ids", [])
+            if document_id in allowed_scope_ids
+        ]
+        document_resolution_debug = {
+            "method": "unique_metadata_candidate",
+            "matched_fields": list(deterministic_candidate.matched_fields),
+            "score": round(deterministic_candidate.score, 3),
+        }
     elif target_decision and target_decision.action == "all":
         scope_ids = list(allowed_scope_ids)
         document_resolution_debug = {"method": "semantic_target_all", **target_decision.to_debug()}
@@ -1198,6 +1216,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             )
         else:
             invalid_candidate_refs = []
+        if clarification_document_ids:
+            clarification_set = set(clarification_document_ids)
+            clarification_document_ids = [
+                document_id
+                for document_id in gateway_context.included_document_ids
+                if document_id in clarification_set
+            ]
         if not clarification_document_ids:
             clarification_document_ids = list(gateway_context.included_document_ids)[
                 : settings.target_clarification_max_candidates
@@ -1219,6 +1244,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         ],
         "ranked_candidates": [
             candidate.to_debug() for candidate in ranked_candidates
+        ],
+        "resolver_candidates": [
+            candidate.to_debug() for candidate in resolver_candidates
         ],
     }
 

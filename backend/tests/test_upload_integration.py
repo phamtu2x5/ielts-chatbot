@@ -1155,6 +1155,103 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.route_used, "vector_rag_ambiguous_document")
         self.assertIn("Vui lòng nêu tên file", prepared.static_response)
 
+    async def test_unique_metadata_candidate_skips_target_model(self) -> None:
+        catalog = [
+            {
+                "source_file": "writing-collection.pdf",
+                "document_ids": ["doc-writing"],
+                "target_descriptors": ["crime rates in cities"],
+                "unit_types": ["writing_task", "sample_answer"],
+            },
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-reading"],
+                "section_titles": ["A General Reading Passage"],
+                "unit_types": ["passage", "question_group"],
+            },
+        ]
+        store = _FakeChatStore(catalog)
+        target_resolver = AsyncMock()
+        with (
+            patch.object(main, "get_store", return_value=store),
+            patch.object(
+                main,
+                "classify_chat_route",
+                AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
+            ),
+            patch.object(main, "resolve_rag_target", target_resolver),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="What does the sample answer say about crime rates in cities?"
+                )
+            )
+
+        target_resolver.assert_not_awaited()
+        self.assertEqual(
+            prepared.debug["document_resolution"]["method"],
+            "unique_metadata_candidate",
+        )
+        self.assertEqual(
+            prepared.debug["document_resolution"]["catalog_context"][
+                "included_document_ids"
+            ],
+            ["doc-writing"],
+        )
+        self.assertTrue(store.probe_document_ids)
+        self.assertTrue(
+            all(document_ids == ["doc-writing"] for document_ids in store.probe_document_ids)
+        )
+
+    async def test_clarification_uses_ranked_evidence_shortlist_order(self) -> None:
+        catalog = [
+            {
+                "source_file": "climate-report.pdf",
+                "document_ids": ["doc-title"],
+                "section_titles": ["Climate Trends"],
+            },
+            {
+                "source_file": "writing-collection.pdf",
+                "document_ids": ["doc-descriptor"],
+                "target_descriptors": ["climate trends"],
+            },
+            {
+                "source_file": "unrelated-reading.pdf",
+                "document_ids": ["doc-unrelated"],
+                "section_titles": ["Destination Mars"],
+            },
+        ]
+        with (
+            patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
+            patch.object(
+                main,
+                "classify_chat_route",
+                AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
+            ),
+            patch.object(
+                main,
+                "resolve_rag_target",
+                AsyncMock(
+                    return_value=TargetResolverDecision(
+                        document_refs=(),
+                        action="clarify",
+                        attempts=1,
+                        duration_seconds=0.01,
+                        raw_output_preview="CLARIFY",
+                        candidate_refs=("D2", "D1"),
+                    )
+                ),
+            ),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(message="Which climate trends report is this?")
+            )
+
+        resolution = prepared.debug["document_resolution"]
+        included = resolution["catalog_context"]["included_document_ids"]
+        self.assertEqual(resolution["candidate_document_ids"], included)
+        self.assertNotIn("doc-unrelated", included)
+
     async def test_static_table_operations_do_not_collapse_to_first_cell(self) -> None:
         source = {
             "source_file": "writing.png",
