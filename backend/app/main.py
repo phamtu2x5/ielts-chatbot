@@ -14,7 +14,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from .config import settings
-from .document_scope import DocumentScope, resolve_document_scope
+from .document_scope import (
+    DocumentScope,
+    order_metadata_values,
+    rank_document_candidates,
+    resolve_document_scope,
+)
 from .document_pipeline import DocumentProcessor
 from .intent import (
     dedupe_sources,
@@ -141,11 +146,14 @@ class DocumentCatalogContext:
     omitted_document_ids: tuple[str, ...] = ()
 
 
-def format_document_catalog_context(catalog: list[dict]) -> DocumentCatalogContext:
+def format_document_catalog_context(
+    catalog: list[dict],
+    message: str = "",
+) -> DocumentCatalogContext:
     lines: list[str] = []
     document_refs: dict[str, str] = {}
     if catalog:
-        lines.append("Available uploaded documents:")
+        lines.append("Most relevant uploaded document candidates:")
         for index, item in enumerate(catalog, 1):
             document_id = next(iter(item.get("document_ids") or []), "")
             if not document_id:
@@ -153,22 +161,26 @@ def format_document_catalog_context(catalog: list[dict]) -> DocumentCatalogConte
             reference = f"D{index}"
             fields = [f"- {reference}: {item.get('source_file', 'unknown')}"]
             for label, key in (
-                ("mime_types", "mime_types"),
                 ("document_types", "document_types"),
                 ("task_types", "task_types"),
                 ("visual_types", "visual_types"),
                 ("section_titles", "section_titles"),
-                ("target_descriptors", "target_descriptors"),
                 ("table_columns", "table_columns"),
+                ("target_descriptors", "target_descriptors"),
+                ("mime_types", "mime_types"),
                 ("unit_types", "unit_types"),
             ):
-                values = [str(value) for value in item.get(key) or []]
+                values = order_metadata_values(message, item.get(key) or [])
                 if not values:
                     continue
-                field = f"{label}={'; '.join(values)}"
-                candidate = " | ".join([*fields, field])
-                if len(candidate) <= settings.target_catalog_document_chars:
-                    fields.append(field)
+                included_values: list[str] = []
+                for value in values:
+                    field = f"{label}={'; '.join([*included_values, value])}"
+                    if len(" | ".join([*fields, field])) > settings.target_catalog_document_chars:
+                        break
+                    included_values.append(value)
+                if included_values:
+                    fields.append(f"{label}={'; '.join(included_values)}")
             line = " | ".join(fields)
             if len("\n".join([*lines, line])) > settings.target_catalog_chars:
                 break
@@ -984,12 +996,27 @@ def resolve_target_refs(
     return resolved, invalid
 
 
-def gateway_clarification_response(catalog: list[dict[str, Any]]) -> str:
-    files = [item.get("source_file", "unknown") for item in catalog]
+def gateway_clarification_response(
+    catalog: list[dict[str, Any]],
+    candidate_document_ids: list[str] | None = None,
+) -> str:
+    by_document_id = {
+        str(document_id): item.get("source_file", "unknown")
+        for item in catalog
+        for document_id in item.get("document_ids") or []
+    }
+    files = [
+        by_document_id[document_id]
+        for document_id in candidate_document_ids or []
+        if document_id in by_document_id
+    ]
+    if not files:
+        files = [item.get("source_file", "unknown") for item in catalog]
+    files = list(dict.fromkeys(files))[: settings.target_clarification_max_candidates]
     if not files:
         return NO_RAG_MATCH_RESPONSE
-    choices = "\n".join(f"- {name}" for name in files[:10])
-    return f"{AMBIGUOUS_DOCUMENT_RESPONSE}\n\nCác file hiện có:\n{choices}"
+    choices = "\n".join(f"- {name}" for name in files)
+    return f"{AMBIGUOUS_DOCUMENT_RESPONSE}\n\nCác file phù hợp nhất:\n{choices}"
 
 
 async def prepare_chat(req: ChatRequest) -> ChatPreparation:
@@ -1101,14 +1128,29 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         route = "rag"
         gateway_debug["fallback_reason"] = "valid_document_scope_or_rag_affinity"
 
-    gateway_context = format_document_catalog_context(catalog)
+    scope_ids = list(scope.resolved_document_ids)
+    needs_target_model = not scope_ids and len(allowed_scope_ids) > 1
+    ranked_candidates = (
+        rank_document_candidates(
+            message,
+            catalog,
+            settings.target_resolver_max_candidates,
+            affinity.document_ids if affinity else None,
+        )
+        if needs_target_model
+        else []
+    )
+    resolver_catalog = (
+        [candidate.entry for candidate in ranked_candidates]
+        if ranked_candidates
+        else catalog
+    )
+    gateway_context = format_document_catalog_context(resolver_catalog, message)
     affinity_document_refs = tuple(
         reference
         for reference, document_id in gateway_context.document_refs.items()
         if affinity and document_id in affinity.document_ids
     )
-    scope_ids = list(scope.resolved_document_ids)
-    needs_target_model = not scope_ids and len(allowed_scope_ids) > 1
     target_decision = (
         await resolve_rag_target(
             message,
@@ -1120,6 +1162,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         else None
     )
     use_affinity_context = False
+    clarification_document_ids: list[str] = []
 
     if not scope_ids and len(allowed_scope_ids) == 1:
         scope_ids = list(allowed_scope_ids)
@@ -1147,15 +1190,36 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         if use_affinity_context:
             document_resolution_debug["method"] = "semantic_target_with_affinity"
     else:
+        if target_decision:
+            clarification_document_ids, invalid_candidate_refs = resolve_target_refs(
+                target_decision.candidate_refs,
+                gateway_context,
+                allowed_scope_ids,
+            )
+        else:
+            invalid_candidate_refs = []
+        if not clarification_document_ids:
+            clarification_document_ids = list(gateway_context.included_document_ids)[
+                : settings.target_clarification_max_candidates
+            ]
         document_resolution_debug = {
             "method": "semantic_target_clarify",
             **(target_decision.to_debug() if target_decision else {}),
+            "candidate_document_ids": clarification_document_ids,
+            "invalid_candidate_refs": invalid_candidate_refs,
         }
     document_resolution_debug["catalog_context"] = {
-        "order": "recent_ingestion",
+        "order": "query_relevance_then_recent_ingestion_tie_break",
         "available_document_ids": list(allowed_scope_ids),
         "included_document_ids": list(gateway_context.included_document_ids),
-        "omitted_document_ids": list(gateway_context.omitted_document_ids),
+        "omitted_document_ids": [
+            document_id
+            for document_id in allowed_scope_ids
+            if document_id not in gateway_context.included_document_ids
+        ],
+        "ranked_candidates": [
+            candidate.to_debug() for candidate in ranked_candidates
+        ],
     }
 
     if not scope_ids:
@@ -1180,7 +1244,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         return ChatPreparation(
             prompt=None,
             static_response=(
-                gateway_clarification_response(catalog)
+                gateway_clarification_response(catalog, clarification_document_ids)
                 if len(allowed_scope_ids) > 1
                 else NO_RAG_MATCH_RESPONSE
             ),

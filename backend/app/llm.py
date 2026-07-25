@@ -91,11 +91,13 @@ class TargetResolverDecision:
     duration_seconds: float
     raw_output_preview: str
     fallback_reason: str | None = None
+    candidate_refs: tuple[str, ...] = ()
 
     def to_debug(self) -> dict:
         return {
             "action": self.action,
             "document_refs": list(self.document_refs),
+            "candidate_refs": list(self.candidate_refs),
             "attempts": self.attempts,
             "duration_seconds": self.duration_seconds,
             "raw_output_preview": self.raw_output_preview,
@@ -1104,8 +1106,10 @@ def target_resolver_prompt(
     history_text = format_route_history(history)
     parts = [
         "Resolve which uploaded document the current request targets using catalog metadata and conversation context.",
-        'Return JSON only with action "selected", "all", or "clarify" and a document_refs array.',
-        "For SELECTED, return the matching document refs. For ALL or CLARIFY, return an empty document_refs array.",
+        'Return JSON only with action "selected", "all", or "clarify", a document_refs array, and a candidate_refs array.',
+        "For SELECTED, return the matching document refs and an empty candidate_refs array.",
+        "For ALL, return both arrays empty.",
+        "For CLARIFY, return document_refs empty and the two or three most plausible refs in candidate_refs.",
         "Use ALL only for an explicit request about the whole available or attached collection.",
         "Select a document when one catalog entry uniquely matches the requested file, modality, document/task type, section/topic descriptor, visual type, or table columns.",
         "A negative question still targets a document when the user clearly names its modality or type; whether the requested topic is absent is decided after document selection.",
@@ -1135,14 +1139,16 @@ async def resolve_rag_target(
     started = time.perf_counter()
     last_raw = ""
     last_error: str | None = None
-    valid_refs = set(re.findall(r"(?m)^-\s*(D\d+):", catalog_context))
+    ordered_valid_refs = tuple(re.findall(r"(?m)^-\s*(D\d+):", catalog_context))
+    valid_refs = set(ordered_valid_refs)
     response_schema = {
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": ["selected", "all", "clarify"]},
             "document_refs": {"type": "array", "items": {"type": "string"}},
+            "candidate_refs": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["action", "document_refs"],
+        "required": ["action", "document_refs", "candidate_refs"],
         "additionalProperties": False,
     }
     for attempt in range(1, 3):
@@ -1164,18 +1170,33 @@ async def resolve_rag_target(
             action = payload.get("action")
             raw_refs = payload.get("document_refs")
             refs = tuple(dict.fromkeys(raw_refs or ())) if isinstance(raw_refs, list) else ()
+            raw_candidates = payload.get("candidate_refs")
+            candidate_refs = (
+                tuple(dict.fromkeys(raw_candidates or ()))
+                if isinstance(raw_candidates, list)
+                else ()
+            )
             if action not in {"selected", "all", "clarify"}:
                 raise OllamaRequestError("invalid_target_output", "Target resolver returned an invalid action.")
             if action == "selected" and (not refs or any(ref not in valid_refs for ref in refs)):
                 raise OllamaRequestError("invalid_target_output", "Target resolver returned invalid references.")
             if action != "selected" and refs:
                 raise OllamaRequestError("invalid_target_output", "Target resolver returned unexpected references.")
+            if action != "clarify" and candidate_refs:
+                raise OllamaRequestError("invalid_target_output", "Target resolver returned unexpected candidates.")
+            if action == "clarify" and (
+                not candidate_refs
+                or len(candidate_refs) > 3
+                or any(ref not in valid_refs for ref in candidate_refs)
+            ):
+                raise OllamaRequestError("invalid_target_output", "Target resolver returned invalid candidates.")
             return TargetResolverDecision(
                 document_refs=refs,
                 action=action,
                 attempts=attempt,
                 duration_seconds=round(time.perf_counter() - started, 3),
                 raw_output_preview=_visible_raw_output(last_raw)[:160],
+                candidate_refs=candidate_refs,
             )
         except OllamaRequestError as exc:
             last_error = exc.kind
@@ -1186,6 +1207,7 @@ async def resolve_rag_target(
         duration_seconds=round(time.perf_counter() - started, 3),
         raw_output_preview=_visible_raw_output(last_raw)[:160],
         fallback_reason=last_error or "invalid_target_output",
+        candidate_refs=ordered_valid_refs[:3],
     )
 
 

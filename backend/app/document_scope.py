@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import asdict, dataclass
+from math import log
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,23 @@ class DocumentScope:
 
     def to_debug(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class RankedDocumentCandidate:
+    entry: dict[str, Any]
+    score: float
+    matched_fields: tuple[str, ...]
+    recency_rank: int
+
+    def to_debug(self) -> dict[str, Any]:
+        return {
+            "document_ids": list(self.entry.get("document_ids") or []),
+            "source_file": self.entry.get("source_file", "unknown"),
+            "score": round(self.score, 3),
+            "matched_fields": list(self.matched_fields),
+            "recency_rank": self.recency_rank,
+        }
 
 
 def normalize_reference(value: str) -> str:
@@ -70,9 +89,10 @@ def resolve_document_scope(
         )
 
     normalized_query = normalize_reference(message)
+    title_weights = _title_token_weights(allowed_entries)
     scored: list[tuple[float, dict[str, Any]]] = []
     for entry in allowed_entries:
-        score = _catalog_match_score(normalized_query, entry)
+        score = _catalog_match_score(normalized_query, entry, title_weights)
         if score > 0:
             scored.append((score, entry))
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -192,25 +212,77 @@ def _filename_match_score(normalized_query: str, source_file: str) -> float:
     )
 
 
-def _section_title_match_score(normalized_query: str, titles: list[str]) -> float:
+def _title_token_weights(catalog: list[dict[str, Any]]) -> dict[str, float]:
+    normalized_titles = [
+        normalize_reference(str(title))
+        for entry in catalog
+        for title in entry.get("section_titles") or []
+        if normalize_reference(str(title))
+    ]
+    if not normalized_titles:
+        return {}
+    frequencies: Counter[str] = Counter()
+    for title in normalized_titles:
+        frequencies.update(set(title.split()))
+    total = len(normalized_titles)
+    return {
+        token: 1.0 + log((total + 1.0) / (frequency + 1.0))
+        for token, frequency in frequencies.items()
+    }
+
+
+def _section_title_match_score(
+    normalized_query: str,
+    titles: list[str],
+    token_weights: dict[str, float] | None = None,
+) -> float:
     query_terms = normalized_query.split()
-    query_numbers = {term for term in query_terms if term.isdigit()}
+    query_term_set = set(query_terms)
+    weights = token_weights or {}
+    best_score = 0.0
     for title in titles:
         normalized_title = normalize_reference(str(title))
         title_terms = normalized_title.split()
         if not normalized_title:
             continue
-        title_numbers = {term for term in title_terms if term.isdigit()}
-        if query_numbers and title_numbers and not query_numbers.intersection(title_numbers):
-            continue
         if normalized_title in normalized_query and (
             len(title_terms) >= 2 or len(normalized_title) >= 5
         ):
-            return 120.0 + len(title_terms)
+            best_score = max(best_score, 140.0 + len(title_terms))
+            continue
+
+        matched_terms = query_term_set.intersection(title_terms)
+        if len(matched_terms) < 2:
+            continue
+        title_weight = sum(weights.get(term, 1.0) for term in set(title_terms))
+        matched_weight = sum(weights.get(term, 1.0) for term in matched_terms)
+        weighted_coverage = matched_weight / max(1.0, title_weight)
         longest_phrase = _longest_contiguous_match(query_terms, title_terms)
-        if longest_phrase >= 3:
-            return 100.0 + longest_phrase
-    return 0.0
+        distinctive_matches = sum(
+            1 for term in matched_terms if weights.get(term, 1.0) > 1.15
+        )
+        qualifies = (
+            longest_phrase >= 3
+            or weighted_coverage >= 0.6
+            or (
+                longest_phrase >= 2
+                and (weighted_coverage >= 0.28 or distinctive_matches >= 2)
+            )
+        )
+        if not qualifies:
+            continue
+        matching_numbers = sum(
+            1 for term in matched_terms if term.isdigit()
+        )
+        score = (
+            35.0
+            + weighted_coverage * 70.0
+            + longest_phrase * 10.0
+            + distinctive_matches * 4.0
+            + matching_numbers * 4.0
+        )
+        best_score = max(best_score, score)
+    return best_score
 
 
 def _longest_contiguous_match(first: list[str], second: list[str]) -> int:
@@ -231,8 +303,162 @@ def _longest_contiguous_match(first: list[str], second: list[str]) -> int:
 def _catalog_match_score(
     normalized_query: str,
     entry: dict[str, Any],
+    title_weights: dict[str, float] | None = None,
 ) -> float:
     return (
         _filename_match_score(normalized_query, entry.get("source_file", ""))
-        + _section_title_match_score(normalized_query, entry.get("section_titles") or [])
+        + _section_title_match_score(
+            normalized_query,
+            entry.get("section_titles") or [],
+            title_weights,
+        )
     )
+
+
+def _metadata_token_weights(catalog: list[dict[str, Any]]) -> dict[str, float]:
+    frequencies: Counter[str] = Counter()
+    for entry in catalog:
+        tokens = {
+            token
+            for key in (
+                "document_types",
+                "task_types",
+                "visual_types",
+                "table_columns",
+                "target_descriptors",
+                "unit_types",
+                "mime_types",
+            )
+            for value in entry.get(key) or []
+            for token in normalize_reference(str(value)).split()
+        }
+        frequencies.update(tokens)
+    total = max(1, len(catalog))
+    return {
+        token: 1.0 + log((total + 1.0) / (frequency + 1.0))
+        for token, frequency in frequencies.items()
+    }
+
+
+def _metadata_field_score(
+    normalized_query: str,
+    values: list[Any],
+    token_weights: dict[str, float],
+    field_weight: float,
+) -> float:
+    query_terms = set(normalized_query.split())
+    best = 0.0
+    for value in values:
+        normalized_value = normalize_reference(str(value))
+        value_terms = set(normalized_value.split())
+        if not value_terms:
+            continue
+        matched = query_terms.intersection(value_terms)
+        if not matched:
+            continue
+        total_weight = sum(token_weights.get(term, 1.0) for term in value_terms)
+        matched_weight = sum(token_weights.get(term, 1.0) for term in matched)
+        coverage = matched_weight / max(1.0, total_weight)
+        phrase_bonus = 0.35 if normalized_value in normalized_query else 0.0
+        best = max(best, field_weight * (coverage + phrase_bonus))
+    return best
+
+
+def rank_document_candidates(
+    message: str,
+    catalog: list[dict[str, Any]],
+    max_candidates: int,
+    preferred_document_ids: list[str] | None = None,
+) -> list[RankedDocumentCandidate]:
+    """Rank target candidates by query relevance, using recency only for ties."""
+    if max_candidates <= 0:
+        return []
+    normalized_query = normalize_reference(message)
+    title_weights = _title_token_weights(catalog)
+    metadata_weights = _metadata_token_weights(catalog)
+    preferred = set(preferred_document_ids or [])
+    ranked: list[RankedDocumentCandidate] = []
+    field_weights = {
+        "document_types": 18.0,
+        "task_types": 24.0,
+        "visual_types": 18.0,
+        "table_columns": 28.0,
+        "target_descriptors": 22.0,
+        "unit_types": 8.0,
+        "mime_types": 8.0,
+    }
+    for recency_rank, entry in enumerate(catalog):
+        matched_fields: list[str] = []
+        filename_score = _filename_match_score(
+            normalized_query,
+            entry.get("source_file", ""),
+        )
+        title_score = _section_title_match_score(
+            normalized_query,
+            entry.get("section_titles") or [],
+            title_weights,
+        )
+        score = filename_score + title_score
+        if filename_score:
+            matched_fields.append("source_file")
+        if title_score:
+            matched_fields.append("section_titles")
+        for key, weight in field_weights.items():
+            field_score = _metadata_field_score(
+                normalized_query,
+                entry.get(key) or [],
+                metadata_weights,
+                weight,
+            )
+            if field_score:
+                score += field_score
+                matched_fields.append(key)
+        ranked.append(
+            RankedDocumentCandidate(
+                entry=entry,
+                score=score,
+                matched_fields=tuple(matched_fields),
+                recency_rank=recency_rank,
+            )
+        )
+
+    ranked.sort(
+        key=lambda candidate: (
+            -candidate.score,
+            -int(
+                bool(
+                    preferred.intersection(
+                        candidate.entry.get("document_ids") or []
+                    )
+                )
+            ),
+            candidate.recency_rank,
+        )
+    )
+    return ranked[:max_candidates]
+
+
+def order_metadata_values(message: str, values: list[Any]) -> list[str]:
+    """Put values most relevant to the current query first, preserving stable ties."""
+    normalized_query = normalize_reference(message)
+    query_terms = set(normalized_query.split())
+
+    def relevance(value: str) -> tuple[int, int, int]:
+        normalized_value = normalize_reference(value)
+        value_terms = normalized_value.split()
+        return (
+            int(bool(normalized_value and normalized_value in normalized_query)),
+            _longest_contiguous_match(normalized_query.split(), value_terms),
+            len(query_terms.intersection(value_terms)),
+        )
+
+    indexed = [(index, str(value)) for index, value in enumerate(values)]
+    indexed.sort(
+        key=lambda item: (
+            -relevance(item[1])[0],
+            -relevance(item[1])[1],
+            -relevance(item[1])[2],
+            item[0],
+        )
+    )
+    return [value for _, value in indexed]

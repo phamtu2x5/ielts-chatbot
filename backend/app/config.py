@@ -72,6 +72,12 @@ class AppSettings:
     target_descriptor_chars: int = field(
         default_factory=lambda: int(os.getenv("TARGET_DESCRIPTOR_CHARS", "220"))
     )
+    target_resolver_max_candidates: int = field(
+        default_factory=lambda: int(os.getenv("TARGET_RESOLVER_MAX_CANDIDATES", "5"))
+    )
+    target_clarification_max_candidates: int = field(
+        default_factory=lambda: int(os.getenv("TARGET_CLARIFICATION_MAX_CANDIDATES", "3"))
+    )
     document_scope_min_match_score: float = field(
         default_factory=lambda: float(os.getenv("DOCUMENT_SCOPE_MIN_MATCH_SCORE", "60"))
     )
@@ -109,6 +115,8 @@ class AppSettings:
             or self.target_catalog_chars <= 0
             or self.target_catalog_document_chars <= 0
             or self.target_descriptor_chars <= 0
+            or self.target_resolver_max_candidates <= 0
+            or self.target_clarification_max_candidates <= 0
             or self.document_scope_min_match_score <= 0
             or self.document_scope_match_margin <= 0
         ):

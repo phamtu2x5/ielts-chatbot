@@ -29,7 +29,7 @@ except ImportError:
     sys.modules["sentence_transformers"] = sentence_transformers_stub
 
 from app import llm, rag
-from app.document_scope import resolve_document_scope
+from app.document_scope import rank_document_candidates, resolve_document_scope
 from app.intent import (
     filter_sources_for_intent,
     has_explicit_no_solution_constraint,
@@ -551,6 +551,118 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertTrue(scope.document_grounded)
         self.assertFalse(scope.ambiguous)
         self.assertEqual(scope.resolved_document_ids, ["doc-b"])
+
+    def test_short_section_titles_resolve_without_three_word_match(self) -> None:
+        catalog = [
+            {
+                "source_file": "writing-collection.pdf",
+                "document_ids": ["doc-writing"],
+                "section_titles": [
+                    "IELTS Task 1 Essay: British Emigration",
+                    "IELTS Task 1 Essay: Internet Use",
+                ],
+            },
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-reading"],
+                "section_titles": ["A General Reading Passage"],
+            },
+        ]
+
+        emigration = resolve_document_scope(
+            "Tóm tắt bài British Emigration.",
+            catalog,
+        )
+        internet = resolve_document_scope(
+            "Bài Internet Use mô tả xu hướng gì?",
+            catalog,
+        )
+
+        self.assertEqual(emigration.resolved_document_ids, ["doc-writing"])
+        self.assertEqual(internet.resolved_document_ids, ["doc-writing"])
+
+    def test_section_title_numbers_do_not_require_query_number_overlap(self) -> None:
+        catalog = [
+            {
+                "source_file": "writing-collection.pdf",
+                "document_ids": ["doc-writing"],
+                "section_titles": [
+                    "IELTS Essay Task 1: Age Groups and Cinema Attendance"
+                ],
+            },
+            {
+                "source_file": "writing-image.png",
+                "document_ids": ["doc-image"],
+                "section_titles": ["Household Technology"],
+            },
+        ]
+
+        scope = resolve_document_scope(
+            "So sánh cinema attendance của nhóm 15-24 trong 2000 và 2011.",
+            catalog,
+        )
+
+        self.assertEqual(scope.resolved_document_ids, ["doc-writing"])
+
+    def test_candidate_ranking_uses_recency_only_after_relevance(self) -> None:
+        catalog = [
+            {
+                "source_file": "new-writing-image.png",
+                "document_ids": ["doc-new"],
+                "document_types": ["ielts_writing_task_1"],
+                "table_columns": ["Internet Access", "Smartphone Ownership"],
+            },
+            {
+                "source_file": "older-writing-collection.pdf",
+                "document_ids": ["doc-old"],
+                "document_types": ["ielts_writing_collection"],
+                "section_titles": ["IELTS Task 1 Essay: Internet Use"],
+            },
+        ]
+
+        ranked = rank_document_candidates(
+            "Bài Internet Use nói về xu hướng nào?",
+            catalog,
+            max_candidates=2,
+        )
+        self.assertEqual(ranked[0].entry["document_ids"], ["doc-old"])
+        self.assertGreater(ranked[0].score, ranked[1].score)
+        tied = rank_document_candidates(
+            "Nội dung cụ thể là gì?",
+            catalog,
+            max_candidates=2,
+        )
+        self.assertLessEqual(tied[0].recency_rank, tied[1].recency_rank)
+
+    def test_candidate_ranking_treats_affinity_as_a_tie_break(self) -> None:
+        catalog = [
+            {
+                "source_file": "new-writing.png",
+                "document_ids": ["doc-new"],
+                "table_columns": ["Internet Access", "Smartphone Ownership"],
+            },
+            {
+                "source_file": "old-reading.pdf",
+                "document_ids": ["doc-affinity"],
+                "section_titles": ["Destination Mars"],
+            },
+        ]
+
+        relevant = rank_document_candidates(
+            "What is the Smartphone Ownership value?",
+            catalog,
+            max_candidates=1,
+            preferred_document_ids=["doc-affinity"],
+        )
+        tied = rank_document_candidates(
+            "Nội dung cụ thể là gì?",
+            catalog,
+            max_candidates=1,
+            preferred_document_ids=["doc-affinity"],
+        )
+
+        self.assertEqual(relevant[0].entry["document_ids"], ["doc-new"])
+        self.assertEqual(tied[0].entry["document_ids"], ["doc-affinity"])
 
     def test_document_catalog_exposes_structured_section_titles(self) -> None:
         store = FakeVectorStore()
@@ -1110,11 +1222,34 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             llm,
             "query_ollama",
-            AsyncMock(return_value='{"action":"selected","document_refs":["D2"]}'),
+            AsyncMock(
+                return_value=(
+                    '{"action":"selected","document_refs":["D2"],'
+                    '"candidate_refs":[]}'
+                )
+            ),
         ):
             decision = await llm.resolve_rag_target("Use second.pdf", catalog)
         self.assertEqual(decision.action, "selected")
         self.assertEqual(decision.document_refs, ("D2",))
+
+    async def test_target_resolver_returns_bounded_clarification_candidates(self) -> None:
+        catalog = "- D1: first.pdf\n- D2: second.pdf\n- D3: third.pdf\n- D4: fourth.pdf"
+        with patch.object(
+            llm,
+            "query_ollama",
+            AsyncMock(
+                return_value=(
+                    '{"action":"clarify","document_refs":[],'
+                    '"candidate_refs":["D2","D4"]}'
+                )
+            ),
+        ):
+            decision = await llm.resolve_rag_target("Which report?", catalog)
+
+        self.assertEqual(decision.action, "clarify")
+        self.assertEqual(decision.document_refs, ())
+        self.assertEqual(decision.candidate_refs, ("D2", "D4"))
 
     def test_target_resolver_treats_affinity_as_weak_context(self) -> None:
         prompt = llm.target_resolver_prompt(
@@ -1125,7 +1260,8 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("weak context, not a required scope", prompt)
-        self.assertIn("For ALL or CLARIFY, return an empty document_refs array", prompt)
+        self.assertIn("For CLARIFY", prompt)
+        self.assertIn("candidate_refs", prompt)
         self.assertIn("Previous successful RAG document candidates: D1", prompt)
         self.assertIn("Tóm tắt Test 2", prompt)
         self.assertIn("Current user message:\nPassage 2 nói gì?", prompt)

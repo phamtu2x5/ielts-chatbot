@@ -1044,6 +1044,24 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             set(),
         )
 
+    def test_clarification_lists_only_resolver_candidates(self) -> None:
+        catalog = [
+            {"source_file": "reading-2.pdf", "document_ids": ["doc-2"]},
+            {"source_file": "reading-4.pdf", "document_ids": ["doc-4"]},
+            {"source_file": "writing.pdf", "document_ids": ["doc-writing"]},
+            {"source_file": "writing.png", "document_ids": ["doc-image"]},
+        ]
+
+        response = main.gateway_clarification_response(
+            catalog,
+            ["doc-4", "doc-writing"],
+        )
+
+        self.assertIn("reading-4.pdf", response)
+        self.assertIn("writing.pdf", response)
+        self.assertNotIn("reading-2.pdf", response)
+        self.assertNotIn("writing.png", response)
+
     async def test_semantic_gateway_state_does_not_expose_document_references(self) -> None:
         catalog = [
             {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]}
