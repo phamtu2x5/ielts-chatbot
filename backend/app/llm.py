@@ -643,7 +643,13 @@ async def query_ollama(
             visible_text = clean_response(raw_text)
             text = visible_text if clean_output else raw_text.strip()
             if looks_like_prompt_echo(visible_text, prompt):
-                raise OllamaRequestError("prompt_echo", "Ollama echoed the prompt instead of answering.")
+                if attempt < attempt_limit:
+                    continue
+                raise OllamaRequestError(
+                    "prompt_echo",
+                    "Ollama echoed the prompt instead of answering.",
+                    attempts=attempt,
+                )
             if visible_text:
                 return text
             if attempt < attempt_limit:

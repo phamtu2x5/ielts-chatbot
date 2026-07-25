@@ -1438,6 +1438,23 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer, "Ready")
         self.assertEqual(attempts, 2)
 
+    async def test_non_stream_request_retries_one_prompt_echo(self) -> None:
+        attempts = 0
+        prompt = "Say ready"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            response_text = prompt if attempts == 1 else "Ready"
+            return httpx.Response(200, json={"response": response_text}, request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(llm.httpx, "AsyncClient", return_value=client):
+            answer = await llm.query_ollama(prompt, temperature=0.0)
+
+        self.assertEqual(answer, "Ready")
+        self.assertEqual(attempts, 2)
+
     def test_ollama_payload_disables_thinking_at_top_level(self) -> None:
         payload = llm._ollama_payload("Say ready", False, 0.0, 32)
 

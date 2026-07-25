@@ -382,6 +382,44 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         generate_fallback.assert_awaited_once_with("grounded RAG prompt", temperature=0.2)
         chat_fallback.assert_not_awaited()
 
+    async def test_prompt_echo_before_first_direct_token_falls_back_to_chat_api(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct generate prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+
+        async def prompt_echo_stream(*args, **kwargs):
+            if False:
+                yield ""
+            raise main.OllamaRequestError(
+                "prompt_echo",
+                "Ollama echoed the prompt while streaming.",
+            )
+
+        chat_fallback = AsyncMock(return_value="Chào bạn.")
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "stream_ollama", prompt_echo_stream),
+            patch.object(main, "query_ollama_chat", chat_fallback),
+        ):
+            response = await main.chat_stream(main.ChatRequest(message="xin chào"))
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        self.assertEqual(
+            [event["token"] for event in events if event["type"] == "token"],
+            ["Chào bạn."],
+        )
+        chat_fallback.assert_awaited_once()
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        generation_debug = metadata["debug"]["direct_generation"]
+        self.assertEqual(generation_debug["fallback_reason"], "prompt_echo")
+        self.assertEqual(generation_debug["fallback_endpoint"], "chat")
+        self.assertEqual(generation_debug["fallback_status"], "succeeded")
+
     async def test_direct_turn_preserves_previous_rag_affinity(self) -> None:
         prepared = main.ChatPreparation(
             prompt=None,

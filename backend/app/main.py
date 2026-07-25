@@ -1768,20 +1768,28 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 return
 
             has_token = False
+            stream_failure: OllamaRequestError | None = None
             temperature = generation_temperature(prepared)
-            async for token in stream_ollama(
-                prepared.prompt or "",
-                temperature=temperature,
-            ):
-                has_token = True
-                yield stream_event("token", token=token)
+            try:
+                async for token in stream_ollama(
+                    prepared.prompt or "",
+                    temperature=temperature,
+                ):
+                    has_token = True
+                    yield stream_event("token", token=token)
+            except OllamaRequestError as exc:
+                if exc.kind != "prompt_echo" or has_token:
+                    raise
+                stream_failure = exc
             if not has_token:
                 direct_fallback = (
                     prepared.query_intent == "direct" and settings.ollama_chat_fallback
                 )
                 fallback_endpoint = "chat" if direct_fallback else "generate"
+                fallback_reason = stream_failure.kind if stream_failure else "empty_stream"
                 logger.warning(
-                    "Ollama stream completed without visible tokens; retrying via %s endpoint",
+                    "Ollama stream failed before visible tokens (%s); retrying via %s endpoint",
+                    fallback_reason,
                     fallback_endpoint,
                 )
                 generation_debug = prepared.debug.setdefault("direct_generation", {})
@@ -1800,7 +1808,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     generation_debug.update(
                         {
                             "fallback_used": True,
-                            "fallback_reason": "empty_stream",
+                            "fallback_reason": fallback_reason,
                             "fallback_endpoint": fallback_endpoint,
                             "fallback_status": "failed",
                             "fallback_error": (
@@ -1821,7 +1829,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 generation_debug.update(
                     {
                         "fallback_used": True,
-                        "fallback_reason": "empty_stream",
+                        "fallback_reason": fallback_reason,
                         "fallback_endpoint": fallback_endpoint,
                         "fallback_status": "succeeded",
                     }
