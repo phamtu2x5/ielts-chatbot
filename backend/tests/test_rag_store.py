@@ -109,6 +109,35 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual({doc["document_id"] for doc in store._docs}, {"doc-a", "doc-b"})
         self.assertEqual(len(store.document_catalog()), 2)
 
+    def test_document_catalog_is_cached_and_invalidated_after_upsert(self) -> None:
+        store = FakeVectorStore()
+        first = self._chunk("a-1", "reading.pdf", "first")
+        first["document_id"] = "doc-a"
+        second = self._chunk("b-1", "writing.pdf", "second")
+        second["document_id"] = "doc-b"
+
+        store.upsert([first], "reading.pdf")
+        with patch.object(
+            store.structured_store,
+            "document_catalog",
+            wraps=store.structured_store.document_catalog,
+        ) as build_catalog:
+            catalog = store.document_catalog()
+            catalog[0]["source_file"] = "mutated.pdf"
+            cached = store.document_catalog()
+
+            self.assertEqual(build_catalog.call_count, 1)
+            self.assertEqual(cached[0]["source_file"], "reading.pdf")
+
+            store.upsert([second], "writing.pdf")
+            refreshed = store.document_catalog()
+
+        self.assertEqual(build_catalog.call_count, 2)
+        self.assertEqual(
+            {item["source_file"] for item in refreshed},
+            {"reading.pdf", "writing.pdf"},
+        )
+
     def test_document_catalog_orders_recent_ingestion_first(self) -> None:
         docs = [
             {

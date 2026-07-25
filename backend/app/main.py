@@ -1033,7 +1033,6 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     gateway_debug: dict[str, Any]
     document_resolution_debug: dict[str, Any] = {}
 
-    stats = await run_in_threadpool(store.stats)
     full_catalog = await run_in_threadpool(store.document_catalog)
     scope = resolve_document_scope(
         message,
@@ -1343,17 +1342,12 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         intent for intent in ROUTING_INTENTS if intent not in candidate_intents
     ]
 
-    if scope_ids:
-        catalog = [
-            item
-            for item in full_catalog
-            if any(document_id in scope_ids for document_id in item.get("document_ids", []))
-        ]
+    catalog = scoped_catalog
 
     retrieval_query = affinity_retrieval_query(req, use_affinity_context)
     probe_top_k = max(settings.rag_probe_top_k, settings.rag_top_k)
 
-    if stats["chunks"] > 0 and route == "rag" and query_intent == "semantic_qa":
+    if full_catalog and route == "rag" and query_intent == "semantic_qa":
         semantic_results = await run_in_threadpool(
             store.hybrid_search,
             retrieval_query,
@@ -1405,17 +1399,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         elif probe.get("has_strong_hits"):
             sources = (probe.get("results") or [])[: settings.rag_top_k]
             retrieval_method = "probe"
-        elif route == "rag":
+        else:
             sources = []
             retrieval_method = "no_strong_document_match"
-        else:
-            sources = await run_in_threadpool(
-                store.search,
-                retrieval_query,
-                settings.rag_top_k,
-                scope_ids,
-            )
-            retrieval_method = "dense"
         before_filter_count = len(sources)
         sources = filter_sources_for_intent(sources, message, query_intent)
         if query_intent in {"semantic_qa", "writing_generation"} and any(

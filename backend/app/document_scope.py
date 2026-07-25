@@ -508,13 +508,16 @@ def order_metadata_values(message: str, values: list[Any]) -> list[str]:
             len(query_terms.intersection(value_terms)),
         )
 
-    indexed = [(index, str(value)) for index, value in enumerate(values)]
-    indexed.sort(
+    scored = [
+        (index, str(value), relevance(str(value)))
+        for index, value in enumerate(values)
+    ]
+    scored.sort(
         key=lambda item: (
-            -relevance(item[1])[0],
-            -relevance(item[1])[1],
-            -relevance(item[1])[2],
+            -item[2][0],
+            -item[2][1],
+            -item[2][2],
             item[0],
         )
     )
-    return [value for _, value in indexed]
+    return [value for _, value, _ in scored]

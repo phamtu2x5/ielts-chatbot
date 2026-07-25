@@ -2,6 +2,7 @@ import json
 import re
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from functools import wraps
 from typing import Callable, Dict, List, TypeVar
@@ -37,6 +38,7 @@ class LocalVectorStore:
         self._model = None
         self._docs: List[Dict] = []
         self._embeddings = np.empty((0, 0), dtype=np.float32)
+        self._catalog_cache: List[Dict] | None = None
         self.last_upsert_timing: Dict = {}
         self.structured_store = StructuredDocumentStore(lambda: self._docs)
         self._load()
@@ -154,6 +156,7 @@ class LocalVectorStore:
             save_seconds = self._elapsed(save_started)
             self._docs = combined_docs
             self._embeddings = combined_embeddings
+            self._catalog_cache = None
             self.last_upsert_timing = {
                 "embedding_seconds": embedding_seconds,
                 "merge_seconds": merge_seconds,
@@ -342,7 +345,17 @@ class LocalVectorStore:
 
     @synchronized
     def document_catalog(self, document_ids: List[str] | None = None) -> List[Dict]:
-        return self.structured_store.document_catalog(document_ids=document_ids)
+        if self._catalog_cache is None:
+            self._catalog_cache = self.structured_store.document_catalog()
+        catalog = self._catalog_cache
+        if document_ids is not None:
+            allowed = set(document_ids)
+            catalog = [
+                item
+                for item in catalog
+                if allowed.intersection(item.get("document_ids") or [])
+            ]
+        return deepcopy(catalog)
 
     @synchronized
     def question_context_for_sources(
@@ -726,6 +739,7 @@ class LocalVectorStore:
         self._save_state(docs, embeddings)
         self._docs = docs
         self._embeddings = embeddings
+        self._catalog_cache = None
         return removed
 
     @synchronized
