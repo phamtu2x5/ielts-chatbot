@@ -296,7 +296,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         prepare = AsyncMock(return_value=prepared)
-        with patch.object(main, "prepare_chat", prepare):
+        snapshots = [
+            {"ram": {"backend_rss_mb": 100.0}, "vram": {"available": True, "used_mb": 2000}},
+            {"ram": {"backend_rss_mb": 101.5}, "vram": {"available": True, "used_mb": 2010}},
+        ]
+        with (
+            patch.object(main, "prepare_chat", prepare),
+            patch.object(main, "resource_snapshot", side_effect=snapshots),
+        ):
             response = await main.chat_stream(main.ChatRequest(message="xin chào"))
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
@@ -308,6 +315,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         prepare.assert_awaited_once()
         self.assertEqual(prepare.await_args.kwargs, {})
+        final_metadata = [event for event in events if event["type"] == "metadata"][-1]
+        self.assertEqual(
+            final_metadata["debug"]["resources"]["delta_mb"],
+            {
+                "ram.backend_rss_mb": 1.5,
+                "vram.used_mb": 10,
+            },
+        )
 
     async def test_empty_direct_stream_falls_back_to_chat_api(self) -> None:
         prepared = main.ChatPreparation(

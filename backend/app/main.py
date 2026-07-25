@@ -54,6 +54,7 @@ from .llm import (
     writing_retry_prompt,
 )
 from .rag import get_store
+from .resource_debug import resource_delta, resource_snapshot
 from .schemas import (
     ChatAffinity,
     ChatConversationState,
@@ -1742,18 +1743,38 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung câu hỏi")
 
     async def generate():
-        try:
-            yield stream_event("status", message="Đang phân tích câu hỏi...")
-            prepared = await prepare_chat(req)
-            yield stream_event(
+        resource_debug = {"start": resource_snapshot()}
+        prepared: ChatPreparation | None = None
+
+        def finish_resource_debug() -> None:
+            if "end" in resource_debug:
+                return
+            resource_debug["end"] = resource_snapshot()
+            resource_debug["delta_mb"] = resource_delta(
+                resource_debug["start"],
+                resource_debug["end"],
+            )
+
+        def metadata_event() -> str:
+            if prepared is None:
+                raise RuntimeError("Chat preparation is not available.")
+            prepared.debug["resources"] = resource_debug
+            return stream_event(
                 "metadata",
                 route_used=prepared.route_used,
                 sources=prepared.sources,
                 debug=prepared.debug,
                 conversation_state=conversation_state_for_result(req, prepared).model_dump(),
             )
+
+        try:
+            yield stream_event("status", message="Đang phân tích câu hỏi...")
+            prepared = await prepare_chat(req)
+            yield metadata_event()
             if prepared.static_response is not None:
                 yield stream_event("token", token=prepared.static_response)
+                finish_resource_debug()
+                yield metadata_event()
                 yield stream_event("done")
                 return
 
@@ -1764,6 +1785,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     answer = generation_fallback(prepared)
                 for token in response_chunks(answer):
                     yield stream_event("token", token=token)
+                finish_resource_debug()
+                yield metadata_event()
                 yield stream_event("done")
                 return
 
@@ -1816,13 +1839,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             ),
                         }
                     )
-                    yield stream_event(
-                        "metadata",
-                        route_used=prepared.route_used,
-                        sources=prepared.sources,
-                        debug=prepared.debug,
-                        conversation_state=conversation_state_for_result(req, prepared).model_dump(),
-                    )
                     raise
                 if not fallback_answer.strip():
                     fallback_answer = generation_fallback(prepared)
@@ -1834,21 +1850,22 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         "fallback_status": "succeeded",
                     }
                 )
-                yield stream_event(
-                    "metadata",
-                    route_used=prepared.route_used,
-                    sources=prepared.sources,
-                    debug=prepared.debug,
-                    conversation_state=conversation_state_for_result(req, prepared).model_dump(),
-                )
+                yield metadata_event()
                 yield stream_event("token", token=fallback_answer)
+            finish_resource_debug()
+            yield metadata_event()
             yield stream_event("done")
         except Exception as exc:
             logger.exception("Streaming chat failed")
+            finish_resource_debug()
+            if prepared is not None:
+                yield metadata_event()
+            failure_detail = ollama_failure_detail(exc)
+            failure_detail["resources"] = resource_debug
             yield stream_event(
                 "error",
                 message="Không thể tạo câu trả lời lúc này. Vui lòng thử lại.",
-                detail=ollama_failure_detail(exc),
+                detail=failure_detail,
             )
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
