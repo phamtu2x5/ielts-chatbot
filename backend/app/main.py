@@ -2,7 +2,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -38,6 +38,7 @@ from .llm import (
     classify_rag_intent,
     direct_chat_messages,
     direct_answer_prompt,
+    extract_user_facts,
     query_ollama_chat,
     query_ollama,
     rag_prompt,
@@ -60,6 +61,7 @@ from .schemas import (
     ChatAffinity,
     ChatConversationState,
     ChatRequest,
+    ChatUserFact,
     SearchRequest,
     SearchResponse,
     StatsResponse,
@@ -521,6 +523,56 @@ def response_chunks(text: str, size: int = 180) -> list[str]:
     return [text[index : index + size] for index in range(0, len(text), size)] or [""]
 
 
+def user_profile_context(req: ChatRequest, max_chars: int = 1_200) -> str:
+    if not req.conversation_state or not req.conversation_state.user_facts:
+        return ""
+    lines: list[str] = []
+    length = 0
+    for fact in reversed(req.conversation_state.user_facts):
+        line = f"- {fact.key}: {fact.value}"
+        if lines and length + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        length += len(line) + 1
+    return "\n".join(reversed(lines))
+
+
+def merge_user_facts(
+    existing: list[ChatUserFact],
+    updates: list[ChatUserFact],
+    limit: int = 12,
+) -> list[ChatUserFact]:
+    merged = {fact.key: fact for fact in existing}
+    order = [fact.key for fact in existing]
+    for fact in updates:
+        if fact.key in order:
+            order.remove(fact.key)
+        order.append(fact.key)
+        merged[fact.key] = fact
+    return [merged[key] for key in order[-limit:]]
+
+
+async def collect_user_fact_updates(
+    req: ChatRequest,
+    prepared: "ChatPreparation",
+) -> None:
+    trusted_result = prepared.route_used in {
+        "base_model",
+        "vector_rag",
+        "vector_rag_static",
+    }
+    if not trusted_result:
+        prepared.debug["user_fact_extraction"] = {
+            "attempted": False,
+            "reason": "untrusted_result",
+            "facts": [],
+        }
+        return
+    decision = await extract_user_facts(req.message)
+    prepared.user_fact_updates = list(decision.facts)
+    prepared.debug["user_fact_extraction"] = decision.to_debug()
+
+
 def conversation_state_for_result(
     req: ChatRequest,
     prepared: "ChatPreparation",
@@ -569,7 +621,11 @@ def conversation_state_for_result(
         last_intent=(
             prepared.query_intent if trusted_result else previous_state.last_intent
         ),
-        user_facts=previous_state.user_facts,
+        user_facts=(
+            merge_user_facts(previous_state.user_facts, prepared.user_fact_updates)
+            if trusted_result
+            else previous_state.user_facts
+        ),
         rag_affinity=affinity,
     )
     prepared.debug["conversation_state"] = {
@@ -918,6 +974,7 @@ class ChatPreparation:
     sources: list[dict[str, Any]]
     debug: dict[str, Any]
     query_intent: str = "direct"
+    user_fact_updates: list[ChatUserFact] = field(default_factory=list)
 
 
 def affinity_retrieval_query(req: ChatRequest, use_affinity_context: bool) -> str:
@@ -1118,7 +1175,11 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
 
     if route == "direct":
         return ChatPreparation(
-            prompt=direct_answer_prompt(message, req.conversation_history),
+            prompt=direct_answer_prompt(
+                message,
+                req.conversation_history,
+                user_profile_context(req),
+            ),
             static_response=None,
             route_used="base_model",
             sources=[],
@@ -1619,6 +1680,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 query_intent=query_intent,
                 allow_solution=bool(intent_debug.get("allow_solution")),
                 writing_context=query_intent == "writing_generation" or bool(writing_parent_id),
+                user_profile=user_profile_context(req),
             ),
             static_response=None,
             route_used="vector_rag",
@@ -1638,7 +1700,11 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         )
 
     return ChatPreparation(
-        prompt=direct_answer_prompt(message, req.conversation_history),
+        prompt=direct_answer_prompt(
+            message,
+            req.conversation_history,
+            user_profile_context(req),
+        ),
         static_response=None,
         route_used="base_model",
         sources=[],
@@ -1810,6 +1876,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         try:
             yield stream_event("status", message="Đang phân tích câu hỏi...")
             prepared = await prepare_chat(req)
+            await collect_user_fact_updates(req, prepared)
             yield metadata_event()
             if prepared.static_response is not None:
                 yield stream_event("token", token=prepared.static_response)
@@ -1859,7 +1926,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 try:
                     if direct_fallback:
                         fallback_answer = await query_ollama_chat(
-                            direct_chat_messages(req.message, req.conversation_history),
+                            direct_chat_messages(
+                                req.message,
+                                req.conversation_history,
+                                user_profile_context(req),
+                            ),
                             temperature=temperature,
                         )
                     else:

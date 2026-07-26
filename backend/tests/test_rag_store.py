@@ -1407,6 +1407,80 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Answer this request from general knowledge", prompt)
         self.assertNotIn("Answer this general IELTS request", prompt)
 
+    def test_user_fact_candidate_requires_an_explicit_personal_statement(self) -> None:
+        self.assertTrue(llm.should_extract_user_facts("Hiện tại tôi đang ở band 5.5."))
+        self.assertTrue(llm.should_extract_user_facts("Tôi band 5.5."))
+        self.assertTrue(llm.should_extract_user_facts("My target is band 7.0."))
+        self.assertFalse(llm.should_extract_user_facts("Bạn nhớ tôi band bao nhiêu không?"))
+        self.assertFalse(llm.should_extract_user_facts("Cho tôi ba tips học IELTS."))
+        self.assertFalse(llm.should_extract_user_facts("Passage 2 nói gì?"))
+
+    def test_user_fact_parser_requires_verbatim_user_evidence(self) -> None:
+        response = json.dumps(
+            {
+                "facts": [
+                    {
+                        "key": "Current IELTS Band",
+                        "value": "5.5",
+                        "evidence": "tôi đang ở band 5.5",
+                    },
+                    {
+                        "key": "target_ielts_band",
+                        "value": "7.0",
+                        "evidence": "mục tiêu của tôi là 7.0",
+                    },
+                ]
+            }
+        )
+
+        facts = llm.parse_user_fact_response(
+            response,
+            "Hiện tại tôi đang ở band 5.5.",
+        )
+
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0].key, "current_ielts_band")
+        self.assertEqual(facts[0].value, "5.5")
+
+    def test_direct_prompt_uses_profile_without_exposing_evidence(self) -> None:
+        prompt = llm.direct_answer_prompt(
+            "Lên kế hoạch học trong ba tháng.",
+            user_profile="- current_ielts_band: 5.5\n- target_ielts_band: 6.5",
+        )
+
+        self.assertIn("User-provided profile facts", prompt)
+        self.assertIn("current_ielts_band: 5.5", prompt)
+        self.assertIn("target_ielts_band: 6.5", prompt)
+
+    async def test_user_fact_extractor_retries_invalid_output_once(self) -> None:
+        with patch.object(
+            llm,
+            "query_ollama",
+            AsyncMock(
+                side_effect=[
+                    "not json",
+                    json.dumps(
+                        {
+                            "facts": [
+                                {
+                                    "key": "current_ielts_band",
+                                    "value": "5.5",
+                                    "evidence": "Tôi band 5.5",
+                                }
+                            ]
+                        }
+                    ),
+                ]
+            ),
+        ) as mocked_query:
+            decision = await llm.extract_user_facts("Tôi band 5.5.")
+
+        self.assertTrue(decision.attempted)
+        self.assertEqual(decision.attempts, 2)
+        self.assertEqual(len(decision.facts), 1)
+        self.assertEqual(decision.facts[0].value, "5.5")
+        self.assertEqual(mocked_query.await_count, 2)
+
     def test_malformed_markdown_table_detects_multiline_cells(self) -> None:
         malformed = """| Period | Activities | Time |
 | --- | --- | --- |

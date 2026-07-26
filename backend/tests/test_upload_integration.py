@@ -513,6 +513,95 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.rag_affinity.question_ranges, [[27, 30]])
         self.assertEqual(state.user_facts[0].value, "6.5")
 
+    async def test_trusted_turn_merges_new_user_facts_by_key(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+            user_fact_updates=[
+                main.ChatUserFact(
+                    key="current_ielts_band",
+                    value="6.0",
+                    evidence="Hiện tại tôi band 6.0",
+                ),
+                main.ChatUserFact(
+                    key="target_ielts_band",
+                    value="7.0",
+                    evidence="mục tiêu band 7.0",
+                ),
+            ],
+        )
+        request = main.ChatRequest(
+            message="Hiện tại tôi band 6.0, mục tiêu band 7.0.",
+            conversation_state={
+                "last_route": "direct",
+                "last_intent": "direct",
+                "user_facts": [
+                    {
+                        "key": "current_ielts_band",
+                        "value": "5.5",
+                        "evidence": "Tôi band 5.5",
+                    }
+                ],
+            },
+        )
+
+        state = main.conversation_state_for_result(request, prepared)
+
+        self.assertEqual(
+            [(fact.key, fact.value) for fact in state.user_facts],
+            [
+                ("current_ielts_band", "6.0"),
+                ("target_ielts_band", "7.0"),
+            ],
+        )
+
+    async def test_collect_user_fact_updates_only_for_trusted_results(self) -> None:
+        fact = main.ChatUserFact(
+            key="current_ielts_band",
+            value="5.5",
+            evidence="Tôi band 5.5",
+        )
+        decision = types.SimpleNamespace(
+            facts=(fact,),
+            to_debug=lambda: {"attempted": True, "facts": [fact.model_dump()]},
+        )
+        request = main.ChatRequest(message="Tôi band 5.5.")
+        trusted = main.ChatPreparation(
+            prompt="direct prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+        )
+        untrusted = main.ChatPreparation(
+            prompt=None,
+            static_response="Please clarify.",
+            route_used="vector_rag_ambiguous_document",
+            sources=[],
+            debug={},
+        )
+
+        with patch.object(
+            main,
+            "extract_user_facts",
+            AsyncMock(return_value=decision),
+        ) as mocked_extract:
+            await main.collect_user_fact_updates(request, trusted)
+            await main.collect_user_fact_updates(request, untrusted)
+
+        self.assertEqual(trusted.user_fact_updates, [fact])
+        self.assertEqual(trusted.debug["user_fact_extraction"]["facts"], [fact.model_dump()])
+        self.assertEqual(untrusted.user_fact_updates, [])
+        self.assertEqual(
+            untrusted.debug["user_fact_extraction"]["reason"],
+            "untrusted_result",
+        )
+        mocked_extract.assert_awaited_once_with(request.message)
+
     async def test_untrusted_result_preserves_previous_conversation_state(self) -> None:
         previous_state = {
             "last_route": "rag",
@@ -549,6 +638,13 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     sources=[],
                     debug={},
                     query_intent="semantic_qa",
+                    user_fact_updates=[
+                        main.ChatUserFact(
+                            key="target_ielts_band",
+                            value="7.0",
+                            evidence="mục tiêu band 7.0",
+                        )
+                    ],
                 )
 
                 state = main.conversation_state_for_result(request, prepared)
