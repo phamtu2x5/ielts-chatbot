@@ -368,6 +368,20 @@ INTENT_UNDETERMINED_RESPONSE = (
     "Vui lòng nói rõ bạn muốn xem, dịch, giải thích, trả lời câu hỏi hay phân tích nội dung."
 )
 
+WRITING_VALIDATION_FAILURE_RESPONSE = (
+    "Mình chưa tạo được bài Writing đáp ứng đúng yêu cầu về ngôn ngữ, số từ và định dạng. "
+    "Vui lòng thử lại."
+)
+
+TRANSLATION_VALIDATION_FAILURE_RESPONSE = (
+    "Mình chưa tạo được bản dịch đầy đủ và đúng ngôn ngữ từ nội dung đã trích xuất. "
+    "Vui lòng thử lại."
+)
+
+FORMAT_VALIDATION_FAILURE_RESPONSE = (
+    "Mình chưa tạo được câu trả lời theo đúng định dạng yêu cầu. Vui lòng thử lại."
+)
+
 
 def document_extraction_failure_detail(document: Any) -> str:
     metadata = document.metadata or {}
@@ -445,7 +459,11 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             answer = selected
         else:
             generation_debug["retry_used"] = False
-        generation_debug["final_issues"] = writing_output_issues(answer, contract)
+        final_issues = writing_output_issues(answer, contract)
+        generation_debug["final_issues"] = final_issues
+        if final_issues:
+            answer = WRITING_VALIDATION_FAILURE_RESPONSE
+            generation_debug["validation_failed_closed"] = True
     else:
         allow_solution = bool(prepared.debug.get("intent_decision", {}).get("allow_solution", False))
         contract = response_output_contract(
@@ -498,6 +516,15 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             generation_debug["safe_fallback_used"] = True
             final_issues = response_output_issues(answer, contract)
         generation_debug["final_issues"] = final_issues
+        if final_issues and prepared.query_intent == "translate_questions":
+            answer = TRANSLATION_VALIDATION_FAILURE_RESPONSE
+            generation_debug["validation_failed_closed"] = True
+        elif final_issues and any(
+            "malformed Markdown table" in issue or "conversation role prefix" in issue
+            for issue in final_issues
+        ):
+            answer = FORMAT_VALIDATION_FAILURE_RESPONSE
+            generation_debug["validation_failed_closed"] = True
     return answer
 
 
