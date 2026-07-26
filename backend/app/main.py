@@ -233,8 +233,12 @@ def format_route_catalog_context(
         for label, key in (
             ("document_type", "document_types"),
             ("task_type", "task_types"),
+            ("mime_type", "mime_types"),
             ("sections", "section_titles"),
             ("passages", "passage_numbers"),
+            ("visual_types", "visual_types"),
+            ("question_ranges", "question_ranges"),
+            ("question_types", "question_types"),
             ("units", "unit_types"),
         ):
             values = [str(value) for value in item.get(key) or []]
@@ -255,6 +259,23 @@ def format_route_catalog_context(
         if available > 0:
             lines.append(suffix[:available])
     return "\n".join(lines)
+
+
+def format_route_request_anchors(message: str) -> str:
+    """Expose parser-derived request anchors without deciding the route."""
+    fields: list[str] = []
+    question_ranges = parse_question_ranges(message)
+    if question_ranges:
+        fields.append(
+            "question_ranges="
+            + ", ".join(f"{start}-{end}" for start, end in question_ranges)
+        )
+    passage_number = parse_passage_number(message)
+    if passage_number is not None:
+        fields.append(f"passage_number={passage_number}")
+    if not fields:
+        return ""
+    return "current_request_anchors: " + "; ".join(fields)
 
 
 def evidence_query_for_sources(sources: list[dict[str, Any]], fallback: str) -> str:
@@ -1048,9 +1069,16 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         for item in full_catalog
         if any(document_id in allowed_scope_ids for document_id in item.get("document_ids", []))
     ]
-    route_catalog_context = format_route_catalog_context(
-        full_catalog,
-        req.document_ids if req.document_scope == "explicit" else None,
+    route_catalog_context = "\n".join(
+        part
+        for part in (
+            format_route_request_anchors(message),
+            format_route_catalog_context(
+                full_catalog,
+                req.document_ids if req.document_scope == "explicit" else None,
+            ),
+        )
+        if part
     )
     gateway_decision = await classify_chat_route(
         message,

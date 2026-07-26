@@ -1078,6 +1078,40 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("attached_this_turn", reading_line)
         self.assertIn("attached_this_turn=true", writing_line)
 
+    def test_route_catalog_exposes_visual_and_question_structure(self) -> None:
+        context = main.format_route_catalog_context(
+            [
+                {
+                    "source_file": "reading.pdf",
+                    "document_ids": ["doc-reading"],
+                    "mime_types": ["application/pdf"],
+                    "document_types": ["ielts_reading"],
+                    "visual_types": ["diagram"],
+                    "question_ranges": ["27-32"],
+                    "question_types": ["matching_information"],
+                }
+            ]
+        )
+
+        self.assertIn("mime_type=application/pdf", context)
+        self.assertIn("visual_types=diagram", context)
+        self.assertIn("question_ranges=27-32", context)
+        self.assertIn("question_types=matching_information", context)
+
+    def test_route_request_anchors_are_parser_derived(self) -> None:
+        anchors = main.format_route_request_anchors(
+            "Explain the strategy for Questions 27-32 in Passage 3."
+        )
+
+        self.assertEqual(
+            anchors,
+            "current_request_anchors: question_ranges=27-32; passage_number=3",
+        )
+        self.assertEqual(
+            main.format_route_request_anchors("Give me general IELTS study tips."),
+            "",
+        )
+
     def test_target_catalog_reports_documents_omitted_by_context_limit(self) -> None:
         catalog = [
             {

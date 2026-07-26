@@ -826,6 +826,23 @@ class LocalVectorStoreTests(unittest.TestCase):
             any("smartphone ownership" in item.lower() for item in catalog[0]["target_descriptors"])
         )
 
+    def test_document_catalog_exposes_question_structure_metadata(self) -> None:
+        store = FakeVectorStore()
+        group = self._chunk("question-group", "reading.pdf", "Questions 27-32")
+        group["document_id"] = "doc-reading"
+        group["metadata"] = {
+            "mime_type": "application/pdf",
+            "unit_type": "question_group",
+            "question_range": [27, 32],
+            "question_type": "matching_information",
+        }
+        store.upsert([group], "reading.pdf")
+
+        catalog = store.document_catalog()
+
+        self.assertEqual(catalog[0]["question_ranges"], ["27-32"])
+        self.assertEqual(catalog[0]["question_types"], ["matching_information"])
+
     def test_document_catalog_uses_sample_topic_when_writing_task_has_no_title(self) -> None:
         store = FakeVectorStore()
         task = self._chunk("writing-task", "writing.pdf", "IELTS Writing Task 1 (line chart).")
@@ -1182,13 +1199,14 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             document_context=document_context,
         )
 
-        self.assertIn("Uploaded material signatures (metadata only", prompt)
+        self.assertIn("Structured routing context (metadata only", prompt)
         self.assertIn("file=reading.pdf", prompt)
         self.assertIn("=== CURRENT REQUEST TO CLASSIFY ===\nTranslate Questions 1-4.", prompt)
         self.assertIn("translating uploaded content", prompt)
         self.assertIn("Do not choose DIRECT by guessing", prompt)
         self.assertIn("attached_this_turn=true", prompt)
         self.assertIn("not sufficient by itself to choose RAG", prompt)
+        self.assertIn("numbered question range", prompt)
 
     def test_route_classifier_uses_document_dependency_not_topic_domain(self) -> None:
         prompt = llm.route_classifier_prompt("Explain a common technology concept.")

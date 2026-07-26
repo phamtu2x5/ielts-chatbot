@@ -159,6 +159,8 @@ class StructuredDocumentStore:
                     "task_types": set(),
                     "section_titles": set(),
                     "visual_types": set(),
+                    "question_ranges": set(),
+                    "question_types": set(),
                     "table_columns": [],
                     "target_descriptors": [],
                     "untitled_writing_parents": set(),
@@ -193,6 +195,17 @@ class StructuredDocumentStore:
             visual_type = metadata.get("visual_type")
             if visual_type:
                 entry["visual_types"].add(str(visual_type))
+            question_range = metadata.get("question_range")
+            if (
+                isinstance(question_range, (list, tuple))
+                and len(question_range) == 2
+            ):
+                entry["question_ranges"].add(
+                    f"{question_range[0]}-{question_range[1]}"
+                )
+            question_type = metadata.get("question_type")
+            if question_type:
+                entry["question_types"].add(str(question_type))
             table = metadata.get("table")
             if isinstance(table, dict):
                 table_type = table.get("type")
@@ -245,6 +258,8 @@ class StructuredDocumentStore:
                 "task_types": sorted(item["task_types"]),
                 "section_titles": sorted(item["section_titles"]),
                 "visual_types": sorted(item["visual_types"]),
+                "question_ranges": sorted(item["question_ranges"]),
+                "question_types": sorted(item["question_types"]),
                 "table_columns": item["table_columns"],
                 "target_descriptors": item["target_descriptors"],
                 "ingested_at": item["ingested_at"] or None,
