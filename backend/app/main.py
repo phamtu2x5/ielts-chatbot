@@ -525,15 +525,18 @@ def conversation_state_for_result(
     req: ChatRequest,
     prepared: "ChatPreparation",
 ) -> ChatConversationState:
-    previous_affinity = conversation_affinity(req) or ChatAffinity()
+    previous_state = req.conversation_state or ChatConversationState()
+    previous_affinity = previous_state.rag_affinity
+    trusted_result = prepared.route_used in {
+        "base_model",
+        "vector_rag",
+        "vector_rag_static",
+    }
     if prepared.route_used == "base_model":
         route = "direct"
         affinity = previous_affinity
-    elif prepared.route_used == "vector_rag_ambiguous_document":
-        route = "clarify"
-        affinity = previous_affinity
-    elif prepared.route_used in {"vector_rag_no_match", "route_undetermined", "intent_undetermined"}:
-        route = "no_match"
+    elif not trusted_result:
+        route = previous_state.last_route
         affinity = previous_affinity
     else:
         route = "rag"
@@ -563,11 +566,19 @@ def conversation_state_for_result(
         )
     state = ChatConversationState(
         last_route=route,
-        last_intent=prepared.query_intent,
+        last_intent=(
+            prepared.query_intent if trusted_result else previous_state.last_intent
+        ),
+        user_facts=previous_state.user_facts,
         rag_affinity=affinity,
     )
     prepared.debug["conversation_state"] = {
         "input": req.conversation_state.model_dump() if req.conversation_state else None,
+        "result": {
+            "route_used": prepared.route_used,
+            "query_intent": prepared.query_intent,
+            "trusted": trusted_result,
+        },
         "output": state.model_dump(),
     }
     return state

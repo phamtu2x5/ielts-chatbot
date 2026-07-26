@@ -454,6 +454,13 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "passage_numbers": [2],
                     "question_ranges": [[14, 17]],
                 },
+                "user_facts": [
+                    {
+                        "key": "current_ielts_band",
+                        "value": "5.5",
+                        "evidence": "I am currently at band 5.5.",
+                    }
+                ],
             },
         )
 
@@ -462,6 +469,94 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.last_route, "direct")
         self.assertEqual(state.rag_affinity.document_ids, ["doc-1"])
         self.assertEqual(state.rag_affinity.passage_numbers, [2])
+        self.assertEqual(state.user_facts[0].value, "5.5")
+
+    async def test_successful_rag_turn_updates_affinity_and_preserves_user_facts(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[
+                {
+                    "document_id": "doc-2",
+                    "metadata": {
+                        "passage_number": 3,
+                        "question_range": [27, 30],
+                    },
+                }
+            ],
+            debug={},
+            query_intent="solve_questions",
+        )
+        request = main.ChatRequest(
+            message="Answer Questions 27-30.",
+            conversation_state={
+                "last_route": "direct",
+                "last_intent": "direct",
+                "user_facts": [
+                    {
+                        "key": "target_ielts_band",
+                        "value": "6.5",
+                        "evidence": "My target is band 6.5.",
+                    }
+                ],
+                "rag_affinity": {"document_ids": ["doc-1"]},
+            },
+        )
+
+        state = main.conversation_state_for_result(request, prepared)
+
+        self.assertEqual(state.last_route, "rag")
+        self.assertEqual(state.last_intent, "solve_questions")
+        self.assertEqual(state.rag_affinity.document_ids, ["doc-2"])
+        self.assertEqual(state.rag_affinity.passage_numbers, [3])
+        self.assertEqual(state.rag_affinity.question_ranges, [[27, 30]])
+        self.assertEqual(state.user_facts[0].value, "6.5")
+
+    async def test_untrusted_result_preserves_previous_conversation_state(self) -> None:
+        previous_state = {
+            "last_route": "rag",
+            "last_intent": "semantic_qa",
+            "user_facts": [
+                {
+                    "key": "current_ielts_band",
+                    "value": "5.5",
+                    "evidence": "I am currently at band 5.5.",
+                }
+            ],
+            "rag_affinity": {
+                "document_ids": ["doc-1"],
+                "passage_numbers": [2],
+                "question_ranges": [[14, 17]],
+            },
+        }
+        request = main.ChatRequest(
+            message="Which document?",
+            conversation_state=previous_state,
+        )
+
+        for route_used in (
+            "vector_rag_ambiguous_document",
+            "vector_rag_no_match",
+            "route_undetermined",
+            "intent_undetermined",
+        ):
+            with self.subTest(route_used=route_used):
+                prepared = main.ChatPreparation(
+                    prompt=None,
+                    static_response="Please clarify.",
+                    route_used=route_used,
+                    sources=[],
+                    debug={},
+                    query_intent="semantic_qa",
+                )
+
+                state = main.conversation_state_for_result(request, prepared)
+
+                self.assertEqual(state.model_dump(), previous_state)
+                self.assertFalse(
+                    prepared.debug["conversation_state"]["result"]["trusted"]
+                )
 
     async def test_gateway_failure_without_document_basis_streams_safe_result(self) -> None:
         catalog = [
@@ -483,7 +578,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         metadata = next(event for event in events if event["type"] == "metadata")
         self.assertEqual(metadata["route_used"], "route_undetermined")
-        self.assertEqual(metadata["conversation_state"]["last_route"], "no_match")
+        self.assertIsNone(metadata["conversation_state"]["last_route"])
         self.assertEqual(metadata["sources"], [])
         self.assertTrue(any(event["type"] == "done" for event in events))
 

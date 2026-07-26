@@ -14,9 +14,16 @@ class ChatAffinity(BaseModel):
     question_ranges: List[List[int]] = Field(default_factory=list, max_length=20)
 
 
+class ChatUserFact(BaseModel):
+    key: str = Field(min_length=1, max_length=80)
+    value: str = Field(min_length=1, max_length=500)
+    evidence: str = Field(min_length=1, max_length=1_000)
+
+
 class ChatConversationState(BaseModel):
     last_route: Optional[Literal["direct", "rag", "clarify", "no_match"]] = None
     last_intent: Optional[str] = None
+    user_facts: List[ChatUserFact] = Field(default_factory=list, max_length=12)
     rag_affinity: ChatAffinity = Field(default_factory=ChatAffinity)
 
 

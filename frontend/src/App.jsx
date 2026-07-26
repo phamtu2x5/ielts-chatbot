@@ -478,8 +478,10 @@ function App() {
         if (uploadedFiles.length) {
           if (uploadedFiles.length === 1) {
             setConversationState((current) => ({
+              ...(current || {}),
               last_route: current?.last_route || null,
               last_intent: current?.last_intent || null,
+              user_facts: current?.user_facts || [],
               rag_affinity: {
                 document_ids: [uploadedFiles[0].document_id],
                 passage_numbers: [],
@@ -552,7 +554,7 @@ function App() {
             ? uploadedFiles.map((data) => data.document_id)
             : null,
           document_scope: uploadedFiles.length ? "explicit" : "available",
-          conversation_state: uploadedFiles.length ? null : conversationState,
+          conversation_state: conversationState,
         }),
       });
       if (!response.ok || !response.body) {

@@ -44,6 +44,10 @@ Upload text/PDF/DOCX/image
 backend returns the updated state after each turn so successful document
 affinity can be offered to target resolution as weak follow-up context without
 mixing it into the direct/RAG gateway or forcing later questions into that file.
+User-provided profile facts are stored separately from document affinity. Only
+successful direct or grounded RAG results may update the trusted route, intent,
+and affinity; clarification, no-match, and classifier failures preserve the
+previous trusted state.
 The frontend and the 66-case capture runner use this single chat endpoint.
 
 ### Current chat patch boundaries
