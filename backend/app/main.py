@@ -348,6 +348,11 @@ NO_RAG_MATCH_RESPONSE = (
     "Bạn có thể hỏi rõ hơn theo tên bài, số trang, hoặc upload lại tài liệu nếu phần đó nằm trong bảng/ảnh chưa được trích xuất tốt."
 )
 
+NO_RAG_MATCH_RESPONSE_EN = (
+    "I could not find relevant content in the uploaded material to answer this question. "
+    "Please specify the document, section, or page, or upload the material again if the content is in a table or image that was not extracted correctly."
+)
+
 AMBIGUOUS_DOCUMENT_RESPONSE = (
     "Mình chưa xác định được bạn đang hỏi tài liệu nào vì có nhiều file phù hợp. "
     "Vui lòng nêu tên file hoặc đính kèm lại đúng tài liệu cần hỏi."
@@ -429,6 +434,15 @@ def generation_fallback(prepared: "ChatPreparation") -> str:
     return "Mình chưa nhận được nội dung trả lời từ model. Vui lòng thử lại."
 
 
+def no_rag_match_response(message: str) -> str:
+    contract = response_output_contract(
+        message,
+        "semantic_qa",
+        allow_solution=False,
+    )
+    return NO_RAG_MATCH_RESPONSE_EN if contract.language == "English" else NO_RAG_MATCH_RESPONSE
+
+
 def generation_temperature(prepared: "ChatPreparation") -> float:
     if is_writing_response(prepared):
         return 0.1
@@ -500,7 +514,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         )
         if should_retry:
             retry = await query_ollama(
-                response_retry_prompt(prompt, contract),
+                response_retry_prompt(prompt, contract, prepared.query_intent),
                 temperature=0.1,
             )
             selected = min(
@@ -1133,6 +1147,8 @@ def resolve_target_refs(
 def gateway_clarification_response(
     catalog: list[dict[str, Any]],
     candidate_document_ids: list[str] | None = None,
+    *,
+    no_match_response: str = NO_RAG_MATCH_RESPONSE,
 ) -> str:
     by_document_id = {
         str(document_id): item.get("source_file", "unknown")
@@ -1148,7 +1164,7 @@ def gateway_clarification_response(
         files = [item.get("source_file", "unknown") for item in catalog]
     files = list(dict.fromkeys(files))[: settings.target_clarification_max_candidates]
     if not files:
-        return NO_RAG_MATCH_RESPONSE
+        return no_match_response
     choices = "\n".join(f"- {name}" for name in files)
     return f"{AMBIGUOUS_DOCUMENT_RESPONSE}\n\nCác file phù hợp nhất:\n{choices}"
 
@@ -1416,9 +1432,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         return ChatPreparation(
             prompt=None,
             static_response=(
-                gateway_clarification_response(catalog, clarification_document_ids)
+                gateway_clarification_response(
+                    catalog,
+                    clarification_document_ids,
+                    no_match_response=no_rag_match_response(message),
+                )
                 if len(allowed_scope_ids) > 1
-                else NO_RAG_MATCH_RESPONSE
+                else no_rag_match_response(message)
             ),
             route_used=(
                 "vector_rag_ambiguous_document"
@@ -1665,7 +1685,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             debug["no_match_guard"] = "presence_check_without_lexical_hit"
             return ChatPreparation(
                 prompt=None,
-                static_response=NO_RAG_MATCH_RESPONSE,
+                static_response=no_rag_match_response(message),
                 route_used="vector_rag_no_match",
                 sources=sources,
                 debug=debug,
@@ -1697,7 +1717,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             debug["no_match_guard"] = "deterministic_intent_without_structured_response"
             return ChatPreparation(
                 prompt=None,
-                static_response=NO_RAG_MATCH_RESPONSE,
+                static_response=no_rag_match_response(message),
                 route_used="vector_rag_no_match",
                 sources=sources,
                 debug=debug,
@@ -1735,7 +1755,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     if route == "rag":
         return ChatPreparation(
             prompt=None,
-            static_response=NO_RAG_MATCH_RESPONSE,
+            static_response=no_rag_match_response(message),
             route_used="vector_rag_no_match",
             sources=[],
             debug=debug,

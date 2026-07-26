@@ -424,11 +424,39 @@ def has_malformed_markdown_table(text: str) -> bool:
     return False
 
 
-def response_retry_prompt(original_prompt: str, contract: ResponseOutputContract) -> str:
+def response_retry_prompt(
+    original_prompt: str,
+    contract: ResponseOutputContract,
+    query_intent: str = "",
+) -> str:
     contract_text = "\n".join(contract.prompt_lines())
+    task_instruction = {
+        "document_overview": (
+            "Summarize the requested document or section in the required language. "
+            "Do not copy the English outline as the final answer."
+        ),
+        "translate_questions": (
+            "Translate every requested numbered instruction and question statement into the "
+            "required language. Preserve the question numbers and do not answer them."
+        ),
+        "explain_questions": (
+            "Explain the requested task instructions, vocabulary, and method in the required "
+            "language without solving the questions."
+        ),
+        "semantic_qa": (
+            "Answer the user's document-grounded question directly in the required language, "
+            "using only the supplied study material."
+        ),
+    }.get(
+        query_intent,
+        "Answer the user's original request directly in the required language.",
+    )
     return f"""{original_prompt}
 
 Generate a fresh response from the original study material context. Do not refer to an earlier draft, validation, or correction.
+
+Required task:
+- {task_instruction}
 
 Final output contract:
 {contract_text}

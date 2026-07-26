@@ -1932,6 +1932,22 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer, translated)
         self.assertEqual(model.await_count, 2)
         self.assertEqual(prepared.debug["generation"]["final_issues"], [])
+        self.assertIn(
+            "Translate every requested numbered",
+            model.await_args_list[1].args[0],
+        )
+
+    def test_no_match_response_uses_requested_language(self) -> None:
+        self.assertEqual(
+            main.no_rag_match_response("Không có nội dung này trong tài liệu phải không?"),
+            main.NO_RAG_MATCH_RESPONSE,
+        )
+        self.assertEqual(
+            main.no_rag_match_response(
+                "Is this topic mentioned in the uploaded document? Answer in English."
+            ),
+            main.NO_RAG_MATCH_RESPONSE_EN,
+        )
 
     async def test_translation_fails_closed_when_retry_is_still_invalid(self) -> None:
         prepared = main.ChatPreparation(

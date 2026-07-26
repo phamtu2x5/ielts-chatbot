@@ -1075,8 +1075,14 @@ class LocalVectorStoreTests(unittest.TestCase):
         )
         self.assertTrue(any("not written in Vietnamese" in issue for issue in issues))
         self.assertTrue(any("26, 27" in issue for issue in issues))
-        retry_prompt = response_retry_prompt("original context", contract)
+        retry_prompt = response_retry_prompt(
+            "original context",
+            contract,
+            "translate_questions",
+        )
         self.assertIn("Output language: Vietnamese", retry_prompt)
+        self.assertIn("Translate every requested numbered", retry_prompt)
+        self.assertIn("Preserve the question numbers", retry_prompt)
         self.assertNotIn("Which body", retry_prompt)
 
     def test_comparison_facts_describe_changes_instead_of_only_reprinting_row(self) -> None:
