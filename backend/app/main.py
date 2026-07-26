@@ -25,6 +25,7 @@ from .intent import (
     dedupe_sources,
     filter_sources_for_intent,
     has_explicit_no_solution_constraint,
+    parse_passage_number,
     parse_question_ranges,
     semantic_intent_decision,
 )
