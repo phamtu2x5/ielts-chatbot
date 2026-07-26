@@ -208,6 +208,9 @@ class ResponseOutputContract:
             lines.append(
                 "- Do not select, infer, eliminate, or hint at any answer. Explain or translate only."
             )
+            lines.append(
+                "- Do not map numbered items to categories, people, methods, paragraphs, options, or labels."
+            )
         lines.append(
             "- Every Markdown table row must occupy exactly one physical line. Use semicolons, not bullets or line breaks, inside cells."
         )
@@ -522,6 +525,9 @@ def select_best_writing_output(
 def likely_contains_solution(text: str) -> bool:
     lowered = text.lower()
     if any(marker in lowered for marker in ["đáp án là", "đáp án đúng", "answer is", "correct answer"]):
+        return True
+    mapping_lines = re.findall(r"(?im)^\s*(?:→|->|=>)\s*\S+", text)
+    if len(mapping_lines) >= 2:
         return True
     return bool(
         re.search(
@@ -1472,6 +1478,7 @@ def rag_prompt(
                 "- You may explain the task type, instructions, vocabulary, and Vietnamese meaning.",
                 "- Name the task type only when it is explicitly supported by the question instructions in the context. Otherwise describe the instruction without guessing a type.",
                 "- Do not solve the questions, do not provide True/False/Not Given labels, do not choose A/B/C/D, and do not infer answers.",
+                "- Do not map individual question numbers to categories, people, methods, paragraphs, options, or labels.",
                 "- Do not treat the question statements themselves as passage evidence.",
             ]
         )

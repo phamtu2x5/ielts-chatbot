@@ -382,6 +382,14 @@ FORMAT_VALIDATION_FAILURE_RESPONSE = (
     "Mình chưa tạo được câu trả lời theo đúng định dạng yêu cầu. Vui lòng thử lại."
 )
 
+LANGUAGE_VALIDATION_FAILURE_RESPONSE_VI = (
+    "Mình chưa tạo được câu trả lời đúng ngôn ngữ yêu cầu. Vui lòng thử lại."
+)
+
+LANGUAGE_VALIDATION_FAILURE_RESPONSE_EN = (
+    "I could not generate the response in the requested language. Please try again."
+)
+
 
 def document_extraction_failure_detail(document: Any) -> str:
     metadata = document.metadata or {}
@@ -482,6 +490,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         }
         should_retry = bool(issues) and (
             prepared.query_intent == "translate_questions"
+            or any("not written in" in issue for issue in issues)
             or any("malformed Markdown table" in issue for issue in issues)
             or any("conversation role prefix" in issue for issue in issues)
             or (
@@ -518,6 +527,13 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         generation_debug["final_issues"] = final_issues
         if final_issues and prepared.query_intent == "translate_questions":
             answer = TRANSLATION_VALIDATION_FAILURE_RESPONSE
+            generation_debug["validation_failed_closed"] = True
+        elif final_issues and any("not written in" in issue for issue in final_issues):
+            answer = (
+                LANGUAGE_VALIDATION_FAILURE_RESPONSE_EN
+                if contract.language == "English"
+                else LANGUAGE_VALIDATION_FAILURE_RESPONSE_VI
+            )
             generation_debug["validation_failed_closed"] = True
         elif final_issues and any(
             "malformed Markdown table" in issue or "conversation role prefix" in issue

@@ -1798,6 +1798,90 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(model.await_count, 2)
 
+    async def test_no_solution_repeated_arrow_mappings_are_rewritten(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded explanation prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": False}},
+            query_intent="explain_questions",
+        )
+        model = AsyncMock(
+            side_effect=[
+                "24. First statement\n→ Shade-grown method\n\n"
+                "25. Second statement\n→ Full-sun method",
+                "Đối chiếu từ khóa trong mỗi phát biểu với mô tả của từng phương pháp.",
+            ]
+        )
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Giải thích Questions 24-27 nhưng không chọn đáp án.",
+            )
+
+        self.assertEqual(
+            answer,
+            "Đối chiếu từ khóa trong mỗi phát biểu với mô tả của từng phương pháp.",
+        )
+        self.assertEqual(model.await_count, 2)
+
+    async def test_non_translation_language_mismatch_is_retried(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded overview prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": False}},
+            query_intent="document_overview",
+        )
+        model = AsyncMock(
+            side_effect=[
+                "Passage 1: Travel. Questions 1-13.",
+                "Tài liệu gồm ba đoạn đọc với các nhóm câu hỏi tương ứng.",
+            ]
+        )
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Mô tả cấu trúc tài liệu bằng tiếng Việt.",
+            )
+
+        self.assertEqual(
+            answer,
+            "Tài liệu gồm ba đoạn đọc với các nhóm câu hỏi tương ứng.",
+        )
+        self.assertEqual(model.await_count, 2)
+        self.assertEqual(prepared.debug["generation"]["final_issues"], [])
+
+    async def test_non_translation_language_mismatch_fails_closed(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded overview prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": False}},
+            query_intent="document_overview",
+        )
+        model = AsyncMock(
+            side_effect=[
+                "Passage 1: Travel. Questions 1-13.",
+                "Passage 1: Travel. Questions 1-13.",
+            ]
+        )
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Mô tả cấu trúc tài liệu bằng tiếng Việt.",
+            )
+
+        self.assertEqual(answer, main.LANGUAGE_VALIDATION_FAILURE_RESPONSE_VI)
+        self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
+
     async def test_compliant_no_solution_response_is_not_generated_twice(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded explanation prompt",
