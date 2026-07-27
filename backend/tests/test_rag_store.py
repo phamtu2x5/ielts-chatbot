@@ -1705,6 +1705,20 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             any("malformed Markdown table" in issue for issue in response_output_issues(malformed, contract))
         )
 
+    def test_malformed_markdown_table_detects_missing_structure_and_column_mismatch(self) -> None:
+        rows_without_header = """| Passage 1 | Travel |
+| Passage 2 | Technology |
+| Passage 3 | Education |"""
+        inconsistent_columns = """| Period | Activities | Time |
+| --- | --- | --- |
+| Weeks 1-4 | Read daily | 60 minutes |
+| Weeks 5-8 | Write weekly |"""
+        prose_with_pipe = "Use skimming | scanning only as a comparison in this sentence."
+
+        self.assertTrue(has_malformed_markdown_table(rows_without_header))
+        self.assertTrue(has_malformed_markdown_table(inconsistent_columns))
+        self.assertFalse(has_malformed_markdown_table(prose_with_pipe))
+
     async def test_non_stream_request_retries_one_server_error(self) -> None:
         attempts = 0
 

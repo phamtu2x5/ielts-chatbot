@@ -2051,6 +2051,35 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_count, 2)
         self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
 
+    async def test_generation_retries_a_table_without_header_or_separator(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded overview prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": False}},
+            query_intent="document_overview",
+        )
+        malformed = """| Passage 1 | Du lịch |
+| Passage 2 | Công nghệ |
+| Passage 3 | Giáo dục |"""
+        valid = """| Passage | Chủ đề |
+| --- | --- |
+| Passage 1 | Du lịch |
+| Passage 2 | Công nghệ |
+| Passage 3 | Giáo dục |"""
+        model = AsyncMock(side_effect=[malformed, valid])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Tóm tắt cấu trúc tài liệu bằng tiếng Việt.",
+            )
+
+        self.assertEqual(answer, valid)
+        self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["retry_used"])
+
     async def test_no_solution_uses_safe_fallback_when_retry_still_leaks(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded explanation prompt",

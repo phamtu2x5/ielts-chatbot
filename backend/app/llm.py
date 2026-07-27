@@ -543,7 +543,10 @@ def response_output_issues(text: str, contract: ResponseOutputContract) -> list[
         if missing:
             issues.append(f"The response is missing question numbers: {missing}.")
     if has_malformed_markdown_table(text):
-        issues.append("The response contains a malformed Markdown table with a row split across lines.")
+        issues.append(
+            "The response contains a malformed Markdown table: use one header row, "
+            "one separator row, and the same number of cells on every physical line."
+        )
     issues.extend(_plan_output_issues(text, contract))
     return issues
 
@@ -613,23 +616,39 @@ def _plan_output_issues(text: str, contract: ResponseOutputContract) -> list[str
 
 def has_malformed_markdown_table(text: str) -> bool:
     lines = text.splitlines()
-    for index in range(len(lines) - 1):
-        header = lines[index].strip()
-        separator = lines[index + 1].strip()
-        if not (header.startswith("|") and header.endswith("|")):
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line.startswith("|"):
+            index += 1
             continue
-        if not re.fullmatch(r"\|(?:\s*:?-{3,}:?\s*\|){2,}", separator):
-            continue
+        if not line.endswith("|"):
+            return True
 
-        expected_cells = header.count("|") - 1
-        row_index = index + 2
-        while row_index < len(lines) and lines[row_index].strip():
-            row = lines[row_index].strip()
+        block: list[str] = []
+        while index < len(lines):
+            row = lines[index].strip()
             if not row.startswith("|"):
                 break
-            if not row.endswith("|") or row.count("|") - 1 != expected_cells:
+            if not row.endswith("|"):
                 return True
-            row_index += 1
+            block.append(row)
+            index += 1
+
+        if len(block) < 2:
+            return True
+
+        expected_cells = block[0].count("|") - 1
+        if expected_cells < 2:
+            return True
+        separator_cells = block[1].strip("|").split("|")
+        if len(separator_cells) != expected_cells or not all(
+            re.fullmatch(r"\s*:?-{3,}:?\s*", cell)
+            for cell in separator_cells
+        ):
+            return True
+        if any(row.count("|") - 1 != expected_cells for row in block[2:]):
+            return True
     return False
 
 
