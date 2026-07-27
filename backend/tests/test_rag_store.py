@@ -45,7 +45,9 @@ from app.llm import (
     response_output_contract,
     response_output_issues,
     response_output_penalty,
+    response_language_debug,
     response_retry_prompt,
+    select_best_response_output,
     select_best_writing_output,
     translation_retry_prompt,
     writing_output_contract,
@@ -1149,6 +1151,90 @@ Final output contract:
 
         self.assertIn("25. Which body provides global tourist numbers?", retry_prompt)
         self.assertIn("Dịch Question 25 sang tiếng Việt, chưa trả lời.", retry_prompt)
+        self.assertNotIn("unrelated history", retry_prompt)
+        self.assertNotIn("System instructions that should not be repeated", retry_prompt)
+
+    def test_translation_retry_prompt_prefers_complete_question_group(self) -> None:
+        original_prompt = """System instructions.
+
+Study material context:
+[Source 1: reading.pdf, pages 4] Questions 25-27 Using NO MORE THAN THREE WORDS, answer the questions. 25. Which body publishes the figures? 26. Who benefits financially? 27. Which meeting supplied the principles?
+
+[Source 2: reading.pdf, pages 4] 25. Which body publishes the figures?
+
+[Source 3: reading.pdf, pages 4] 26. Who benefits financially?
+
+Question:
+Dịch Questions 25-27 sang tiếng Việt, chưa trả lời."""
+        contract = response_output_contract(
+            "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",
+            "translate_questions",
+            allow_solution=False,
+        )
+
+        retry_prompt = translation_retry_prompt(original_prompt, contract)
+
+        self.assertEqual(retry_prompt.count("Which body publishes the figures?"), 1)
+        self.assertIn("Which meeting supplied the principles?", retry_prompt)
+        self.assertIn("NO MORE THAN THREE WORDS", retry_prompt)
+
+    def test_vietnamese_validation_allows_required_english_phrases(self) -> None:
+        contract = response_output_contract(
+            "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",
+            "translate_questions",
+            allow_solution=False,
+        )
+        translated = (
+            "Chọn NO MORE THAN THREE WORDS từ bài đọc.\n"
+            "25. Cơ quan nào công bố số liệu du lịch toàn cầu?\n"
+            "26. Ai thường nhận được lợi ích tài chính?\n"
+            "27. Cuộc họp nào đưa ra các nguyên tắc?"
+        )
+
+        self.assertEqual(response_output_issues(translated, contract), [])
+        self.assertEqual(response_language_debug(translated, "Vietnamese")["mismatch_score"], 0)
+
+    def test_vietnamese_validation_accepts_short_natural_response(self) -> None:
+        contract = response_output_contract(
+            "xin chào",
+            "direct",
+            allow_solution=True,
+        )
+
+        self.assertEqual(response_output_issues("Chào bạn.", contract), [])
+
+    def test_response_selection_uses_language_evidence_to_break_ties(self) -> None:
+        contract = response_output_contract(
+            "Mô tả ba passage bằng tiếng Việt.",
+            "document_overview",
+            allow_solution=False,
+        )
+        weak = "Passage 1: Travel. Questions 1-13."
+        strong = "Tài liệu gồm ba passage và các nhóm câu hỏi tương ứng."
+
+        self.assertEqual(select_best_response_output(weak, strong, contract), strong)
+
+    def test_overview_retry_prompt_excludes_history_and_system_instructions(self) -> None:
+        original_prompt = """System instructions that should not be repeated.
+
+Study material context:
+[Source 1: reading.pdf, pages 1-6] Passage 1: Travel. Questions 1-13.
+
+Previous conversation:
+User: unrelated history
+
+Question:
+Mô tả cấu trúc tài liệu bằng tiếng Việt."""
+        contract = response_output_contract(
+            "Mô tả cấu trúc tài liệu bằng tiếng Việt.",
+            "document_overview",
+            allow_solution=False,
+        )
+
+        retry_prompt = response_retry_prompt(original_prompt, contract, "document_overview")
+
+        self.assertIn("Passage 1: Travel", retry_prompt)
+        self.assertIn("OUTPUT LANGUAGE: Vietnamese", retry_prompt)
         self.assertNotIn("unrelated history", retry_prompt)
         self.assertNotIn("System instructions that should not be repeated", retry_prompt)
 

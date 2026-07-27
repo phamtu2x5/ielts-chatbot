@@ -151,6 +151,13 @@ ENGLISH_COMMON_WORDS = frozenset(
         "words",
     }
 )
+PROTECTED_ENGLISH_RE = re.compile(
+    r"\bNO\s+MORE\s+THAN\s+[A-Z-]+(?:\s+[A-Z-]+){0,3}\b|"
+    r"\b(?:TRUE|FALSE|NOT\s+GIVEN)\b|"
+    r"\bQuestions?\s+\d{1,3}(?:\s*(?:-|–|—|to)\s*\d{1,3})?\b|"
+    r"\b[^\s]+\.(?:pdf|png|jpe?g|docx?)\b",
+    re.IGNORECASE,
+)
 WORD_RANGE_RE = re.compile(
     r"\b(\d{2,4})\s*(?:-|–|—|to|đến|tới)\s*(\d{2,4})\s*(?:words?|từ)\b",
     re.IGNORECASE,
@@ -445,7 +452,13 @@ def response_output_contract(
     )
 
 
+def _language_analysis_text(text: str) -> str:
+    text = re.sub(r"\[Source\s+\d+\s*:[^\]]+\]", " ", text, flags=re.IGNORECASE)
+    return PROTECTED_ENGLISH_RE.sub(" ", text)
+
+
 def _language_evidence(text: str) -> tuple[int, int, int]:
+    text = _language_analysis_text(text)
     tokens = [
         token.lower()
         for token in re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
@@ -465,6 +478,18 @@ def _language_mismatch_score(text: str, language: str | None) -> int:
         return 0
     vietnamese_score, english_score, token_count = _language_evidence(text)
     if language == "Vietnamese":
+        analysis_text = _language_analysis_text(text)
+        accented_characters = len(VIETNAMESE_CHARACTER_RE.findall(analysis_text))
+        vietnamese_words = sum(
+            token.lower() in VIETNAMESE_COMMON_WORDS
+            for token in re.findall(r"[^\W\d_]+", analysis_text, flags=re.UNICODE)
+        )
+        if (
+            accented_characters >= 1
+            and vietnamese_words >= 1
+            and english_score <= max(2, vietnamese_score)
+        ):
+            return 0
         minimum_vietnamese_score = max(3, min(10, (token_count + 1) // 2))
         if (
             vietnamese_score >= minimum_vietnamese_score
@@ -482,6 +507,18 @@ def _language_mismatch_score(text: str, language: str | None) -> int:
         if accented_characters >= 5 and accented_characters / max(1, len(letters)) >= 0.02:
             return max(1, vietnamese_score - english_score)
     return 0
+
+
+def response_language_debug(text: str, language: str | None) -> dict[str, object]:
+    vietnamese_score, english_score, token_count = _language_evidence(text)
+    return {
+        "expected": language,
+        "vietnamese_score": vietnamese_score,
+        "english_score": english_score,
+        "analyzed_tokens": token_count,
+        "mismatch_score": _language_mismatch_score(text, language),
+        "output_preview": text[:300],
+    }
 
 
 def response_output_issues(text: str, contract: ResponseOutputContract) -> list[str]:
@@ -623,6 +660,24 @@ def response_retry_prompt(
         query_intent,
         "Answer the user's original request directly in the required language.",
     )
+    if query_intent == "document_overview":
+        source, question = _prompt_source_and_question(original_prompt)
+        return f"""OUTPUT LANGUAGE: {contract.language or 'the language requested by the user'}.
+
+Study material:
+{source}
+
+User request:
+{question}
+
+Required task:
+- {task_instruction}
+
+Final output contract:
+{contract_text}
+
+Return only the final answer in {contract.language or 'the requested language'}."""
+
     return f"""{original_prompt}
 
 Generate a fresh response from the original study material context. Do not refer to an earlier draft, validation, or correction.
@@ -636,10 +691,7 @@ Final output contract:
 Begin the final response now."""
 
 
-def translation_retry_prompt(
-    original_prompt: str,
-    contract: ResponseOutputContract,
-) -> str:
+def _prompt_source_and_question(original_prompt: str) -> tuple[str, str]:
     source_marker = "Study material context:\n"
     question_marker = "\n\nQuestion:\n"
     source = original_prompt
@@ -660,10 +712,66 @@ def translation_retry_prompt(
         question = original_prompt.rsplit(question_marker, 1)[1]
         if "\n\nFinal output contract:" in question:
             question = question.split("\n\nFinal output contract:", 1)[0]
+    return source.strip(), question.strip()
+
+
+def _focused_translation_source(
+    source: str,
+    required_question_numbers: tuple[int, ...],
+) -> str:
+    blocks = [
+        block.strip()
+        for block in re.split(r"(?=\[Source\s+\d+\s*:)", source, flags=re.IGNORECASE)
+        if block.strip()
+    ]
+    if not blocks:
+        return source.strip()
+
+    unique_blocks: list[str] = []
+    seen: set[str] = set()
+    for block in blocks:
+        normalized = re.sub(r"\s+", " ", block).strip().lower()
+        if normalized not in seen:
+            seen.add(normalized)
+            unique_blocks.append(block)
+
+    if not required_question_numbers:
+        return "\n\n".join(unique_blocks)
+
+    required = set(required_question_numbers)
+
+    def coverage(block: str) -> int:
+        present = {
+            int(value)
+            for value in re.findall(r"(?:^|\s)(\d{1,3})\s*[.):]", block)
+        }
+        range_values: set[int] = set()
+        for start, end in QUESTION_RANGE_RE.findall(block):
+            first, last = int(start), int(end)
+            if first <= last and last - first <= 100:
+                range_values.update(range(first, last + 1))
+        return len(required.intersection(present | range_values))
+
+    ranked = sorted(unique_blocks, key=lambda block: (-coverage(block), len(block)))
+    best_coverage = coverage(ranked[0])
+    if best_coverage:
+        return ranked[0]
+    return "\n\n".join(unique_blocks)
+
+
+def translation_retry_prompt(
+    original_prompt: str,
+    contract: ResponseOutputContract,
+) -> str:
+    source, question = _prompt_source_and_question(original_prompt)
+    source = _focused_translation_source(source, contract.required_question_numbers)
 
     contract_text = "\n".join(contract.prompt_lines())
-    return f"""Translate the requested source content faithfully.
+    return f"""OUTPUT LANGUAGE: {contract.language or 'the language requested by the user'}.
+
+Translate the requested source content faithfully.
 Do not answer, solve, explain, omit, renumber, or add information.
+Keep mandatory answer-limit phrases such as NO MORE THAN THREE WORDS unchanged.
 
 Source content:
 {source.strip()}
@@ -674,7 +782,7 @@ Current user request:
 Final output contract:
 {contract_text}
 
-Begin directly with the translated content."""
+Return only the translated content in {contract.language or 'the requested language'}."""
 
 
 def response_output_penalty(text: str, contract: ResponseOutputContract) -> tuple[int, int, int, int]:
@@ -685,6 +793,27 @@ def response_output_penalty(text: str, contract: ResponseOutputContract) -> tupl
         int(any("malformed Markdown table" in issue for issue in issues)),
         len(issues),
     )
+
+
+def select_best_response_output(
+    first: str,
+    retry: str,
+    contract: ResponseOutputContract,
+) -> str:
+    def rank(text: str) -> tuple[tuple[int, int, int, int], int, int]:
+        language = _language_evidence(text)
+        target_language_score = language[0] if contract.language == "Vietnamese" else language[1]
+        present = {
+            int(value)
+            for value in re.findall(
+                r"(?im)^\s*(?:câu(?:\s+hỏi)?\s*)?(\d{1,3})\s*[.):]",
+                text,
+            )
+        }
+        coverage = len(present.intersection(contract.required_question_numbers))
+        return response_output_penalty(text, contract), -coverage, -target_language_score
+
+    return min((first, retry), key=rank)
 
 
 def _writing_target_range(

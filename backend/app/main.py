@@ -44,12 +44,14 @@ from .llm import (
     rag_prompt,
     response_output_contract,
     response_output_issues,
+    response_language_debug,
     response_output_penalty,
     response_retry_prompt,
     resolve_rag_target,
     classify_chat_route,
     is_near_writing_word_boundary,
     select_best_writing_output,
+    select_best_response_output,
     stream_ollama,
     translation_retry_prompt,
     writing_output_contract,
@@ -506,10 +508,15 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             "forbid_solution": contract.forbid_solution,
             "required_question_numbers": list(contract.required_question_numbers),
             "first_draft_issues": issues,
+            "first_draft_language": response_language_debug(answer, contract.language),
         }
+        enforce_review_contract = requires_reviewed_generation(prepared, message)
         should_retry = bool(issues) and (
             prepared.query_intent == "translate_questions"
-            or any("not written in" in issue for issue in issues)
+            or (
+                enforce_review_contract
+                and any("not written in" in issue for issue in issues)
+            )
             or any("malformed Markdown table" in issue for issue in issues)
             or any("conversation role prefix" in issue for issue in issues)
             or any("plan timeline" in issue for issue in issues)
@@ -530,16 +537,17 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
                 retry_prompt,
                 temperature=0.1,
             )
-            selected = min(
-                (answer, retry),
-                key=lambda text: response_output_penalty(text, contract),
-            )
+            selected = select_best_response_output(answer, retry, contract)
             generation_debug["retry_used"] = True
             generation_debug["candidate_penalties"] = {
                 "first": list(response_output_penalty(answer, contract)),
                 "retry": list(response_output_penalty(retry, contract)),
             }
             generation_debug["selected_candidate"] = "first" if selected == answer else "retry"
+            generation_debug["candidate_language"] = {
+                "first": response_language_debug(answer, contract.language),
+                "retry": response_language_debug(retry, contract.language),
+            }
             answer = selected
         else:
             generation_debug["retry_used"] = False
@@ -555,7 +563,11 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         if final_issues and prepared.query_intent == "translate_questions":
             answer = TRANSLATION_VALIDATION_FAILURE_RESPONSE
             generation_debug["validation_failed_closed"] = True
-        elif final_issues and any("not written in" in issue for issue in final_issues):
+        elif (
+            enforce_review_contract
+            and final_issues
+            and any("not written in" in issue for issue in final_issues)
+        ):
             answer = (
                 LANGUAGE_VALIDATION_FAILURE_RESPONSE_EN
                 if contract.language == "English"
@@ -580,6 +592,7 @@ def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> b
         prepared.route_used == "base_model"
         or is_writing_response(prepared)
         or prepared.query_intent == "translate_questions"
+        or prepared.query_intent == "document_overview"
         or (
             has_explicit_no_solution_constraint(message)
             and not prepared.debug.get("intent_decision", {}).get("allow_solution", False)
