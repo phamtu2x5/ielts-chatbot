@@ -38,11 +38,13 @@ from app.intent import (
 from app.llm import (
     clean_response,
     has_malformed_markdown_table,
+    is_near_writing_word_boundary,
     likely_contains_solution,
     looks_like_prompt_echo,
     rag_prompt,
     response_output_contract,
     response_output_issues,
+    response_output_penalty,
     response_retry_prompt,
     select_best_writing_output,
     translation_retry_prompt,
@@ -1060,6 +1062,15 @@ class LocalVectorStoreTests(unittest.TestCase):
         first = "Here is the revised essay: " + " ".join(["word"] * 175)
         second = " ".join(["word"] * 169)
         self.assertEqual(select_best_writing_output(first, second, contract), second)
+        self.assertTrue(
+            is_near_writing_word_boundary(" ".join(["word"] * 166), contract)
+        )
+        self.assertFalse(
+            is_near_writing_word_boundary(" ".join(["word"] * 165), contract)
+        )
+        self.assertFalse(
+            is_near_writing_word_boundary(" ".join(["word"] * 191), contract)
+        )
 
     def test_translation_contract_requires_vietnamese_and_all_question_numbers(self) -> None:
         contract = response_output_contract(
@@ -1076,6 +1087,34 @@ class LocalVectorStoreTests(unittest.TestCase):
         )
         self.assertTrue(any("not written in Vietnamese" in issue for issue in issues))
         self.assertTrue(any("26, 27" in issue for issue in issues))
+        self.assertNotIn(
+            "The response is not written in Vietnamese.",
+            response_output_issues(
+                "25. Co quan nao cung cap so lieu du lich toan cau?\n"
+                "26. Ai duoc huong loi ve tai chinh?\n"
+                "27. Cuoc hop nao dua ra cac nguyen tac?",
+                contract,
+            ),
+        )
+        english_with_vietnamese_preface = (
+            "Bản dịch:\n"
+            "25. Which body provides global tourist numbers?\n"
+            "26. Who benefits financially from tourism?\n"
+            "27. Which meeting supplied the principles?"
+        )
+        self.assertIn(
+            "The response is not written in Vietnamese.",
+            response_output_issues(english_with_vietnamese_preface, contract),
+        )
+        self.assertLess(
+            response_output_penalty(
+                "25. Cơ quan nào cung cấp số liệu du lịch toàn cầu?\n"
+                "26. Ai được hưởng lợi về tài chính?\n"
+                "27. Cuộc họp nào đưa ra các nguyên tắc?",
+                contract,
+            ),
+            response_output_penalty(english_with_vietnamese_preface, contract),
+        )
         retry_prompt = response_retry_prompt(
             "original context",
             contract,

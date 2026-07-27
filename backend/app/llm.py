@@ -133,6 +133,24 @@ VIETNAMESE_CHARACTER_RE = re.compile(
     r"óòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]",
     re.IGNORECASE,
 )
+VIETNAMESE_COMMON_WORDS = frozenset(
+    {
+        "ai", "ban", "bạn", "bằng", "cau", "câu", "cho", "co", "có", "cua",
+        "của", "dich", "dịch", "duoc", "được", "gi", "gì", "hay", "hãy",
+        "khong", "không", "la", "là", "minh", "mình", "mot", "một", "nao",
+        "nào", "nhung", "những", "sao", "theo", "thong", "thông", "tin",
+        "toi", "tôi", "trong", "tu", "từ", "va", "và", "voi", "với", "xin",
+        "để",
+    }
+)
+ENGLISH_COMMON_WORDS = frozenset(
+    {
+        "and", "answer", "are", "can", "choose", "did", "do", "does", "for",
+        "from", "how", "in", "is", "of", "should", "the", "to", "was",
+        "were", "what", "when", "where", "which", "who", "why", "with",
+        "words",
+    }
+)
 WORD_RANGE_RE = re.compile(
     r"\b(\d{2,4})\s*(?:-|–|—|to|đến|tới)\s*(\d{2,4})\s*(?:words?|từ)\b",
     re.IGNORECASE,
@@ -427,19 +445,52 @@ def response_output_contract(
     )
 
 
+def _language_evidence(text: str) -> tuple[int, int, int]:
+    tokens = [
+        token.lower()
+        for token in re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
+    ]
+    vietnamese_words = sum(token in VIETNAMESE_COMMON_WORDS for token in tokens)
+    english_words = sum(token in ENGLISH_COMMON_WORDS for token in tokens)
+    accented_characters = len(VIETNAMESE_CHARACTER_RE.findall(text))
+    return (
+        vietnamese_words * 2 + min(accented_characters, 10),
+        english_words * 2,
+        len(tokens),
+    )
+
+
+def _language_mismatch_score(text: str, language: str | None) -> int:
+    if not language:
+        return 0
+    vietnamese_score, english_score, token_count = _language_evidence(text)
+    if language == "Vietnamese":
+        minimum_vietnamese_score = max(3, min(10, (token_count + 1) // 2))
+        if (
+            vietnamese_score >= minimum_vietnamese_score
+            and english_score < max(8, vietnamese_score * 2)
+        ):
+            return 0
+        return max(
+            1,
+            minimum_vietnamese_score - vietnamese_score,
+            english_score - vietnamese_score,
+        )
+    if language == "English":
+        letters = re.findall(r"[^\W\d_]", text, flags=re.UNICODE)
+        accented_characters = len(VIETNAMESE_CHARACTER_RE.findall(text))
+        if accented_characters >= 5 and accented_characters / max(1, len(letters)) >= 0.02:
+            return max(1, vietnamese_score - english_score)
+    return 0
+
+
 def response_output_issues(text: str, contract: ResponseOutputContract) -> list[str]:
     issues: list[str] = []
     if re.match(r"(?i)^\s*(?:user|assistant|system)\s*:", text):
         issues.append("The response starts with a conversation role prefix.")
-    letters = re.findall(r"[^\W\d_]", text, flags=re.UNICODE)
-    vietnamese_characters = VIETNAMESE_CHARACTER_RE.findall(text)
-    if (
-        contract.language == "English"
-        and len(vietnamese_characters) >= 5
-        and len(vietnamese_characters) / max(1, len(letters)) >= 0.02
-    ):
+    if contract.language == "English" and _language_mismatch_score(text, "English") > 0:
         issues.append("The response is not written in English.")
-    if contract.language == "Vietnamese" and len(vietnamese_characters) < 2:
+    if contract.language == "Vietnamese" and _language_mismatch_score(text, "Vietnamese") > 0:
         issues.append("The response is not written in Vietnamese.")
     if contract.forbid_solution and likely_contains_solution(text):
         issues.append("The response reveals or narrows an answer despite the no-solution constraint.")
@@ -630,7 +681,7 @@ def response_output_penalty(text: str, contract: ResponseOutputContract) -> tupl
     issues = response_output_issues(text, contract)
     return (
         int(any("reveals or narrows" in issue for issue in issues)),
-        int(any("not written in" in issue for issue in issues)),
+        _language_mismatch_score(text, contract.language),
         int(any("malformed Markdown table" in issue for issue in issues)),
         len(issues),
     )
@@ -651,15 +702,9 @@ def _writing_target_range(
 def writing_output_issues(text: str, contract: WritingOutputContract) -> list[str]:
     issues: list[str] = []
     words = re.findall(r"\b[\w'-]+\b", text, flags=re.UNICODE)
-    letters = re.findall(r"[^\W\d_]", text, flags=re.UNICODE)
-    vietnamese_characters = VIETNAMESE_CHARACTER_RE.findall(text)
-    if (
-        contract.language == "English"
-        and len(vietnamese_characters) >= 5
-        and len(vietnamese_characters) / max(1, len(letters)) >= 0.02
-    ):
+    if contract.language == "English" and _language_mismatch_score(text, "English") > 0:
         issues.append("The response is not written in English.")
-    if contract.language == "Vietnamese" and len(vietnamese_characters) < 2:
+    if contract.language == "Vietnamese" and _language_mismatch_score(text, "Vietnamese") > 0:
         issues.append("The response is not written in Vietnamese.")
     if contract.min_words is not None and len(words) < contract.min_words:
         issues.append(f"The response has {len(words)} words, below {contract.min_words}.")
@@ -715,7 +760,7 @@ def select_best_writing_output(
 def is_near_writing_word_boundary(
     text: str,
     contract: WritingOutputContract,
-    tolerance: int = 2,
+    tolerance: int = 4,
 ) -> bool:
     issues = writing_output_issues(text, contract)
     if not issues or any(
@@ -724,7 +769,12 @@ def is_near_writing_word_boundary(
         for marker in ("not written in", "paragraph", "meta commentary")
     ):
         return False
-    return writing_output_penalty(text, contract)[3] in range(1, tolerance + 1)
+    word_count = len(re.findall(r"\b[\w'-]+\b", text, flags=re.UNICODE))
+    return (
+        contract.min_words is not None
+        and word_count < contract.min_words
+        and contract.min_words - word_count in range(1, tolerance + 1)
+    )
 
 
 def likely_contains_solution(text: str) -> bool:

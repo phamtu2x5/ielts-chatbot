@@ -1732,7 +1732,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             query_intent="writing_generation",
         )
         first = " ".join(["word"] * 159)
-        retry = " ".join(["word"] * 169)
+        retry = " ".join(["word"] * 166)
         model = AsyncMock(side_effect=[first, retry])
 
         with patch.object(main, "query_ollama", model):
