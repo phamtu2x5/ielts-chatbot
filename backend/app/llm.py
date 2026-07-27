@@ -1916,7 +1916,8 @@ def rag_prompt(
                 "- Mapping is strict: supports -> TRUE; contradicts -> FALSE; absent -> NOT GIVEN.",
                 "- Do not mark FALSE just because the passage lacks a reason, cause, date, comparison, or detail. If the required detail is absent, the answer is NOT GIVEN.",
                 "- If the context only contains question text and lacks passage evidence, say that there is not enough passage evidence to solve reliably.",
-                "- For each answer, output the answer first, followed by one short evidence quote and its relationship to the answer.",
+                "- Solve each requested question independently. Do not reuse one evidence statement as support for a different question unless it directly addresses both.",
+                "- For each answer, give one short evidence quote and its relationship in this concise order: Question number and answer; Evidence; Relationship: supports, contradicts, or absent when the task is True/False/Not Given.",
                 "- Do not use a second conclusion or unsupported elimination. Keep the evidence check concise.",
             ]
         )

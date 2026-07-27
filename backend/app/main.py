@@ -310,6 +310,38 @@ def evidence_query_for_sources(sources: list[dict[str, Any]], fallback: str) -> 
     return " ".join(queries).strip() or fallback
 
 
+def requested_question_numbers(message: str) -> list[int]:
+    numbers: list[int] = []
+    for start, end in parse_question_ranges(message):
+        for number in range(start, end + 1):
+            if number not in numbers:
+                numbers.append(number)
+    return numbers
+
+
+def exact_question_sources(
+    message: str,
+    sources: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    requested = set(requested_question_numbers(message))
+    if not requested:
+        return []
+    results: list[dict[str, Any]] = []
+    for source in sources:
+        metadata = source.get("metadata", {})
+        question_range = metadata.get("question_range")
+        if (
+            metadata.get("unit_type") != "question"
+            or not isinstance(question_range, list)
+            or len(question_range) != 2
+        ):
+            continue
+        start, end = int(question_range[0]), int(question_range[1])
+        if start == end and start in requested:
+            results.append(source)
+    return results
+
+
 def compact_probe_debug(probe: dict) -> dict:
     return {
         "has_hits": probe.get("has_hits", False),
@@ -907,7 +939,114 @@ def _render_writing_inventory(sources: list[dict[str, Any]]) -> str | None:
     return "\n".join(lines)
 
 
-def solve_context_issue(sources: list[dict[str, Any]]) -> str | None:
+def solve_context_report(
+    message: str,
+    sources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    requested = requested_question_numbers(message)
+    exact_sources = exact_question_sources(message, sources)
+    question_targets: list[dict[str, Any]] = []
+    found_numbers: list[int] = []
+    duplicate_documents: list[int] = []
+    missing_groups: list[int] = []
+    missing_evidence: list[int] = []
+
+    for number in requested:
+        matches = [
+            source
+            for source in exact_sources
+            if source.get("metadata", {}).get("question_range") == [number, number]
+        ]
+        document_ids = {
+            source.get("document_id") for source in matches if source.get("document_id")
+        }
+        if len(document_ids) > 1:
+            duplicate_documents.append(number)
+            continue
+        if not matches:
+            continue
+        question = matches[0]
+        metadata = question.get("metadata", {})
+        document_id = question.get("document_id")
+        passage_number = metadata.get("passage_number")
+        parent_id = metadata.get("parent_id")
+        found_numbers.append(number)
+
+        group_matches = [
+            source
+            for source in sources
+            if source.get("document_id") == document_id
+            and source.get("metadata", {}).get("unit_type") == "question_group"
+            and (
+                (parent_id and source.get("chunk_id") == parent_id)
+                or _range_contains(
+                    source.get("metadata", {}).get("question_range"),
+                    number,
+                )
+            )
+        ]
+        if not group_matches:
+            missing_groups.append(number)
+
+        evidence_matches = [
+            source
+            for source in sources
+            if source.get("document_id") == document_id
+            and source.get("metadata", {}).get("unit_type") == "passage"
+            and passage_number is not None
+            and source.get("metadata", {}).get("passage_number") == passage_number
+        ]
+        if not evidence_matches:
+            missing_evidence.append(number)
+
+        question_targets.append(
+            {
+                "question_number": number,
+                "question_chunk_id": question.get("chunk_id"),
+                "document_id": document_id,
+                "passage_number": passage_number,
+                "parent_id": parent_id,
+                "question_group_chunk_ids": [
+                    source.get("chunk_id") for source in group_matches
+                ],
+                "evidence_chunk_ids": [
+                    source.get("chunk_id") for source in evidence_matches
+                ],
+            }
+        )
+
+    missing_numbers = [number for number in requested if number not in found_numbers]
+    issues: list[str] = []
+    if requested and missing_numbers:
+        issues.append("missing_exact_questions")
+    if duplicate_documents:
+        issues.append("ambiguous_exact_questions")
+    if missing_groups:
+        issues.append("missing_question_groups")
+    if missing_evidence:
+        issues.append("missing_passage_evidence")
+    return {
+        "requested_question_numbers": requested,
+        "found_question_numbers": found_numbers,
+        "missing_question_numbers": missing_numbers,
+        "ambiguous_question_numbers": duplicate_documents,
+        "missing_group_question_numbers": missing_groups,
+        "missing_evidence_question_numbers": missing_evidence,
+        "question_targets": question_targets,
+        "issues": issues,
+    }
+
+
+def _range_contains(value: Any, number: int) -> bool:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return False
+    return int(value[0]) <= number <= int(value[1])
+
+
+def solve_context_issue(
+    sources: list[dict[str, Any]],
+    message: str | None = None,
+) -> str | None:
     question_text = "\n".join(
         (source.get("display_text") or source.get("text") or "").strip()
         for source in sources
@@ -928,6 +1067,10 @@ def solve_context_issue(sources: list[dict[str, Any]]) -> str | None:
     )
     if requires_options and len(option_labels) < 2:
         return "missing_answer_options"
+    if message:
+        report = solve_context_report(message, sources)
+        if report["issues"]:
+            return report["issues"][0]
     return None
 
 
@@ -1210,6 +1353,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     intent_debug: dict[str, Any] = {}
     writing_parent_id: str | None = None
     evidence_query: str | None = None
+    evidence_by_question: list[dict[str, Any]] = []
+    evidence_per_question = 0
+    solve_report: dict[str, Any] = {}
     gateway_debug: dict[str, Any]
     document_resolution_debug: dict[str, Any] = {}
 
@@ -1567,10 +1713,26 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     if route == "rag":
         evidence_candidate_count = 0
         evidence_context_count = 0
-        structured_top_k = 50 if query_intent == "document_overview" else max(
-            settings.rag_top_k,
-            settings.rag_overview_top_k,
+        solve_question_numbers = (
+            requested_question_numbers(message)
+            if query_intent == "solve_questions"
+            else []
         )
+        if query_intent == "document_overview":
+            structured_top_k = 50
+        elif query_intent == "solve_questions" and solve_question_numbers:
+            structured_top_k = min(
+                50,
+                max(
+                    settings.rag_top_k,
+                    len(solve_question_numbers) + len(parse_question_ranges(message)) + 4,
+                ),
+            )
+        else:
+            structured_top_k = max(
+                settings.rag_top_k,
+                settings.rag_overview_top_k,
+            )
         structured_sources = await run_in_threadpool(
             store.structured_lookup,
             retrieval_query,
@@ -1580,8 +1742,17 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         )
         retrieval_method = "structured" if structured_sources else None
         if structured_sources:
-            source_limit = 50 if query_intent == "document_overview" else settings.rag_top_k
+            source_limit = (
+                50
+                if query_intent == "document_overview"
+                else structured_top_k
+                if query_intent == "solve_questions"
+                else settings.rag_top_k
+            )
             sources = structured_sources[:source_limit]
+        elif query_intent == "solve_questions" and solve_question_numbers:
+            sources = []
+            retrieval_method = "structured_question_no_match"
         elif query_intent == "document_overview":
             sources = await run_in_threadpool(
                 store.overview,
@@ -1617,39 +1788,82 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             question_context = await run_in_threadpool(
                 store.question_context_for_sources,
                 sources,
-                8,
+                min(50, max(8, len(solve_question_numbers) * 2 + 4)),
                 scope_ids,
             )
-            target_passages = {
-                (source.get("document_id"), source.get("metadata", {}).get("passage_number"))
-                for source in sources + question_context
-                if source.get("document_id")
-                and source.get("metadata", {}).get("passage_number")
-            }
-            evidence_query = evidence_query_for_sources(sources + question_context, message)
-            evidence_candidates = []
-            for document_id, passage_number in sorted(target_passages):
-                pair_candidates = await run_in_threadpool(
-                    store.hybrid_search,
-                    evidence_query,
-                    max(settings.rag_top_k * 3, 12),
-                    [document_id],
-                    ["passage"],
-                    [passage_number],
+            question_sources = exact_question_sources(
+                message,
+                sources + question_context,
+            )
+            evidence_per_question = min(
+                settings.rag_solve_evidence_per_question,
+                max(
+                    1,
+                    settings.rag_solve_max_evidence // max(1, len(question_sources)),
+                ),
+            )
+            evidence_context: list[dict[str, Any]] = []
+            evidence_queries: list[str] = []
+            for question_source in question_sources:
+                metadata = question_source.get("metadata", {})
+                question_range = metadata.get("question_range") or []
+                question_number = question_range[0] if len(question_range) == 2 else None
+                document_id = question_source.get("document_id")
+                passage_number = metadata.get("passage_number")
+                question_query = evidence_query_for_sources([question_source], message)
+                evidence_queries.append(question_query)
+                pair_candidates = (
+                    await run_in_threadpool(
+                        store.hybrid_search,
+                        question_query,
+                        max(evidence_per_question * 2, 4),
+                        [document_id],
+                        ["passage"],
+                        [passage_number],
+                    )
+                    if document_id and passage_number is not None
+                    else []
                 )
-                evidence_candidates.extend(pair_candidates)
-            evidence_candidates = dedupe_sources(evidence_candidates)
-            evidence_candidate_count = len(evidence_candidates)
-            evidence_context = evidence_candidates[:3]
-            if not evidence_context:
-                evidence_context = await run_in_threadpool(
-                    store.passage_context_for_sources,
-                    sources,
-                    3,
-                    scope_ids,
+                selected = pair_candidates[:evidence_per_question]
+                fallback_used = False
+                if not selected and document_id and passage_number is not None:
+                    selected = await run_in_threadpool(
+                        store.passage_context_for_sources,
+                        [question_source],
+                        evidence_per_question,
+                        [document_id],
+                    )
+                    fallback_used = bool(selected)
+                evidence_candidate_count += len(pair_candidates)
+                remaining = max(
+                    0,
+                    settings.rag_solve_max_evidence - len(evidence_context),
                 )
+                selected = selected[:remaining]
+                evidence_context.extend(selected)
+                evidence_by_question.append(
+                    {
+                        "question_number": question_number,
+                        "question_chunk_id": question_source.get("chunk_id"),
+                        "document_id": document_id,
+                        "passage_number": passage_number,
+                        "query": question_query,
+                        "candidate_chunk_ids": [
+                            source.get("chunk_id") for source in pair_candidates
+                        ],
+                        "selected_chunk_ids": [
+                            source.get("chunk_id") for source in selected
+                        ],
+                        "fallback_used": fallback_used,
+                    }
+                )
+                if len(evidence_context) >= settings.rag_solve_max_evidence:
+                    break
+            evidence_query = " | ".join(dict.fromkeys(evidence_queries)) or None
+            evidence_context = dedupe_sources(evidence_context)
             evidence_context_count = len(evidence_context)
             sources = dedupe_sources(sources + question_context + evidence_context)
+            solve_report = solve_context_report(message, sources)
         elif query_intent == "semantic_qa" and use_affinity_context and sources:
             passage_context = await run_in_threadpool(
                 store.passage_context_for_sources,
@@ -1667,6 +1881,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         before_filter_count = 0
         evidence_candidate_count = 0
         evidence_context_count = 0
+
+    if query_intent == "solve_questions" and not solve_report:
+        solve_report = solve_context_report(message, sources)
 
     debug = {
         "route_decision": route,
@@ -1690,6 +1907,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "evidence_candidate_count": evidence_candidate_count,
             "evidence_context_count": evidence_context_count,
             "evidence_query": evidence_query,
+            "evidence_per_question": evidence_per_question,
+            "evidence_by_question": evidence_by_question,
+            "solve_context_report": solve_report,
             "retrieval_query": retrieval_query,
             "writing_parent_id": writing_parent_id,
             "final_context": compact_final_context_debug(sources),
@@ -1700,7 +1920,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
 
     if sources:
         if query_intent == "solve_questions":
-            context_issue = solve_context_issue(sources)
+            context_issue = solve_context_issue(sources, message)
             if context_issue:
                 debug["no_match_guard"] = context_issue
                 return ChatPreparation(
@@ -1785,7 +2005,12 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     if route == "rag":
         return ChatPreparation(
             prompt=None,
-            static_response=no_rag_match_response(message),
+            static_response=(
+                INCOMPLETE_QUESTION_RESPONSE
+                if query_intent == "solve_questions"
+                and solve_report.get("requested_question_numbers")
+                else no_rag_match_response(message)
+            ),
             route_used="vector_rag_no_match",
             sources=[],
             debug=debug,

@@ -1592,6 +1592,91 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.solve_context_issue(incomplete), "missing_answer_options")
         self.assertIsNone(main.solve_context_issue(complete))
 
+    def test_solve_context_requires_every_requested_question(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-1-2",
+                "document_id": "doc-1",
+                "text": "Questions 1-2 Do the statements agree with the passage?",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [1, 2],
+                    "passage_number": 1,
+                },
+            },
+            {
+                "chunk_id": "question-1",
+                "document_id": "doc-1",
+                "text": "1. The statement.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [1, 1],
+                    "passage_number": 1,
+                    "parent_id": "questions-1-2",
+                },
+            },
+            {
+                "chunk_id": "passage-1",
+                "document_id": "doc-1",
+                "text": "Passage evidence.",
+                "metadata": {"unit_type": "passage", "passage_number": 1},
+            },
+        ]
+
+        report = main.solve_context_report("Trả lời Questions 1-2", sources)
+
+        self.assertEqual(report["found_question_numbers"], [1])
+        self.assertEqual(report["missing_question_numbers"], [2])
+        self.assertEqual(
+            main.solve_context_issue(sources, "Trả lời Questions 1-2"),
+            "missing_exact_questions",
+        )
+
+    def test_solve_context_reports_empty_exact_lookup(self) -> None:
+        report = main.solve_context_report("Trả lời Questions 7-8", [])
+
+        self.assertEqual(report["requested_question_numbers"], [7, 8])
+        self.assertEqual(report["missing_question_numbers"], [7, 8])
+        self.assertEqual(report["issues"], ["missing_exact_questions"])
+
+    def test_solve_context_requires_evidence_from_same_passage(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-1-1",
+                "document_id": "doc-1",
+                "text": "Question 1 Answer the question.",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [1, 1],
+                    "passage_number": 1,
+                },
+            },
+            {
+                "chunk_id": "question-1",
+                "document_id": "doc-1",
+                "text": "1. The statement.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [1, 1],
+                    "passage_number": 1,
+                    "parent_id": "questions-1-1",
+                },
+            },
+            {
+                "chunk_id": "passage-2",
+                "document_id": "doc-1",
+                "text": "Evidence from another passage.",
+                "metadata": {"unit_type": "passage", "passage_number": 2},
+            },
+        ]
+
+        self.assertEqual(
+            main.solve_context_issue(sources, "Trả lời Question 1"),
+            "missing_passage_evidence",
+        )
+        sources[-1]["metadata"]["passage_number"] = 1
+        self.assertIsNone(main.solve_context_issue(sources, "Trả lời Question 1"))
+
     async def test_solve_generation_uses_one_grounded_model_call(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded solve prompt",

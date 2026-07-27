@@ -99,6 +99,12 @@ class AppSettings:
     rag_overview_source_chars: int = field(
         default_factory=lambda: int(os.getenv("RAG_OVERVIEW_SOURCE_CHARS", "900"))
     )
+    rag_solve_evidence_per_question: int = field(
+        default_factory=lambda: int(os.getenv("RAG_SOLVE_EVIDENCE_PER_QUESTION", "2"))
+    )
+    rag_solve_max_evidence: int = field(
+        default_factory=lambda: int(os.getenv("RAG_SOLVE_MAX_EVIDENCE", "12"))
+    )
 
     warmup_llm: bool = field(default_factory=lambda: _env_bool("WARMUP_LLM", True))
     warmup_embedding: bool = field(default_factory=lambda: _env_bool("WARMUP_EMBEDDING", True))
@@ -126,6 +132,8 @@ class AppSettings:
             or self.rag_probe_top_k <= 0
             or self.rag_overview_top_k <= 0
             or self.rag_rrf_k <= 0
+            or self.rag_solve_evidence_per_question <= 0
+            or self.rag_solve_max_evidence <= 0
         ):
             raise ValueError("RAG top-k settings must be positive.")
         if self.rag_overview_source_chars <= 0:
