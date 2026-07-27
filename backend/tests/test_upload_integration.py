@@ -1722,6 +1722,59 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(prepared.debug["generation"]["final_issues"])
         self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
 
+    async def test_writing_generation_returns_a_near_boundary_retry(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded writing prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": True}},
+            query_intent="writing_generation",
+        )
+        first = " ".join(["word"] * 159)
+        retry = " ".join(["word"] * 169)
+        model = AsyncMock(side_effect=[first, retry])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Viết bài IELTS Writing Task 1 dài 170-190 từ.",
+            )
+
+        self.assertEqual(answer, retry)
+        self.assertTrue(prepared.debug["generation"]["validation_degraded"])
+        self.assertFalse(prepared.debug["generation"].get("validation_failed_closed", False))
+
+    async def test_direct_plan_retries_when_timeline_exceeds_request(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct plan prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+        invalid = """| Tuần | Mục tiêu | Thời lượng |
+| --- | --- | --- |
+| 1-12 | Học IELTS | 60 phút/ngày |
+| 13-24 | Ôn luyện | 90 phút/ngày |"""
+        valid = """| Tuần | Mục tiêu | Thời lượng |
+| --- | --- | --- |
+| 1-4 | Nền tảng | 45 phút/ngày |
+| 5-8 | Luyện tập | 60 phút/ngày |
+| 9-12 | Tổng ôn | 60 phút/ngày |"""
+        model = AsyncMock(side_effect=[invalid, valid])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Lập kế hoạch học trong 3 tháng, tối đa 60 phút/ngày.",
+            )
+
+        self.assertEqual(answer, valid)
+        self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["retry_used"])
+
     async def test_writing_semantic_answer_defaults_to_english(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded writing analysis prompt",
@@ -1933,7 +1986,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_count, 2)
         self.assertEqual(prepared.debug["generation"]["final_issues"], [])
         self.assertIn(
-            "Translate every requested numbered",
+            "Translate the requested source content faithfully.",
             model.await_args_list[1].args[0],
         )
 

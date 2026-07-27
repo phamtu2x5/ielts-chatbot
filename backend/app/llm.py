@@ -156,6 +156,18 @@ QUESTION_RANGE_RE = re.compile(
     r"\b(?:questions?|câu(?:\s+hỏi)?)\s*(\d{1,3})\s*(?:-|\u2013|\u2014|to|đến|tới)\s*(\d{1,3})\b",
     re.IGNORECASE,
 )
+PLAN_REQUEST_RE = re.compile(
+    r"\b(?:plan|schedule)\b|kế\s+hoạch|lịch\s+(?:học|ôn|luyện)",
+    re.IGNORECASE,
+)
+PLAN_DURATION_RE = re.compile(
+    r"\b(\d{1,3})\s*(ngày|days?|tuần|weeks?|tháng|months?)\b",
+    re.IGNORECASE,
+)
+DAILY_TIME_RE = re.compile(
+    r"\b(\d{1,3})\s*(?:phút|minutes?)\s*(?:/|mỗi\s+|per\s+)?(?:ngày|day)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -196,6 +208,9 @@ class ResponseOutputContract:
     language: str | None
     forbid_solution: bool
     required_question_numbers: tuple[int, ...] = ()
+    plan_duration_value: int | None = None
+    plan_duration_unit: str | None = None
+    max_daily_minutes: int | None = None
 
     def prompt_lines(self) -> list[str]:
         lines: list[str] = []
@@ -210,6 +225,27 @@ class ResponseOutputContract:
             )
             lines.append(
                 "- Do not map numbered items to categories, people, methods, paragraphs, options, or labels."
+            )
+        if self.plan_duration_value is not None and self.plan_duration_unit:
+            if self.plan_duration_unit == "month":
+                weeks = self.plan_duration_value * 4
+                lines.append(
+                    f"- The requested plan is exactly {self.plan_duration_value} months, represented as weeks 1-{weeks}. "
+                    f"Do not create a phase or row after week {weeks}."
+                )
+            else:
+                unit = {
+                    "day": "days",
+                    "week": "weeks",
+                }[self.plan_duration_unit]
+                lines.append(
+                    f"- The requested plan is exactly {self.plan_duration_value} {unit}. "
+                    "Do not extend the timeline beyond that duration."
+                )
+            lines.append("- Do not duplicate, overlap, or repeat a plan period.")
+        if self.max_daily_minutes is not None:
+            lines.append(
+                f"- No activity schedule may exceed {self.max_daily_minutes} minutes per day."
             )
         lines.append(
             "- Every Markdown table row must occupy exactly one physical line. Use semicolons, not bullets or line breaks, inside cells."
@@ -362,11 +398,32 @@ def response_output_contract(
             if start <= end and end - start <= 100:
                 required_numbers = tuple(range(start, end + 1))
 
+    plan_duration_value: int | None = None
+    plan_duration_unit: str | None = None
+    max_daily_minutes: int | None = None
+    if query_intent == "direct" and PLAN_REQUEST_RE.search(message):
+        duration_match = PLAN_DURATION_RE.search(message)
+        if duration_match:
+            plan_duration_value = int(duration_match.group(1))
+            raw_unit = duration_match.group(2).lower()
+            if raw_unit.startswith(("tháng", "month")):
+                plan_duration_unit = "month"
+            elif raw_unit.startswith(("tuần", "week")):
+                plan_duration_unit = "week"
+            else:
+                plan_duration_unit = "day"
+        time_match = DAILY_TIME_RE.search(message)
+        if time_match:
+            max_daily_minutes = int(time_match.group(1))
+
     return ResponseOutputContract(
         language=language,
         forbid_solution=not allow_solution
         and query_intent in {"show_questions", "translate_questions", "explain_questions"},
         required_question_numbers=required_numbers,
+        plan_duration_value=plan_duration_value,
+        plan_duration_unit=plan_duration_unit,
+        max_daily_minutes=max_daily_minutes,
     )
 
 
@@ -399,6 +456,70 @@ def response_output_issues(text: str, contract: ResponseOutputContract) -> list[
             issues.append(f"The response is missing question numbers: {missing}.")
     if has_malformed_markdown_table(text):
         issues.append("The response contains a malformed Markdown table with a row split across lines.")
+    issues.extend(_plan_output_issues(text, contract))
+    return issues
+
+
+def _plan_output_issues(text: str, contract: ResponseOutputContract) -> list[str]:
+    if contract.plan_duration_value is None or contract.plan_duration_unit is None:
+        return []
+
+    issues: list[str] = []
+    maximums = {"day": 0, "week": 0, "month": 0}
+    for match in re.finditer(
+        r"\b(?:ngày|days?)\s*(\d{1,3})(?:\s*(?:-|–|—|to|đến|tới)\s*(\d{1,3}))?",
+        text,
+        re.IGNORECASE,
+    ):
+        maximums["day"] = max(maximums["day"], int(match.group(2) or match.group(1)))
+    for match in re.finditer(
+        r"\b(?:tuần|weeks?)\s*(\d{1,3})(?:\s*(?:-|–|—|to|đến|tới)\s*(\d{1,3}))?",
+        text,
+        re.IGNORECASE,
+    ):
+        maximums["week"] = max(maximums["week"], int(match.group(2) or match.group(1)))
+    for match in re.finditer(
+        r"\b(?:tháng|months?)\s*(\d{1,3})(?:\s*(?:-|–|—|to|đến|tới)\s*(\d{1,3}))?",
+        text,
+        re.IGNORECASE,
+    ):
+        maximums["month"] = max(maximums["month"], int(match.group(2) or match.group(1)))
+
+    period_cells: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not (stripped.startswith("|") and stripped.endswith("|")):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if not cells or re.fullmatch(r":?-{3,}:?", cells[0]):
+            continue
+        period = re.sub(r"\s+", " ", cells[0].lower())
+        range_match = re.fullmatch(
+            r"(?:tuần|weeks?)?\s*(\d{1,3})\s*(?:-|–|—|to|đến|tới)\s*(\d{1,3})",
+            period,
+            re.IGNORECASE,
+        )
+        if range_match:
+            maximums["week"] = max(maximums["week"], int(range_match.group(2)))
+            period_cells.append(f"week:{int(range_match.group(1))}-{int(range_match.group(2))}")
+            continue
+        if re.search(r"\d", period):
+            period_cells.append(period)
+
+    requested_maximum = contract.plan_duration_value
+    if contract.plan_duration_unit == "month":
+        if maximums["month"] > requested_maximum or maximums["week"] > requested_maximum * 4:
+            issues.append("The response exceeds the requested plan timeline.")
+    elif maximums[contract.plan_duration_unit] > requested_maximum:
+        issues.append("The response exceeds the requested plan timeline.")
+
+    if len(period_cells) != len(set(period_cells)):
+        issues.append("The response contains duplicate plan periods.")
+
+    if contract.max_daily_minutes is not None:
+        daily_minutes = [int(value) for value in DAILY_TIME_RE.findall(text)]
+        if any(value > contract.max_daily_minutes for value in daily_minutes):
+            issues.append("The response exceeds the requested daily time limit.")
     return issues
 
 
@@ -464,6 +585,47 @@ Final output contract:
 Begin the final response now."""
 
 
+def translation_retry_prompt(
+    original_prompt: str,
+    contract: ResponseOutputContract,
+) -> str:
+    source_marker = "Study material context:\n"
+    question_marker = "\n\nQuestion:\n"
+    source = original_prompt
+    question = ""
+    if source_marker in original_prompt:
+        source = original_prompt.split(source_marker, 1)[1]
+        stop_markers = (
+            "\n\nUser-provided profile facts:",
+            "\n\nWriting response language policy:",
+            "\n\nGeneration policy:",
+            "\n\nPrevious conversation:",
+            question_marker,
+        )
+        stop_indexes = [source.find(marker) for marker in stop_markers if marker in source]
+        if stop_indexes:
+            source = source[: min(stop_indexes)]
+    if question_marker in original_prompt:
+        question = original_prompt.rsplit(question_marker, 1)[1]
+        if "\n\nFinal output contract:" in question:
+            question = question.split("\n\nFinal output contract:", 1)[0]
+
+    contract_text = "\n".join(contract.prompt_lines())
+    return f"""Translate the requested source content faithfully.
+Do not answer, solve, explain, omit, renumber, or add information.
+
+Source content:
+{source.strip()}
+
+Current user request:
+{question.strip()}
+
+Final output contract:
+{contract_text}
+
+Begin directly with the translated content."""
+
+
 def response_output_penalty(text: str, contract: ResponseOutputContract) -> tuple[int, int, int, int]:
     issues = response_output_issues(text, contract)
     return (
@@ -481,8 +643,8 @@ def _writing_target_range(
     if min_words is None or max_words is None or max_words <= min_words:
         return None
     span = max_words - min_words
-    target_min = min_words + max(1, round(span * 0.4))
-    target_max = max_words - max(1, round(span * 0.3))
+    target_min = min_words + max(1, round(span * 0.6))
+    target_max = max_words - max(1, round(span * 0.2))
     return (target_min, target_max) if target_min <= target_max else (min_words, max_words)
 
 
@@ -548,6 +710,21 @@ def select_best_writing_output(
     contract: WritingOutputContract,
 ) -> str:
     return min((first, second), key=lambda text: writing_output_penalty(text, contract))
+
+
+def is_near_writing_word_boundary(
+    text: str,
+    contract: WritingOutputContract,
+    tolerance: int = 2,
+) -> bool:
+    issues = writing_output_issues(text, contract)
+    if not issues or any(
+        marker in issue
+        for issue in issues
+        for marker in ("not written in", "paragraph", "meta commentary")
+    ):
+        return False
+    return writing_output_penalty(text, contract)[3] in range(1, tolerance + 1)
 
 
 def likely_contains_solution(text: str) -> bool:
@@ -1451,11 +1628,30 @@ def rag_prompt(
     history_text = format_history(history)
     if query_intent in {"show_questions", "translate_questions"}:
         history_text = ""
+    if query_intent == "writing_generation":
+        output_contract: WritingOutputContract | ResponseOutputContract = (
+            writing_output_contract(message)
+        )
+    else:
+        output_contract = response_output_contract(
+            message,
+            query_intent,
+            allow_solution=allow_solution,
+            writing_context=writing_context,
+        )
+    no_match_instruction = (
+        'If the context does not contain the requested content, reply exactly: '
+        '"I cannot find this information in the selected uploaded material."'
+        if output_contract.language == "English"
+        else 'Nếu context không chứa nội dung được yêu cầu, hãy trả lời đúng câu: '
+        '"Mình không tìm thấy thông tin này trong tài liệu đã chọn."'
+    )
     parts = [
         ASSISTANT_STYLE,
         "You must answer using only the study material context below.",
         "Do not invent passages, questions, people, dates, examples, answer options, or explanations that are not present in the context.",
-        "If the context does not contain the requested content, say in Vietnamese that you cannot find it in the uploaded material. Do not give a generic IELTS answer.",
+        no_match_instruction,
+        "Do not give a generic IELTS answer when the requested source content is missing.",
         "If the user asks what the whole document contains, summarize all distinct passages or sections visible in the context. Do not focus on only one passage when multiple passages are present.",
         "Question statements are prompts to be answered; they are not evidence from the passage.",
     ]
@@ -1559,16 +1755,13 @@ def rag_prompt(
         parts.append(f"Previous conversation:\n{history_text}")
     parts.append(f"Question:\n{message}")
     if query_intent == "writing_generation":
-        contract = writing_output_contract(message)
-        parts.append("Final output contract:\n" + "\n".join(contract.prompt_lines()))
+        parts.append(
+            "Final output contract:\n" + "\n".join(output_contract.prompt_lines())
+        )
         parts.append("Begin the final Writing response immediately. Output nothing before or after it.")
     else:
-        contract = response_output_contract(
-            message,
-            query_intent,
-            allow_solution=allow_solution,
-            writing_context=writing_context,
+        parts.append(
+            "Final output contract:\n" + "\n".join(output_contract.prompt_lines())
         )
-        parts.append("Final output contract:\n" + "\n".join(contract.prompt_lines()))
         parts.append("Answer naturally and clearly, but stay strictly grounded in the provided context.")
     return "\n\n".join(parts)

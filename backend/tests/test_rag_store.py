@@ -45,6 +45,7 @@ from app.llm import (
     response_output_issues,
     response_retry_prompt,
     select_best_writing_output,
+    translation_retry_prompt,
     writing_output_contract,
     writing_output_issues,
     writing_retry_prompt,
@@ -1031,7 +1032,7 @@ class LocalVectorStoreTests(unittest.TestCase):
 
         self.assertEqual(contract.language, "English")
         self.assertEqual((contract.min_words, contract.max_words), (170, 190))
-        self.assertEqual(contract.target_words, (178, 184))
+        self.assertEqual(contract.target_words, (182, 186))
         self.assertEqual(vietnamese_contract.language, "Vietnamese")
         self.assertTrue(vietnamese_contract.single_paragraph)
         self.assertTrue(vietnamese_contract.overview_only)
@@ -1084,6 +1085,82 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertIn("Translate every requested numbered", retry_prompt)
         self.assertIn("Preserve the question numbers", retry_prompt)
         self.assertNotIn("Which body", retry_prompt)
+
+    def test_translation_retry_prompt_keeps_only_source_and_current_request(self) -> None:
+        original_prompt = """System instructions that should not be repeated.
+
+Study material context:
+[Source 1: reading.pdf, pages 2] 25. Which body provides global tourist numbers?
+
+Previous conversation:
+User: unrelated history
+
+Question:
+Dịch Question 25 sang tiếng Việt, chưa trả lời.
+
+Final output contract:
+- Output language: Vietnamese."""
+        contract = response_output_contract(
+            "Dịch Question 25 sang tiếng Việt, chưa trả lời.",
+            "translate_questions",
+            allow_solution=False,
+        )
+
+        retry_prompt = translation_retry_prompt(original_prompt, contract)
+
+        self.assertIn("25. Which body provides global tourist numbers?", retry_prompt)
+        self.assertIn("Dịch Question 25 sang tiếng Việt, chưa trả lời.", retry_prompt)
+        self.assertNotIn("unrelated history", retry_prompt)
+        self.assertNotIn("System instructions that should not be repeated", retry_prompt)
+
+    def test_direct_plan_contract_rejects_excess_and_duplicate_periods(self) -> None:
+        contract = response_output_contract(
+            "Lập kế hoạch học trong 3 tháng, tối đa 60 phút/ngày.",
+            "direct",
+            allow_solution=False,
+        )
+        invalid = """| Tuần | Mục tiêu | Thời lượng |
+| --- | --- | --- |
+| 1-4 | Nền tảng | 60 phút/ngày |
+| 5-8 | Luyện tập | 90 phút/ngày |
+| 5-8 | Luyện tập thêm | 60 phút/ngày |
+| 16-24 | Tổng ôn | 60 phút/ngày |"""
+
+        issues = response_output_issues(invalid, contract)
+
+        self.assertEqual((contract.plan_duration_value, contract.plan_duration_unit), (3, "month"))
+        self.assertEqual(contract.max_daily_minutes, 60)
+        self.assertTrue(any("requested plan timeline" in issue for issue in issues))
+        self.assertTrue(any("duplicate plan periods" in issue for issue in issues))
+        self.assertTrue(any("daily time limit" in issue for issue in issues))
+
+    def test_direct_plan_contract_accepts_requested_horizon(self) -> None:
+        contract = response_output_contract(
+            "Lập kế hoạch học trong 3 tháng, tối đa 60 phút/ngày.",
+            "direct",
+            allow_solution=False,
+        )
+        valid = """| Tuần | Mục tiêu | Thời lượng |
+| --- | --- | --- |
+| 1-4 | Nền tảng | 45 phút/ngày |
+| 5-8 | Luyện tập | 60 phút/ngày |
+| 9-12 | Tổng ôn | 60 phút/ngày |"""
+
+        self.assertEqual(response_output_issues(valid, contract), [])
+
+    def test_rag_prompt_localizes_the_no_match_contract(self) -> None:
+        vietnamese = rag_prompt(
+            "Tài liệu có nhắc đến chủ đề này không?",
+            "No relevant passage was found.",
+        )
+        english = rag_prompt(
+            "Is this topic mentioned in the uploaded document? Answer in English.",
+            "No relevant passage was found.",
+        )
+
+        self.assertIn("Mình không tìm thấy thông tin này trong tài liệu đã chọn.", vietnamese)
+        self.assertIn("I cannot find this information in the selected uploaded material.", english)
+        self.assertNotIn("say in Vietnamese", english)
 
     def test_comparison_facts_describe_changes_instead_of_only_reprinting_row(self) -> None:
         table = {

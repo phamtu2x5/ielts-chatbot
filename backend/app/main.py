@@ -48,8 +48,10 @@ from .llm import (
     response_retry_prompt,
     resolve_rag_target,
     classify_chat_route,
+    is_near_writing_word_boundary,
     select_best_writing_output,
     stream_ollama,
+    translation_retry_prompt,
     writing_output_contract,
     writing_output_issues,
     writing_output_penalty,
@@ -484,8 +486,11 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         final_issues = writing_output_issues(answer, contract)
         generation_debug["final_issues"] = final_issues
         if final_issues:
-            answer = WRITING_VALIDATION_FAILURE_RESPONSE
-            generation_debug["validation_failed_closed"] = True
+            if is_near_writing_word_boundary(answer, contract):
+                generation_debug["validation_degraded"] = True
+            else:
+                answer = WRITING_VALIDATION_FAILURE_RESPONSE
+                generation_debug["validation_failed_closed"] = True
     else:
         allow_solution = bool(prepared.debug.get("intent_decision", {}).get("allow_solution", False))
         contract = response_output_contract(
@@ -507,14 +512,22 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             or any("not written in" in issue for issue in issues)
             or any("malformed Markdown table" in issue for issue in issues)
             or any("conversation role prefix" in issue for issue in issues)
+            or any("plan timeline" in issue for issue in issues)
+            or any("plan periods" in issue for issue in issues)
+            or any("daily time limit" in issue for issue in issues)
             or (
                 has_explicit_no_solution_constraint(message)
                 and contract.forbid_solution
             )
         )
         if should_retry:
+            retry_prompt = (
+                translation_retry_prompt(prompt, contract)
+                if prepared.query_intent == "translate_questions"
+                else response_retry_prompt(prompt, contract, prepared.query_intent)
+            )
             retry = await query_ollama(
-                response_retry_prompt(prompt, contract, prepared.query_intent),
+                retry_prompt,
                 temperature=0.1,
             )
             selected = min(
@@ -550,7 +563,11 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             )
             generation_debug["validation_failed_closed"] = True
         elif final_issues and any(
-            "malformed Markdown table" in issue or "conversation role prefix" in issue
+            "malformed Markdown table" in issue
+            or "conversation role prefix" in issue
+            or "plan timeline" in issue
+            or "plan periods" in issue
+            or "daily time limit" in issue
             for issue in final_issues
         ):
             answer = FORMAT_VALIDATION_FAILURE_RESPONSE
