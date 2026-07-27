@@ -1677,6 +1677,105 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         sources[-1]["metadata"]["passage_number"] = 1
         self.assertIsNone(main.solve_context_issue(sources, "Trả lời Question 1"))
 
+    def test_solve_question_packet_preserves_question_contract(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-11-13",
+                "document_id": "doc-1",
+                "text": "Questions 11-13 Choose the correct letter.",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [11, 13],
+                    "passage_number": 1,
+                    "question_type": "multiple_choice",
+                    "instructions": "Questions 11-13 Choose the correct letter.",
+                },
+            },
+            {
+                "chunk_id": "question-11",
+                "document_id": "doc-1",
+                "text": "11. Vintage wines are A mostly better. B often preferred. C often discussed. D more costly.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [11, 11],
+                    "passage_number": 1,
+                    "parent_id": "questions-11-13",
+                    "question_type": "multiple_choice",
+                },
+            },
+            {
+                "chunk_id": "passage-1",
+                "document_id": "doc-1",
+                "text": "Vintage wine passage evidence.",
+                "metadata": {"unit_type": "passage", "passage_number": 1},
+            },
+        ]
+
+        packets = main.solve_question_packets("Trả lời Question 11", sources)
+
+        self.assertEqual(len(packets), 1)
+        self.assertEqual(packets[0]["question_type"], "multiple_choice")
+        self.assertEqual(packets[0]["answer_option_labels"], ["A", "B", "C", "D"])
+        self.assertEqual(packets[0]["evidence_chunk_ids"], ["passage-1"])
+        self.assertEqual(
+            main.evidence_query_for_solve_packet(packets[0], "fallback"),
+            "Vintage wines are A mostly better. B often preferred. C often discussed. D more costly.",
+        )
+
+    def test_solve_output_validator_checks_supported_labels(self) -> None:
+        report = {
+            "requested_question_numbers": [11, 12],
+            "question_targets": [
+                {
+                    "question_number": 11,
+                    "question_type": "multiple_choice",
+                    "answer_option_labels": ["A", "B", "C", "D"],
+                },
+                {
+                    "question_number": 12,
+                    "question_type": "true_false_not_given",
+                    "answer_option_labels": [],
+                },
+            ],
+        }
+
+        invalid = "11. Z because...\n12. The passage discusses it."
+        valid = "11. B because...\n12. NOT GIVEN because the detail is absent."
+
+        self.assertEqual(len(main.solve_output_issues(invalid, report)), 2)
+        self.assertEqual(main.solve_output_issues(valid, report), [])
+
+    async def test_solve_generation_retries_invalid_answer_labels_once(self) -> None:
+        report = {
+            "requested_question_numbers": [11],
+            "question_targets": [
+                {
+                    "question_number": 11,
+                    "question_type": "multiple_choice",
+                    "answer_option_labels": ["A", "B", "C", "D"],
+                }
+            ],
+        }
+        prepared = main.ChatPreparation(
+            prompt="grounded solve prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={
+                "intent_decision": {"allow_solution": True},
+                "retrieval": {"solve_context_report": report},
+            },
+            query_intent="solve_questions",
+        )
+        model = AsyncMock(side_effect=["The answer is unclear.", "11. B because the passage says so."])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "Trả lời Question 11.")
+
+        self.assertEqual(answer, "11. B because the passage says so.")
+        self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["retry_used"])
+
     async def test_solve_generation_uses_one_grounded_model_call(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded solve prompt",

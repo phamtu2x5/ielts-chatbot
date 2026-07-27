@@ -675,6 +675,14 @@ def response_retry_prompt(
             "Answer the user's document-grounded question directly in the required language, "
             "using only the supplied study material."
         ),
+        "solve_questions": (
+            "Solve every requested question independently from its matching passage evidence. "
+            "Preserve each question number. For multiple-choice questions, put one supplied "
+            "option label immediately after the question number. For TRUE/FALSE/NOT GIVEN "
+            "questions, put the corresponding label immediately after the question number. "
+            "Respect any word limit in the supplied instructions. Then give one concise evidence "
+            "statement; do not invent missing options or evidence."
+        ),
     }.get(
         query_intent,
         "Answer the user's original request directly in the required language.",

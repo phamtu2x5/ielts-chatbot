@@ -310,6 +310,121 @@ def evidence_query_for_sources(sources: list[dict[str, Any]], fallback: str) -> 
     return " ".join(queries).strip() or fallback
 
 
+def _source_text(source: dict[str, Any]) -> str:
+    return (source.get("display_text") or source.get("text") or "").strip()
+
+
+def _answer_option_labels(text: str) -> list[str]:
+    return list(
+        dict.fromkeys(
+            re.findall(
+                r"(?:^|\s)([A-H])(?:[.)]|\s+(?=\S))",
+                text,
+            )
+        )
+    )
+
+
+def _question_word_limit(text: str) -> int | None:
+    match = re.search(
+        r"\bNO\s+MORE\s+THAN\s+(ONE|TWO|THREE|FOUR|\d+)\s+WORDS?\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(
+            r"\b(ONE|TWO|THREE|FOUR|\d+)\s+WORDS?\s+ONLY\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    if not match:
+        return None
+    value = match.group(1).upper()
+    return {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4}.get(value, int(value) if value.isdigit() else None)
+
+
+def solve_question_packets(
+    message: str,
+    sources: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build one grounded context packet for every exact requested question."""
+    packets: list[dict[str, Any]] = []
+    exact_sources = exact_question_sources(message, sources)
+    for number in requested_question_numbers(message):
+        matches = [
+            source
+            for source in exact_sources
+            if source.get("metadata", {}).get("question_range") == [number, number]
+        ]
+        document_ids = {
+            source.get("document_id") for source in matches if source.get("document_id")
+        }
+        if not matches or len(document_ids) > 1:
+            continue
+        question = matches[0]
+        metadata = question.get("metadata", {})
+        document_id = question.get("document_id")
+        passage_number = metadata.get("passage_number")
+        parent_id = metadata.get("parent_id")
+        groups = [
+            source
+            for source in sources
+            if source.get("document_id") == document_id
+            and source.get("metadata", {}).get("unit_type") == "question_group"
+            and (
+                (parent_id and source.get("chunk_id") == parent_id)
+                or _range_contains(source.get("metadata", {}).get("question_range"), number)
+            )
+        ]
+        group = groups[0] if groups else None
+        group_metadata = group.get("metadata", {}) if group else {}
+        question_text = _source_text(question)
+        instructions = str(group_metadata.get("instructions") or "").strip()
+        option_labels = _answer_option_labels(question_text)
+        question_type = str(
+            metadata.get("question_type") or group_metadata.get("question_type") or "unknown"
+        )
+        evidence = [
+            source
+            for source in sources
+            if source.get("document_id") == document_id
+            and source.get("metadata", {}).get("unit_type") == "passage"
+            and passage_number is not None
+            and source.get("metadata", {}).get("passage_number") == passage_number
+        ]
+        warnings: list[str] = []
+        if question_type == "multiple_choice" and len(option_labels) < 2:
+            warnings.append("missing_answer_options")
+        word_limit = _question_word_limit(instructions or _source_text(group or {}))
+        packets.append(
+            {
+                "question_number": number,
+                "question_chunk_id": question.get("chunk_id"),
+                "question_text": question_text,
+                "question_type": question_type,
+                "instructions": instructions,
+                "answer_option_labels": option_labels,
+                "word_limit": word_limit,
+                "document_id": document_id,
+                "passage_number": passage_number,
+                "parent_id": parent_id,
+                "question_group_chunk_ids": [source.get("chunk_id") for source in groups],
+                "evidence_chunk_ids": [source.get("chunk_id") for source in evidence],
+                "warnings": warnings,
+            }
+        )
+    return packets
+
+
+def evidence_query_for_solve_packet(packet: dict[str, Any], fallback: str) -> str:
+    question_text = re.sub(
+        r"^\s*\d{1,3}\s*[.)]\s*",
+        "",
+        str(packet.get("question_text") or ""),
+    ).strip()
+    return question_text or fallback
+
+
 def requested_question_numbers(message: str) -> list[int]:
     numbers: list[int] = []
     for start, end in parse_question_ranges(message):
@@ -485,6 +600,75 @@ def generation_temperature(prepared: "ChatPreparation") -> float:
     return 0.2 if prepared.route_used.startswith("vector_rag") else 0.7
 
 
+def _solve_answer_segment(
+    text: str,
+    question_number: int,
+    requested_numbers: list[int],
+) -> str:
+    if len(requested_numbers) == 1:
+        return text
+    marker = re.compile(
+        rf"(?im)^\s*(?:question|câu(?:\s+hỏi)?)?\s*{question_number}\s*[.):]"
+    )
+    match = marker.search(text)
+    if not match:
+        return ""
+    following = [
+        re.compile(rf"(?im)^\s*(?:question|câu(?:\s+hỏi)?)?\s*{number}\s*[.):]").search(
+            text,
+            match.end(),
+        )
+        for number in requested_numbers
+        if number != question_number
+    ]
+    ends = [candidate.start() for candidate in following if candidate]
+    return text[match.start() : min(ends) if ends else len(text)]
+
+
+def solve_output_issues(text: str, report: dict[str, Any]) -> list[str]:
+    """Validate only answer labels that are deterministic from the question type."""
+    issues: list[str] = []
+    requested = list(report.get("requested_question_numbers") or [])
+    for packet in report.get("question_targets") or []:
+        number = int(packet["question_number"])
+        segment = _solve_answer_segment(text, number, requested)
+        if not segment:
+            continue
+        question_type = packet.get("question_type")
+        if question_type == "multiple_choice":
+            allowed = set(packet.get("answer_option_labels") or [])
+            answer_head = re.sub(
+                rf"(?is)^\s*(?:question|câu(?:\s+hỏi)?)?\s*{number}\s*[.):]\s*",
+                "",
+                segment[:180],
+            )
+            selected = re.search(
+                r"(?i)^\s*(?:answer|đáp\s+án)?\s*[:\-–—]?\s*([A-H])\b",
+                answer_head,
+            )
+            if allowed and (not selected or selected.group(1).upper() not in allowed):
+                issues.append(f"Question {number} is missing a valid answer option label.")
+        elif question_type == "true_false_not_given":
+            if not re.search(r"\b(?:TRUE|FALSE|NOT\s+GIVEN)\b", segment, re.IGNORECASE):
+                issues.append(f"Question {number} is missing a TRUE/FALSE/NOT GIVEN label.")
+    return issues
+
+
+def select_best_solve_output(
+    first: str,
+    retry: str,
+    contract: Any,
+    report: dict[str, Any],
+) -> str:
+    return min(
+        (first, retry),
+        key=lambda text: (
+            len(solve_output_issues(text, report)),
+            response_output_penalty(text, contract),
+        ),
+    )
+
+
 async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
     prompt = prepared.prompt or ""
     answer = await query_ollama(prompt, temperature=generation_temperature(prepared))
@@ -533,7 +717,13 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             allow_solution=allow_solution,
             writing_context=is_writing_response(prepared),
         )
-        issues = response_output_issues(answer, contract)
+        solve_report = (
+            prepared.debug.get("retrieval", {}).get("solve_context_report", {})
+            if prepared.query_intent == "solve_questions"
+            else {}
+        )
+        first_solve_issues = solve_output_issues(answer, solve_report) if solve_report else []
+        issues = response_output_issues(answer, contract) + first_solve_issues
         generation_debug = prepared.debug.setdefault("generation", {})
         generation_debug["response_contract"] = {
             "language": contract.language,
@@ -542,6 +732,11 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             "first_draft_issues": issues,
             "first_draft_language": response_language_debug(answer, contract.language),
         }
+        if solve_report:
+            generation_debug["solve_contract"] = {
+                "question_packets": solve_report.get("question_targets", []),
+                "first_draft_issues": first_solve_issues,
+            }
         enforce_review_contract = requires_reviewed_generation(prepared, message)
         should_retry = bool(issues) and (
             prepared.query_intent == "translate_questions"
@@ -554,6 +749,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             or any("plan timeline" in issue for issue in issues)
             or any("plan periods" in issue for issue in issues)
             or any("daily time limit" in issue for issue in issues)
+            or bool(first_solve_issues)
             or (
                 has_explicit_no_solution_constraint(message)
                 and contract.forbid_solution
@@ -569,7 +765,11 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
                 retry_prompt,
                 temperature=0.1,
             )
-            selected = select_best_response_output(answer, retry, contract)
+            selected = (
+                select_best_solve_output(answer, retry, contract, solve_report)
+                if solve_report
+                else select_best_response_output(answer, retry, contract)
+            )
             generation_debug["retry_used"] = True
             generation_debug["candidate_penalties"] = {
                 "first": list(response_output_penalty(answer, contract)),
@@ -583,7 +783,10 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             answer = selected
         else:
             generation_debug["retry_used"] = False
-        final_issues = response_output_issues(answer, contract)
+        final_solve_issues = solve_output_issues(answer, solve_report) if solve_report else []
+        final_issues = response_output_issues(answer, contract) + final_solve_issues
+        if solve_report:
+            generation_debug["solve_contract"]["final_issues"] = final_solve_issues
         if contract.forbid_solution and any("reveals or narrows" in issue for issue in final_issues):
             answer = (
                 "Hãy đối chiếu từng câu với đúng đoạn liên quan, xác định từ khóa và điều kiện trong "
@@ -945,11 +1148,24 @@ def solve_context_report(
 ) -> dict[str, Any]:
     requested = requested_question_numbers(message)
     exact_sources = exact_question_sources(message, sources)
-    question_targets: list[dict[str, Any]] = []
-    found_numbers: list[int] = []
+    question_targets = solve_question_packets(message, sources)
+    found_numbers = [target["question_number"] for target in question_targets]
     duplicate_documents: list[int] = []
-    missing_groups: list[int] = []
-    missing_evidence: list[int] = []
+    missing_groups = [
+        target["question_number"]
+        for target in question_targets
+        if not target["question_group_chunk_ids"]
+    ]
+    missing_evidence = [
+        target["question_number"]
+        for target in question_targets
+        if not target["evidence_chunk_ids"]
+    ]
+    missing_options = [
+        target["question_number"]
+        for target in question_targets
+        if "missing_answer_options" in target["warnings"]
+    ]
 
     for number in requested:
         matches = [
@@ -962,58 +1178,6 @@ def solve_context_report(
         }
         if len(document_ids) > 1:
             duplicate_documents.append(number)
-            continue
-        if not matches:
-            continue
-        question = matches[0]
-        metadata = question.get("metadata", {})
-        document_id = question.get("document_id")
-        passage_number = metadata.get("passage_number")
-        parent_id = metadata.get("parent_id")
-        found_numbers.append(number)
-
-        group_matches = [
-            source
-            for source in sources
-            if source.get("document_id") == document_id
-            and source.get("metadata", {}).get("unit_type") == "question_group"
-            and (
-                (parent_id and source.get("chunk_id") == parent_id)
-                or _range_contains(
-                    source.get("metadata", {}).get("question_range"),
-                    number,
-                )
-            )
-        ]
-        if not group_matches:
-            missing_groups.append(number)
-
-        evidence_matches = [
-            source
-            for source in sources
-            if source.get("document_id") == document_id
-            and source.get("metadata", {}).get("unit_type") == "passage"
-            and passage_number is not None
-            and source.get("metadata", {}).get("passage_number") == passage_number
-        ]
-        if not evidence_matches:
-            missing_evidence.append(number)
-
-        question_targets.append(
-            {
-                "question_number": number,
-                "question_chunk_id": question.get("chunk_id"),
-                "document_id": document_id,
-                "passage_number": passage_number,
-                "parent_id": parent_id,
-                "question_group_chunk_ids": [
-                    source.get("chunk_id") for source in group_matches
-                ],
-                "evidence_chunk_ids": [
-                    source.get("chunk_id") for source in evidence_matches
-                ],
-            }
-        )
 
     missing_numbers = [number for number in requested if number not in found_numbers]
     issues: list[str] = []
@@ -1025,6 +1189,8 @@ def solve_context_report(
         issues.append("missing_question_groups")
     if missing_evidence:
         issues.append("missing_passage_evidence")
+    if missing_options:
+        issues.append("missing_answer_options")
     return {
         "requested_question_numbers": requested,
         "found_question_numbers": found_numbers,
@@ -1032,6 +1198,7 @@ def solve_context_report(
         "ambiguous_question_numbers": duplicate_documents,
         "missing_group_question_numbers": missing_groups,
         "missing_evidence_question_numbers": missing_evidence,
+        "missing_option_question_numbers": missing_options,
         "question_targets": question_targets,
         "issues": issues,
     }
@@ -1054,6 +1221,10 @@ def solve_context_issue(
     )
     if not question_text:
         return "missing_question"
+    if message:
+        report = solve_context_report(message, sources)
+        if report["issues"]:
+            return report["issues"][0]
     requires_options = bool(
         re.search(
             r"(?:from\s+the\s+list\s+below|choose\s+(?:the\s+)?(?:correct\s+)?letter|"
@@ -1062,15 +1233,8 @@ def solve_context_issue(
             flags=re.IGNORECASE,
         )
     )
-    option_labels = set(
-        re.findall(r"(?:^|\s)([A-H])(?:[.)]|\s+(?=\S))", question_text)
-    )
-    if requires_options and len(option_labels) < 2:
+    if requires_options and len(_answer_option_labels(question_text)) < 2:
         return "missing_answer_options"
-    if message:
-        report = solve_context_report(message, sources)
-        if report["issues"]:
-            return report["issues"][0]
     return None
 
 
@@ -1795,6 +1959,15 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 message,
                 sources + question_context,
             )
+            initial_packets = solve_question_packets(
+                message,
+                sources + question_context,
+            )
+            packets_by_chunk_id = {
+                packet["question_chunk_id"]: packet
+                for packet in initial_packets
+                if packet.get("question_chunk_id")
+            }
             evidence_per_question = min(
                 settings.rag_solve_evidence_per_question,
                 max(
@@ -1810,7 +1983,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 question_number = question_range[0] if len(question_range) == 2 else None
                 document_id = question_source.get("document_id")
                 passage_number = metadata.get("passage_number")
-                question_query = evidence_query_for_sources([question_source], message)
+                packet = packets_by_chunk_id.get(question_source.get("chunk_id"), {})
+                question_query = evidence_query_for_solve_packet(packet, message)
                 evidence_queries.append(question_query)
                 pair_candidates = (
                     await run_in_threadpool(
@@ -1847,6 +2021,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                         "question_chunk_id": question_source.get("chunk_id"),
                         "document_id": document_id,
                         "passage_number": passage_number,
+                        "question_type": packet.get("question_type"),
+                        "answer_option_labels": packet.get("answer_option_labels", []),
+                        "word_limit": packet.get("word_limit"),
                         "query": question_query,
                         "candidate_chunk_ids": [
                             source.get("chunk_id") for source in pair_candidates
