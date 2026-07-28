@@ -1315,6 +1315,61 @@ Mô tả cấu trúc tài liệu bằng tiếng Việt."""
         self.assertIn("one short evidence quote and its relationship", prompt)
         self.assertIn("supports -> TRUE; contradicts -> FALSE; absent -> NOT GIVEN", prompt)
 
+    def test_semantic_qa_prompt_requires_the_requested_relationship_and_evidence(self) -> None:
+        prompt = rag_prompt(
+            "Tại sao tác giả phản đối phương pháp này?",
+            "[Source: reading.pdf, page 3] The passage gives three objections.",
+            query_intent="semantic_qa",
+            allow_solution=False,
+        )
+
+        self.assertIn("Answer the exact action and relationship requested", prompt)
+        self.assertIn("For why/how questions, explain the cause", prompt)
+        self.assertIn("Do not return only an answer-option letter", prompt)
+        self.assertIn("Never cite a question statement as passage evidence", prompt)
+
+    def test_translation_prompt_requires_complete_translation_of_common_words(self) -> None:
+        prompt = rag_prompt(
+            "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",
+            "[Source: reading.pdf, page 4] 25. Which aspects are shared?",
+            query_intent="translate_questions",
+            allow_solution=False,
+        )
+        contract = response_output_contract(
+            "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",
+            "translate_questions",
+            allow_solution=False,
+        )
+        retry = translation_retry_prompt(prompt, contract)
+
+        self.assertIn("Translate all ordinary words and phrases", prompt)
+        self.assertIn("do not leave unexplained source-language common nouns", prompt)
+        self.assertIn("Translate all ordinary source-language wording", retry)
+        self.assertIn("names, option labels", retry)
+
+    def test_overview_prompt_preserves_source_titles_and_covers_all_sections(self) -> None:
+        prompt = rag_prompt(
+            "Tóm tắt toàn bộ tài liệu.",
+            "Passage 1: British Emigration\nPassage 2: Internet Use",
+            query_intent="document_overview",
+            allow_solution=False,
+        )
+
+        self.assertIn("Preserve source passage and section titles exactly as written", prompt)
+        self.assertIn("Cover all distinct sections visible in context once", prompt)
+
+    def test_writing_prompt_requires_cross_row_fact_checks(self) -> None:
+        prompt = rag_prompt(
+            "Viết bài Task 1 dựa trên bảng.",
+            "[Deterministic table facts]\n- A: 99\n- B: 94\n- C: 83",
+            query_intent="writing_generation",
+            allow_solution=True,
+            writing_context=True,
+        )
+
+        self.assertIn("compare the corresponding value for every relevant row", prompt)
+        self.assertIn("paired with the correct row, column, year or period", prompt)
+
     def test_no_solution_constraint_requires_an_explicit_marker(self) -> None:
         self.assertTrue(has_explicit_no_solution_constraint("Giải thích Questions 1-4, không chọn đáp án."))
         self.assertFalse(has_explicit_no_solution_constraint("Giải thích và trả lời Questions 1-4."))

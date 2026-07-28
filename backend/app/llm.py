@@ -672,8 +672,9 @@ def response_retry_prompt(
             "language without solving the questions."
         ),
         "semantic_qa": (
-            "Answer the user's document-grounded question directly in the required language, "
-            "using only the supplied study material."
+            "Answer the exact document-grounded question in the required language using only "
+            "the supplied study material. A why/how question requires a short explanation from "
+            "evidence, not only an option label or a repeated conclusion."
         ),
         "solve_questions": (
             "Solve every requested question independently from its matching passage evidence. "
@@ -799,6 +800,8 @@ def translation_retry_prompt(
 Translate the requested source content faithfully.
 Do not answer, solve, explain, omit, renumber, or add information.
 Keep mandatory answer-limit phrases such as NO MORE THAN THREE WORDS unchanged.
+Translate all ordinary source-language wording into the requested language. Leave only proper
+names, option labels, and mandatory IELTS answer-limit phrases untranslated.
 
 Source content:
 {source.strip()}
@@ -1860,6 +1863,12 @@ def rag_prompt(
         "Do not give a generic IELTS answer when the requested source content is missing.",
         "If the user asks what the whole document contains, summarize all distinct passages or sections visible in the context. Do not focus on only one passage when multiple passages are present.",
         "Question statements are prompts to be answered; they are not evidence from the passage.",
+        "RAG answer quality contract:",
+        "- Answer the exact action and relationship requested by the user before adding evidence or detail.",
+        "- Cover every requested item or sub-question that is present in context; do not replace it with a nearby topic, a bare option label, or a generic IELTS explanation.",
+        "- Support factual conclusions with the relevant passage, instruction, or structured value from context. Never cite a question statement as passage evidence.",
+        "- If context is incomplete, identify the missing evidence or options instead of guessing or silently filling the gap.",
+        "- For comparisons, rankings, changes, maxima, or minima, check every relevant row and value in context before stating the conclusion.",
     ]
     if query_intent != "writing_generation":
         parts.append("Always cite the source file name and page marker when answering from context.")
@@ -1896,6 +1905,8 @@ def rag_prompt(
             [
                 "Generation policy:",
                 "- Translate only the requested question instructions and question statements.",
+                "- Translate all ordinary words and phrases into the requested language; do not leave unexplained source-language common nouns in the result.",
+                "- Preserve proper names, question numbers, option labels, and mandatory IELTS answer-limit phrases when translating them would change the task.",
                 "- Do not mention passage evidence, do not evaluate the statements, and do not solve.",
                 "- Do not provide TRUE/FALSE/NOT GIVEN labels or answer choices.",
             ]
@@ -1907,6 +1918,8 @@ def rag_prompt(
                 "- Present or explain the requested questions only.",
                 "- You may explain the task type, instructions, vocabulary, and Vietnamese meaning.",
                 "- Name the task type only when it is explicitly supported by the question instructions in the context. Otherwise describe the instruction without guessing a type.",
+                "- Make the explanation specific to the supplied instructions: state the expected answer form, any word or choice limit, and a short sequence of practical steps.",
+                "- Explain every requested question group that appears in context; do not replace the explanation with only a generic instruction to compare keywords.",
                 "- Do not solve the questions, do not provide True/False/Not Given labels, do not choose A/B/C/D, and do not infer answers.",
                 "- Do not map individual question numbers to categories, people, methods, paragraphs, options, or labels.",
                 "- Do not treat the question statements themselves as passage evidence.",
@@ -1935,6 +1948,8 @@ def rag_prompt(
                 "Generation policy:",
                 "- Summarize the document from the outline and passage context.",
                 "- Mention passage titles, page ranges, and question groups when available.",
+                "- Preserve source passage and section titles exactly as written. Translate their descriptions and question types, not the titles themselves.",
+                "- Cover all distinct sections visible in context once; do not omit later sections or merge unrelated sections.",
                 "- Do not answer individual questions or invent answer keys.",
             ]
         )
@@ -1948,7 +1963,20 @@ def rag_prompt(
                 "- Do not substitute a different chart, topic, country, date, or measurement.",
                 "- Treat deterministic table facts as authoritative calculations derived from the table.",
                 "- Distinguish the highest final value from the largest increase. They may belong to different categories.",
+                "- Before writing a highest, lowest, largest-change, or smallest-change claim, compare the corresponding value for every relevant row in the deterministic facts.",
+                "- Keep each numerical claim paired with the correct row, column, year or period, and unit from context.",
                 "- If the user requests only an overview, write only one concise overview paragraph without an introduction or body details.",
+            ]
+        )
+    elif query_intent == "semantic_qa":
+        parts.extend(
+            [
+                "Generation policy:",
+                "- Start with a direct answer to the exact document-grounded question, then give the shortest evidence-based explanation needed.",
+                "- For why/how questions, explain the cause, mechanism, or reasoning stated in context. Do not return only an answer-option letter or repeat the question.",
+                "- For yes/no questions, state yes, no, or that the information is absent before citing the relevant context.",
+                "- For numerical or comparative questions, include the values used and show the relationship or calculation that supports the conclusion.",
+                "- Do not convert a request for explanation into an answer key unless the user explicitly asks to solve the exercise.",
             ]
         )
     elif not allow_solution:
