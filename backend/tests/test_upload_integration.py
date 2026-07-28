@@ -1716,10 +1716,74 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(packets), 1)
         self.assertEqual(packets[0]["question_type"], "multiple_choice")
         self.assertEqual(packets[0]["answer_option_labels"], ["A", "B", "C", "D"])
+        self.assertEqual(
+            packets[0]["answer_options"],
+            [
+                {"label": "A", "text": "mostly better."},
+                {"label": "B", "text": "often preferred."},
+                {"label": "C", "text": "often discussed."},
+                {"label": "D", "text": "more costly."},
+            ],
+        )
         self.assertEqual(packets[0]["evidence_chunk_ids"], ["passage-1"])
         self.assertEqual(
             main.evidence_query_for_solve_packet(packets[0], "fallback"),
-            "Vintage wines are A mostly better. B often preferred. C often discussed. D more costly.",
+            "Vintage wines are mostly better. often preferred. often discussed. more costly.",
+        )
+
+    def test_solve_sources_keep_only_selected_passage_evidence(self) -> None:
+        sources = [
+            {
+                "chunk_id": "question-1",
+                "metadata": {"unit_type": "question"},
+            },
+            {
+                "chunk_id": "unselected-passage",
+                "metadata": {"unit_type": "passage"},
+            },
+        ]
+        question_context = [
+            {
+                "chunk_id": "questions-1-2",
+                "metadata": {"unit_type": "question_group"},
+            },
+            {
+                "chunk_id": "another-unselected-passage",
+                "metadata": {"unit_type": "passage"},
+            },
+        ]
+        evidence_context = [
+            {
+                "chunk_id": "selected-passage",
+                "metadata": {"unit_type": "passage"},
+            }
+        ]
+
+        selected = main.solve_sources_with_selected_evidence(
+            sources,
+            question_context,
+            evidence_context,
+        )
+
+        self.assertEqual(
+            [source["chunk_id"] for source in selected],
+            ["question-1", "questions-1-2", "selected-passage"],
+        )
+
+    def test_answer_option_split_does_not_treat_article_as_option(self) -> None:
+        stem, options = main._split_answer_options(
+            "A recent survey found that most learners A improved quickly. "
+            "B stayed unchanged. C stopped studying."
+        )
+
+        self.assertEqual(stem, "A recent survey found that most learners")
+        self.assertEqual(
+            options,
+            [
+                {"label": "A", "text": "improved quickly."},
+                {"label": "B", "text": "stayed unchanged."},
+                {"label": "C", "text": "stopped studying."},
+            ],
         )
 
     def test_solve_context_rejects_duplicate_exact_question_chunks(self) -> None:

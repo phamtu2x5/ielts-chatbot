@@ -326,6 +326,42 @@ def _answer_option_labels(text: str) -> list[str]:
     )
 
 
+def _split_answer_options(text: str) -> tuple[str, list[dict[str, str]]]:
+    """Split an IELTS question into its stem and labelled answer options."""
+    matches = list(
+        re.finditer(
+            r"(?<![A-Za-z0-9])([A-H])(?:[.)]|\s+)(?=\S)",
+            text,
+        )
+    )
+    if len(matches) < 2:
+        return text.strip(), []
+
+    sequences: list[list[re.Match[str]]] = []
+    for start in range(len(matches) - 1):
+        sequence = [matches[start]]
+        for match in matches[start + 1 :]:
+            if ord(match.group(1)) == ord(sequence[-1].group(1)) + 1:
+                sequence.append(match)
+            elif ord(match.group(1)) <= ord(sequence[-1].group(1)):
+                break
+        if len(sequence) >= 2:
+            sequences.append(sequence)
+    if not sequences:
+        return text.strip(), []
+    matches = max(sequences, key=lambda sequence: (len(sequence), sequence[0].start()))
+
+    options: list[dict[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        option_text = text[match.end() : end].strip()
+        if option_text:
+            options.append({"label": match.group(1), "text": option_text})
+    if len(options) < 2:
+        return text.strip(), []
+    return text[: matches[0].start()].strip(), options
+
+
 def _question_word_limit(text: str) -> int | None:
     match = re.search(
         r"\bNO\s+MORE\s+THAN\s+(ONE|TWO|THREE|FOUR|\d+)\s+WORDS?\b",
@@ -387,7 +423,15 @@ def solve_question_packets(
         )
         question_text = _source_text(question)
         instructions = str(group_metadata.get("instructions") or "").strip()
-        option_labels = _answer_option_labels(question_text)
+        question_without_number = re.sub(
+            r"^\s*\d{1,3}\s*[.)]\s*",
+            "",
+            question_text,
+        ).strip()
+        question_stem, answer_options = _split_answer_options(question_without_number)
+        option_labels = [option["label"] for option in answer_options]
+        if not option_labels:
+            option_labels = _answer_option_labels(question_text)
         question_type = str(
             metadata.get("question_type") or group_metadata.get("question_type") or "unknown"
         )
@@ -433,9 +477,11 @@ def solve_question_packets(
                 "question_number": number,
                 "question_chunk_id": question.get("chunk_id"),
                 "question_text": question_text,
+                "question_stem": question_stem,
                 "question_type": question_type,
                 "instructions": instructions,
                 "answer_option_labels": option_labels,
+                "answer_options": answer_options,
                 "word_limit": word_limit,
                 "document_id": document_id,
                 "passage_number": passage_number,
@@ -456,12 +502,42 @@ def solve_question_packets(
 
 
 def evidence_query_for_solve_packet(packet: dict[str, Any], fallback: str) -> str:
+    parts = [str(packet.get("question_stem") or "").strip()]
+    parts.extend(
+        str(option.get("text") or "").strip()
+        for option in packet.get("answer_options") or []
+        if isinstance(option, dict)
+    )
+    query_parts: list[str] = []
+    for part in parts:
+        normalized = re.sub(r"\s+", " ", part).strip()
+        if normalized and normalized.casefold() not in {
+            existing.casefold() for existing in query_parts
+        }:
+            query_parts.append(normalized)
+    if query_parts:
+        return " ".join(query_parts)
+
     question_text = re.sub(
         r"^\s*\d{1,3}\s*[.)]\s*",
         "",
         str(packet.get("question_text") or ""),
     ).strip()
     return question_text or fallback
+
+
+def solve_sources_with_selected_evidence(
+    sources: list[dict[str, Any]],
+    question_context: list[dict[str, Any]],
+    evidence_context: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep solve contracts and only passage chunks selected as evidence."""
+    contract_sources = [
+        source
+        for source in sources + question_context
+        if source.get("metadata", {}).get("unit_type") != "passage"
+    ]
+    return dedupe_sources(contract_sources + evidence_context)
 
 
 def requested_question_numbers(message: str) -> list[int]:
@@ -2086,22 +2162,6 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                     else []
                 )
                 selected = pair_candidates[:evidence_per_question]
-                fallback_used = False
-                if not selected and document_id and passage_number is not None:
-                    context_anchor = {
-                        **question_source,
-                        "metadata": {
-                            **question_source.get("metadata", {}),
-                            "passage_number": passage_number,
-                        },
-                    }
-                    selected = await run_in_threadpool(
-                        store.passage_context_for_sources,
-                        [context_anchor],
-                        evidence_per_question,
-                        [document_id],
-                    )
-                    fallback_used = bool(selected)
                 evidence_candidate_count += len(pair_candidates)
                 remaining = max(
                     0,
@@ -2122,10 +2182,20 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                         "candidate_chunk_ids": [
                             source.get("chunk_id") for source in pair_candidates
                         ],
+                        "candidate_scores": [
+                            {
+                                "chunk_id": source.get("chunk_id"),
+                                "dense": source.get("probe_dense_score", 0.0),
+                                "keyword": source.get("probe_keyword_score", 0.0),
+                                "rrf": source.get("rrf_score", 0.0),
+                                "methods": source.get("retrieval_methods", []),
+                            }
+                            for source in pair_candidates
+                        ],
                         "selected_chunk_ids": [
                             source.get("chunk_id") for source in selected
                         ],
-                        "fallback_used": fallback_used,
+                        "fallback_used": False,
                     }
                 )
                 if len(evidence_context) >= settings.rag_solve_max_evidence:
@@ -2133,7 +2203,11 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             evidence_query = " | ".join(dict.fromkeys(evidence_queries)) or None
             evidence_context = dedupe_sources(evidence_context)
             evidence_context_count = len(evidence_context)
-            sources = dedupe_sources(sources + question_context + evidence_context)
+            sources = solve_sources_with_selected_evidence(
+                sources,
+                question_context,
+                evidence_context,
+            )
             solve_report = solve_context_report(message, sources)
         elif query_intent == "semantic_qa" and use_affinity_context and sources:
             passage_context = await run_in_threadpool(
