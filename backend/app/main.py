@@ -351,33 +351,38 @@ def solve_question_packets(
     packets: list[dict[str, Any]] = []
     exact_sources = exact_question_sources(message, sources)
     for number in requested_question_numbers(message):
-        matches = [
+        matches = dedupe_sources([
             source
             for source in exact_sources
             if source.get("metadata", {}).get("question_range") == [number, number]
-        ]
-        document_ids = {
-            source.get("document_id") for source in matches if source.get("document_id")
-        }
-        if not matches or len(document_ids) > 1:
+        ])
+        if len(matches) != 1:
             continue
         question = matches[0]
         metadata = question.get("metadata", {})
         document_id = question.get("document_id")
-        passage_number = metadata.get("passage_number")
+        question_passage_number = metadata.get("passage_number")
         parent_id = metadata.get("parent_id")
-        groups = [
+        group_candidates = [
             source
             for source in sources
             if source.get("document_id") == document_id
             and source.get("metadata", {}).get("unit_type") == "question_group"
             and (
-                (parent_id and source.get("chunk_id") == parent_id)
-                or _range_contains(source.get("metadata", {}).get("question_range"), number)
+                source.get("chunk_id") == parent_id
+                if parent_id
+                else _range_contains(source.get("metadata", {}).get("question_range"), number)
             )
         ]
-        group = groups[0] if groups else None
+        group_candidates = dedupe_sources(group_candidates)
+        group = group_candidates[0] if len(group_candidates) == 1 else None
         group_metadata = group.get("metadata", {}) if group else {}
+        group_passage_number = group_metadata.get("passage_number")
+        passage_number = (
+            question_passage_number
+            if question_passage_number is not None
+            else group_passage_number
+        )
         question_text = _source_text(question)
         instructions = str(group_metadata.get("instructions") or "").strip()
         option_labels = _answer_option_labels(question_text)
@@ -389,13 +394,38 @@ def solve_question_packets(
             for source in sources
             if source.get("document_id") == document_id
             and source.get("metadata", {}).get("unit_type") == "passage"
+            and group is not None
             and passage_number is not None
+            and not (
+                question_passage_number is not None
+                and group_passage_number is not None
+                and question_passage_number != group_passage_number
+            )
             and source.get("metadata", {}).get("passage_number") == passage_number
         ]
+        evidence = dedupe_sources(evidence)
         warnings: list[str] = []
+        if not group_candidates:
+            warnings.append("missing_question_group")
+        elif len(group_candidates) > 1:
+            warnings.append("ambiguous_question_group")
+        if (
+            question_passage_number is not None
+            and group_passage_number is not None
+            and question_passage_number != group_passage_number
+        ):
+            warnings.append("question_group_passage_mismatch")
+        if passage_number is None:
+            warnings.append("missing_passage_link")
         if question_type == "multiple_choice" and len(option_labels) < 2:
             warnings.append("missing_answer_options")
         word_limit = _question_word_limit(instructions or _source_text(group or {}))
+        structural_warnings = {
+            "missing_question_group",
+            "ambiguous_question_group",
+            "question_group_passage_mismatch",
+            "missing_passage_link",
+        }
         packets.append(
             {
                 "question_number": number,
@@ -407,10 +437,17 @@ def solve_question_packets(
                 "word_limit": word_limit,
                 "document_id": document_id,
                 "passage_number": passage_number,
+                "question_passage_number": question_passage_number,
+                "group_passage_number": group_passage_number,
                 "parent_id": parent_id,
-                "question_group_chunk_ids": [source.get("chunk_id") for source in groups],
+                "question_group_chunk_ids": [
+                    source.get("chunk_id") for source in group_candidates
+                ],
                 "evidence_chunk_ids": [source.get("chunk_id") for source in evidence],
                 "warnings": warnings,
+                "context_ready": not any(
+                    warning in structural_warnings for warning in warnings
+                ),
             }
         )
     return packets
@@ -1150,11 +1187,26 @@ def solve_context_report(
     exact_sources = exact_question_sources(message, sources)
     question_targets = solve_question_packets(message, sources)
     found_numbers = [target["question_number"] for target in question_targets]
-    duplicate_documents: list[int] = []
+    ambiguous_questions: list[int] = []
     missing_groups = [
         target["question_number"]
         for target in question_targets
-        if not target["question_group_chunk_ids"]
+        if "missing_question_group" in target["warnings"]
+    ]
+    ambiguous_groups = [
+        target["question_number"]
+        for target in question_targets
+        if "ambiguous_question_group" in target["warnings"]
+    ]
+    passage_mismatches = [
+        target["question_number"]
+        for target in question_targets
+        if "question_group_passage_mismatch" in target["warnings"]
+    ]
+    missing_passage_links = [
+        target["question_number"]
+        for target in question_targets
+        if "missing_passage_link" in target["warnings"]
     ]
     missing_evidence = [
         target["question_number"]
@@ -1173,20 +1225,27 @@ def solve_context_report(
             for source in exact_sources
             if source.get("metadata", {}).get("question_range") == [number, number]
         ]
-        document_ids = {
-            source.get("document_id") for source in matches if source.get("document_id")
-        }
-        if len(document_ids) > 1:
-            duplicate_documents.append(number)
+        if len(dedupe_sources(matches)) > 1:
+            ambiguous_questions.append(number)
 
-    missing_numbers = [number for number in requested if number not in found_numbers]
+    exact_numbers = {
+        source.get("metadata", {}).get("question_range", [None])[0]
+        for source in exact_sources
+    }
+    missing_numbers = [number for number in requested if number not in exact_numbers]
     issues: list[str] = []
     if requested and missing_numbers:
         issues.append("missing_exact_questions")
-    if duplicate_documents:
+    if ambiguous_questions:
         issues.append("ambiguous_exact_questions")
     if missing_groups:
         issues.append("missing_question_groups")
+    if ambiguous_groups:
+        issues.append("ambiguous_question_groups")
+    if passage_mismatches:
+        issues.append("question_group_passage_mismatch")
+    if missing_passage_links:
+        issues.append("missing_passage_links")
     if missing_evidence:
         issues.append("missing_passage_evidence")
     if missing_options:
@@ -1195,8 +1254,11 @@ def solve_context_report(
         "requested_question_numbers": requested,
         "found_question_numbers": found_numbers,
         "missing_question_numbers": missing_numbers,
-        "ambiguous_question_numbers": duplicate_documents,
+        "ambiguous_question_numbers": ambiguous_questions,
         "missing_group_question_numbers": missing_groups,
+        "ambiguous_group_question_numbers": ambiguous_groups,
+        "passage_mismatch_question_numbers": passage_mismatches,
+        "missing_passage_link_question_numbers": missing_passage_links,
         "missing_evidence_question_numbers": missing_evidence,
         "missing_option_question_numbers": missing_options,
         "question_targets": question_targets,
@@ -1963,29 +2025,52 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 message,
                 sources + question_context,
             )
-            packets_by_chunk_id = {
-                packet["question_chunk_id"]: packet
-                for packet in initial_packets
-                if packet.get("question_chunk_id")
-            }
             evidence_per_question = min(
                 settings.rag_solve_evidence_per_question,
                 max(
                     1,
-                    settings.rag_solve_max_evidence // max(1, len(question_sources)),
+                    settings.rag_solve_max_evidence // max(1, len(initial_packets)),
                 ),
             )
             evidence_context: list[dict[str, Any]] = []
             evidence_queries: list[str] = []
-            for question_source in question_sources:
-                metadata = question_source.get("metadata", {})
-                question_range = metadata.get("question_range") or []
-                question_number = question_range[0] if len(question_range) == 2 else None
-                document_id = question_source.get("document_id")
-                passage_number = metadata.get("passage_number")
-                packet = packets_by_chunk_id.get(question_source.get("chunk_id"), {})
+            question_sources_by_chunk_id = {
+                source.get("chunk_id"): source
+                for source in question_sources
+                if source.get("chunk_id")
+            }
+            for packet in initial_packets:
+                question_number = packet.get("question_number")
+                question_source = question_sources_by_chunk_id.get(
+                    packet.get("question_chunk_id")
+                )
+                document_id = packet.get("document_id")
+                passage_number = packet.get("passage_number")
                 question_query = evidence_query_for_solve_packet(packet, message)
                 evidence_queries.append(question_query)
+                if question_source is None or not packet.get("context_ready"):
+                    evidence_by_question.append(
+                        {
+                            "question_number": question_number,
+                            "question_chunk_id": packet.get("question_chunk_id"),
+                            "document_id": document_id,
+                            "passage_number": passage_number,
+                            "question_type": packet.get("question_type"),
+                            "answer_option_labels": packet.get("answer_option_labels", []),
+                            "word_limit": packet.get("word_limit"),
+                            "query": question_query,
+                            "candidate_chunk_ids": [],
+                            "selected_chunk_ids": [],
+                            "fallback_used": False,
+                            "skipped_reason": (
+                                "missing_question_source"
+                                if question_source is None
+                                else "invalid_question_structure"
+                            ),
+                            "warnings": packet.get("warnings", []),
+                        }
+                    )
+                    continue
                 pair_candidates = (
                     await run_in_threadpool(
                         store.hybrid_search,
@@ -2001,9 +2086,16 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 selected = pair_candidates[:evidence_per_question]
                 fallback_used = False
                 if not selected and document_id and passage_number is not None:
+                    context_anchor = {
+                        **question_source,
+                        "metadata": {
+                            **question_source.get("metadata", {}),
+                            "passage_number": passage_number,
+                        },
+                    }
                     selected = await run_in_threadpool(
                         store.passage_context_for_sources,
-                        [question_source],
+                        [context_anchor],
                         evidence_per_question,
                         [document_id],
                     )

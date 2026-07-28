@@ -1722,6 +1722,227 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Vintage wines are A mostly better. B often preferred. C often discussed. D more costly.",
         )
 
+    def test_solve_context_rejects_duplicate_exact_question_chunks(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-1-1",
+                "document_id": "doc-1",
+                "text": "Question 1 Answer the question.",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [1, 1],
+                    "passage_number": 1,
+                },
+            },
+            {
+                "chunk_id": "question-1-a",
+                "document_id": "doc-1",
+                "text": "1. First extracted version.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [1, 1],
+                    "passage_number": 1,
+                    "parent_id": "questions-1-1",
+                },
+            },
+            {
+                "chunk_id": "question-1-b",
+                "document_id": "doc-1",
+                "text": "1. Conflicting extracted version.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [1, 1],
+                    "passage_number": 1,
+                    "parent_id": "questions-1-1",
+                },
+            },
+            {
+                "chunk_id": "passage-1",
+                "document_id": "doc-1",
+                "text": "Passage evidence.",
+                "metadata": {"unit_type": "passage", "passage_number": 1},
+            },
+        ]
+
+        report = main.solve_context_report("Trả lời Question 1", sources)
+
+        self.assertEqual(report["found_question_numbers"], [])
+        self.assertEqual(report["missing_question_numbers"], [])
+        self.assertEqual(report["ambiguous_question_numbers"], [1])
+        self.assertIn("ambiguous_exact_questions", report["issues"])
+
+    def test_solve_question_packet_does_not_replace_missing_parent_by_range(self) -> None:
+        sources = [
+            {
+                "chunk_id": "other-group",
+                "document_id": "doc-1",
+                "text": "Question 1 Answer the question.",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [1, 1],
+                    "passage_number": 1,
+                },
+            },
+            {
+                "chunk_id": "question-1",
+                "document_id": "doc-1",
+                "text": "1. The statement.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [1, 1],
+                    "passage_number": 1,
+                    "parent_id": "expected-group",
+                },
+            },
+            {
+                "chunk_id": "passage-1",
+                "document_id": "doc-1",
+                "text": "Passage evidence.",
+                "metadata": {"unit_type": "passage", "passage_number": 1},
+            },
+        ]
+
+        packets = main.solve_question_packets("Trả lời Question 1", sources)
+
+        self.assertEqual(len(packets), 1)
+        self.assertIn("missing_question_group", packets[0]["warnings"])
+        self.assertEqual(packets[0]["question_group_chunk_ids"], [])
+        self.assertEqual(packets[0]["evidence_chunk_ids"], [])
+        self.assertFalse(packets[0]["context_ready"])
+
+    def test_solve_question_packet_rejects_ambiguous_range_groups(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-1-2",
+                "document_id": "doc-1",
+                "text": "Questions 1-2 Answer the questions.",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [1, 2],
+                    "passage_number": 1,
+                },
+            },
+            {
+                "chunk_id": "questions-1-3",
+                "document_id": "doc-1",
+                "text": "Questions 1-3 Answer the questions.",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [1, 3],
+                    "passage_number": 1,
+                },
+            },
+            {
+                "chunk_id": "question-1",
+                "document_id": "doc-1",
+                "text": "1. The statement.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [1, 1],
+                    "passage_number": 1,
+                },
+            },
+            {
+                "chunk_id": "passage-1",
+                "document_id": "doc-1",
+                "text": "Passage evidence.",
+                "metadata": {"unit_type": "passage", "passage_number": 1},
+            },
+        ]
+
+        report = main.solve_context_report("Trả lời Question 1", sources)
+        packet = report["question_targets"][0]
+
+        self.assertIn("ambiguous_question_group", packet["warnings"])
+        self.assertEqual(packet["evidence_chunk_ids"], [])
+        self.assertFalse(packet["context_ready"])
+        self.assertEqual(report["ambiguous_group_question_numbers"], [1])
+        self.assertIn("ambiguous_question_groups", report["issues"])
+
+    def test_solve_question_packet_rejects_question_group_passage_mismatch(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-1-1",
+                "document_id": "doc-1",
+                "text": "Question 1 Answer the question.",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [1, 1],
+                    "passage_number": 2,
+                },
+            },
+            {
+                "chunk_id": "question-1",
+                "document_id": "doc-1",
+                "text": "1. The statement.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [1, 1],
+                    "passage_number": 1,
+                    "parent_id": "questions-1-1",
+                },
+            },
+            {
+                "chunk_id": "passage-1",
+                "document_id": "doc-1",
+                "text": "Passage one evidence.",
+                "metadata": {"unit_type": "passage", "passage_number": 1},
+            },
+            {
+                "chunk_id": "passage-2",
+                "document_id": "doc-1",
+                "text": "Passage two evidence.",
+                "metadata": {"unit_type": "passage", "passage_number": 2},
+            },
+        ]
+
+        report = main.solve_context_report("Trả lời Question 1", sources)
+        packet = report["question_targets"][0]
+
+        self.assertIn("question_group_passage_mismatch", packet["warnings"])
+        self.assertEqual(packet["evidence_chunk_ids"], [])
+        self.assertFalse(packet["context_ready"])
+        self.assertEqual(report["passage_mismatch_question_numbers"], [1])
+        self.assertIn("question_group_passage_mismatch", report["issues"])
+
+    def test_solve_question_packet_uses_group_passage_when_question_omits_it(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-1-1",
+                "document_id": "doc-1",
+                "text": "Question 1 Answer the question.",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [1, 1],
+                    "passage_number": 2,
+                },
+            },
+            {
+                "chunk_id": "question-1",
+                "document_id": "doc-1",
+                "text": "1. The statement.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [1, 1],
+                    "parent_id": "questions-1-1",
+                },
+            },
+            {
+                "chunk_id": "passage-2",
+                "document_id": "doc-1",
+                "text": "Passage two evidence.",
+                "metadata": {"unit_type": "passage", "passage_number": 2},
+            },
+        ]
+
+        packets = main.solve_question_packets("Trả lời Question 1", sources)
+
+        self.assertEqual(len(packets), 1)
+        self.assertEqual(packets[0]["passage_number"], 2)
+        self.assertEqual(packets[0]["evidence_chunk_ids"], ["passage-2"])
+        self.assertEqual(packets[0]["warnings"], [])
+        self.assertTrue(packets[0]["context_ready"])
+
     def test_solve_output_validator_checks_supported_labels(self) -> None:
         report = {
             "requested_question_numbers": [11, 12],
