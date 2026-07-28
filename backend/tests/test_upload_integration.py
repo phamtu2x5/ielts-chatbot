@@ -1908,7 +1908,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def test_solve_question_packet_uses_group_passage_when_question_omits_it(self) -> None:
         sources = [
             {
-                "chunk_id": "questions-1-1",
+                "chunk_id": "doc-1-questions-1-1",
                 "document_id": "doc-1",
                 "text": "Question 1 Answer the question.",
                 "metadata": {
@@ -1918,7 +1918,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 },
             },
             {
-                "chunk_id": "question-1",
+                "chunk_id": "doc-1-question-1",
                 "document_id": "doc-1",
                 "text": "1. The statement.",
                 "metadata": {
@@ -1928,7 +1928,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 },
             },
             {
-                "chunk_id": "passage-2",
+                "chunk_id": "doc-1-passage-2",
                 "document_id": "doc-1",
                 "text": "Passage two evidence.",
                 "metadata": {"unit_type": "passage", "passage_number": 2},
@@ -1939,7 +1939,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(packets), 1)
         self.assertEqual(packets[0]["passage_number"], 2)
-        self.assertEqual(packets[0]["evidence_chunk_ids"], ["passage-2"])
+        self.assertEqual(packets[0]["question_group_chunk_ids"], ["doc-1-questions-1-1"])
+        self.assertEqual(packets[0]["evidence_chunk_ids"], ["doc-1-passage-2"])
         self.assertEqual(packets[0]["warnings"], [])
         self.assertTrue(packets[0]["context_ready"])
 

@@ -71,6 +71,7 @@ from .schemas import (
     StatsResponse,
     UploadResponse,
 )
+from .structured_store import canonical_chunk_id
 from .table_operations import (
     comparison_row_facts,
     comparison_row,
@@ -369,7 +370,8 @@ def solve_question_packets(
             if source.get("document_id") == document_id
             and source.get("metadata", {}).get("unit_type") == "question_group"
             and (
-                source.get("chunk_id") == parent_id
+                canonical_chunk_id(source.get("chunk_id"), document_id)
+                == canonical_chunk_id(parent_id, document_id)
                 if parent_id
                 else _range_contains(source.get("metadata", {}).get("question_range"), number)
             )

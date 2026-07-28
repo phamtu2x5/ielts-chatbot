@@ -4,6 +4,16 @@ from typing import Callable, Dict, List
 from .config import settings
 
 
+def canonical_chunk_id(chunk_id: object, document_id: object) -> str:
+    """Return the persisted chunk ID for a local or already-qualified reference."""
+    value = str(chunk_id or "").strip()
+    scope = str(document_id or "").strip()
+    if not value or not scope:
+        return value
+    prefix = f"{scope}-"
+    return value if value.startswith(prefix) else f"{prefix}{value}"
+
+
 def _append_unique(values: list[str], value: object) -> None:
     normalized = re.sub(r"\s+", " ", str(value or "")).strip()
     if normalized and normalized.casefold() not in {item.casefold() for item in values}:
@@ -273,9 +283,16 @@ class StructuredDocumentStore:
         document_ids: List[str] | None = None,
     ) -> List[Dict]:
         wanted_parent_ids = {
-            (source.get("document_id"), source.get("metadata", {}).get("parent_id"))
+            (
+                source.get("document_id"),
+                canonical_chunk_id(
+                    source.get("metadata", {}).get("parent_id"),
+                    source.get("document_id"),
+                ),
+            )
             for source in sources
             if source.get("metadata", {}).get("unit_type") == "question"
+            and source.get("metadata", {}).get("parent_id")
         }
         wanted_ranges = {
             (source.get("document_id"), tuple(source.get("metadata", {}).get("question_range") or []))
@@ -293,7 +310,7 @@ class StructuredDocumentStore:
             question_range = metadata.get("question_range")
             document_id = doc.get("document_id")
             if unit_type == "question_group":
-                chunk_id = doc.get("chunk_id")
+                chunk_id = canonical_chunk_id(doc.get("chunk_id"), document_id)
                 if (document_id, chunk_id) in wanted_parent_ids or (
                     document_id,
                     tuple(question_range or []),

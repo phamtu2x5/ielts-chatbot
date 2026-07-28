@@ -55,7 +55,7 @@ from app.llm import (
     writing_retry_prompt,
 )
 from app.schemas import ChatMessage
-from app.structured_store import StructuredDocumentStore
+from app.structured_store import StructuredDocumentStore, canonical_chunk_id
 from app.table_operations import (
     comparison_row,
     comparison_row_facts,
@@ -1407,6 +1407,36 @@ Mô tả cấu trúc tài liệu bằng tiếng Việt."""
         self.assertEqual(
             {hit["metadata"]["parent_id"] for hit in hits},
             {"writing-task-2"},
+        )
+
+    def test_question_context_resolves_local_parent_to_qualified_chunk_id(self) -> None:
+        question = {
+            "chunk_id": "doc-1-question-11",
+            "document_id": "doc-1",
+            "chunk_index": 1,
+            "metadata": {
+                "unit_type": "question",
+                "question_range": [11, 11],
+                "parent_id": "questions-11-13",
+            },
+        }
+        question_group = {
+            "chunk_id": "doc-1-questions-11-13",
+            "document_id": "doc-1",
+            "chunk_index": 0,
+            "metadata": {
+                "unit_type": "question_group",
+                "question_range": [11, 13],
+            },
+        }
+        store = StructuredDocumentStore(lambda: [question_group, question])
+
+        hits = store.question_context_for_sources([question], document_ids=["doc-1"])
+
+        self.assertEqual([hit["chunk_id"] for hit in hits], ["doc-1-questions-11-13"])
+        self.assertEqual(
+            canonical_chunk_id("questions-11-13", "doc-1"),
+            "doc-1-questions-11-13",
         )
 
     def _chunk(self, chunk_id: str, source_file: str, text: str) -> dict:
