@@ -1,0 +1,118 @@
+{
+  "schema_version": "1.0",
+  "name": "IELTS grounded solve manual review set",
+  "description": "Solve-only requests for manual review of question lookup, evidence retrieval and grounded generation. This manifest intentionally contains no expected answers and performs no automatic answer scoring.",
+  "documents": [
+    {
+      "filename": "IZONE _ IELTS READING TEST 2.pdf",
+      "kind": "ielts_reading",
+      "sha256": "06a2f8135f42060acb25871011164b6da9353cae0f13f42636e7b63c0017806f"
+    },
+    {
+      "filename": "IZONE _ IELTS READING TEST 4.pdf",
+      "kind": "ielts_reading",
+      "sha256": "ffcacec17d45320ac5e63cc0c33138bf6b9dc1f98fd15467603759ad32cde901"
+    },
+    {
+      "filename": "IZONE _ IELTS READING TEST 6.pdf",
+      "kind": "ielts_reading",
+      "sha256": "8b183cb6b6424cb105f1b507c7bdcabd31a7e69d7fd6cbf0b87295d9ba8b8bec"
+    },
+    {
+      "filename": "IZONE _ IELTS READING TEST 8.pdf",
+      "kind": "ielts_reading",
+      "sha256": "3d0e576098abdd80a09b7d857d9eee16c1d12411881898d62cb4aee504f51216"
+    },
+    {
+      "filename": "IZONE_ IELTS READING TEST 11.pdf",
+      "kind": "ielts_reading",
+      "sha256": "e51f3bb2059ca832b6108d5c100ded9f69a3beb89b03f568e12bb91daaa6ffef"
+    }
+  ],
+  "cases": [
+    {
+      "id": "solve-rt2-q1-tfng",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 2.pdf"],
+      "query": "Trong Reading Test 2, trả lời Question 1 theo dạng TRUE/FALSE/NOT GIVEN và dẫn bằng chứng ngắn từ passage."
+    },
+    {
+      "id": "solve-rt2-q14-short",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 2.pdf"],
+      "query": "Trong Reading Test 2, trả lời Question 14 đúng giới hạn từ và dẫn cụm bằng chứng trong passage."
+    },
+    {
+      "id": "solve-rt2-q24-mcq",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 2.pdf"],
+      "query": "Trong Reading Test 2, trả lời Question 24, chọn một phương án và giải thích bằng bằng chứng từ passage."
+    },
+    {
+      "id": "solve-rt4-q26-mcq",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 4.pdf"],
+      "query": "Trong Reading Test 4, trả lời Question 26 và dẫn bằng chứng cho phương án được chọn."
+    },
+    {
+      "id": "solve-rt4-q33-mcq",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 4.pdf"],
+      "query": "Trong Reading Test 4, trả lời Question 33 và giải thích ngắn dựa trên passage."
+    },
+    {
+      "id": "solve-rt6-q1-mcq",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 6.pdf"],
+      "query": "Trong Reading Test 6, trả lời Question 1 và dẫn bằng chứng cho lựa chọn của bạn."
+    },
+    {
+      "id": "solve-rt6-q25-short",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 6.pdf"],
+      "query": "Trong Reading Test 6, trả lời Question 25 đúng giới hạn từ và dẫn cụm từ trong passage."
+    },
+    {
+      "id": "solve-rt6-q36-claim",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 6.pdf"],
+      "query": "Trong Reading Test 6, trả lời Question 36 theo đúng nhãn của nhóm câu hỏi và nêu bằng chứng ngắn."
+    },
+    {
+      "id": "solve-rt8-q19-tfng",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 8.pdf"],
+      "query": "Trong Reading Test 8, trả lời Question 19 theo dạng TRUE/FALSE/NOT GIVEN và dẫn bằng chứng."
+    },
+    {
+      "id": "solve-rt8-q24-mcq",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 8.pdf"],
+      "query": "Trong Reading Test 8, trả lời Question 24 và giải thích lựa chọn bằng passage."
+    },
+    {
+      "id": "solve-rt8-q33-claim",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE _ IELTS READING TEST 8.pdf"],
+      "query": "Trong Reading Test 8, trả lời Question 33 theo đúng dạng của nhóm câu hỏi và dẫn bằng chứng ngắn."
+    },
+    {
+      "id": "solve-rt11-q15-tfng",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE_ IELTS READING TEST 11.pdf"],
+      "query": "Trong Reading Test 11, trả lời Question 15 theo dạng TRUE/FALSE/NOT GIVEN và dẫn bằng chứng."
+    },
+    {
+      "id": "solve-rt11-q20-matching",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE_ IELTS READING TEST 11.pdf"],
+      "query": "Trong Reading Test 11, trả lời Question 20 và chỉ rõ người phù hợp dựa trên passage."
+    },
+    {
+      "id": "solve-rt11-q38-mcq",
+      "category": "solve_questions",
+      "expected_target_files": ["IZONE_ IELTS READING TEST 11.pdf"],
+      "query": "Trong Reading Test 11, trả lời Question 38 và dẫn bằng chứng cho phương án được chọn."
+    }
+  ]
+}

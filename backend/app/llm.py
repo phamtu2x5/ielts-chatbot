@@ -1930,6 +1930,9 @@ def rag_prompt(
             [
                 "Generation policy:",
                 "- The user is asking to solve questions.",
+                "- Treat each SOLVE PACKET independently. Evidence inside one packet belongs only to that question unless another packet explicitly repeats it.",
+                "- Start every requested item on its own line using exactly: Question <number>: <answer>. Put Evidence and Relationship on following lines.",
+                "- For short-answer questions, put only the answer phrase after the colon on the first line and obey Maximum answer words.",
                 "- Use passage evidence from the context before giving an answer.",
                 "- For multiple-choice questions, compare every supplied option with explicit passage evidence. Do not treat indirect preference, popularity, or possibility as proof of an option.",
                 "- If the question refers to a list or answer choices that are missing from context, do not invent a replacement answer or title.",

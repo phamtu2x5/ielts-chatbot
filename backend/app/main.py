@@ -147,6 +147,71 @@ def format_context(sources: list[dict], max_chars_per_source: int | None = None)
     return "\n\n".join(parts)
 
 
+def format_solve_context(
+    sources: list[dict[str, Any]],
+    report: dict[str, Any],
+) -> str:
+    """Keep each question contract next to only its selected evidence."""
+    sources_by_chunk_id = {
+        source.get("chunk_id"): source
+        for source in sources
+        if source.get("chunk_id")
+    }
+    evidence_by_question = {
+        item.get("question_number"): item
+        for item in report.get("evidence_by_question") or []
+    }
+    packets: list[str] = []
+    for target in report.get("question_targets") or []:
+        number = target.get("question_number")
+        lines = [f"=== SOLVE PACKET: QUESTION {number} ==="]
+        instructions = str(target.get("instructions") or "").strip()
+        if instructions:
+            lines.append(f"Instructions: {instructions}")
+        lines.append(
+            "Question: "
+            + str(target.get("question_stem") or target.get("question_text") or "").strip()
+        )
+        options = target.get("answer_options") or []
+        if options:
+            lines.append("Answer options:")
+            lines.extend(
+                f"- {option.get('label')}. {str(option.get('text') or '').strip()}"
+                for option in options
+                if isinstance(option, dict)
+            )
+        word_limit = target.get("word_limit")
+        if word_limit:
+            lines.append(f"Maximum answer words: {word_limit}")
+
+        evidence_debug = evidence_by_question.get(number)
+        evidence_ids = (
+            evidence_debug.get("selected_chunk_ids", [])
+            if evidence_debug is not None
+            else target.get("evidence_chunk_ids", [])
+        )
+        lines.append("Passage evidence selected for this question:")
+        evidence_added = False
+        for index, chunk_id in enumerate(evidence_ids, 1):
+            source = sources_by_chunk_id.get(chunk_id)
+            if not source:
+                continue
+            evidence_added = True
+            pages = source.get("pages") or []
+            page_label = ", ".join(str(page) for page in pages) if pages else "unknown"
+            lines.extend(
+                [
+                    f"[Evidence {number}.{index}] File: {source.get('source_file', 'unknown')}; "
+                    f"Pages: {page_label}",
+                    _source_text(source),
+                ]
+            )
+        if not evidence_added:
+            lines.append("(No passage evidence was selected.)")
+        packets.append("\n".join(lines))
+    return "\n\n".join(packets) or format_context(sources)
+
+
 @dataclass(frozen=True)
 class DocumentCatalogContext:
     text: str
@@ -740,23 +805,38 @@ def _solve_answer_segment(
     return text[match.start() : min(ends) if ends else len(text)]
 
 
+def _solve_answer_head(segment: str, question_number: int) -> str:
+    answer = re.sub(
+        rf"(?is)^\s*(?:[-*]\s*)?(?:\*{{0,2}})?(?:question|câu(?:\s+hỏi)?)?\s*"
+        rf"{question_number}\s*[.):]\s*(?:\*{{0,2}})?",
+        "",
+        segment,
+        count=1,
+    ).strip()
+    first_line = next((line.strip() for line in answer.splitlines() if line.strip()), "")
+    first_line = re.sub(r"(?i)^\s*(?:answer|đáp\s+án)\s*[:\-–—]?\s*", "", first_line)
+    first_line = re.split(
+        r"(?i)\s+(?:[-–—:]\s*)?(?:evidence|bằng\s+chứng|relationship|giải\s+thích)\s*:",
+        first_line,
+        maxsplit=1,
+    )[0]
+    return first_line.strip().strip("*_`")
+
+
 def solve_output_issues(text: str, report: dict[str, Any]) -> list[str]:
-    """Validate only answer labels that are deterministic from the question type."""
+    """Validate solve response shape without judging semantic correctness."""
     issues: list[str] = []
     requested = list(report.get("requested_question_numbers") or [])
     for packet in report.get("question_targets") or []:
         number = int(packet["question_number"])
         segment = _solve_answer_segment(text, number, requested)
         if not segment:
+            issues.append(f"Question {number} is missing from the response.")
             continue
         question_type = packet.get("question_type")
+        answer_head = _solve_answer_head(segment, number)
         if question_type == "multiple_choice":
             allowed = set(packet.get("answer_option_labels") or [])
-            answer_head = re.sub(
-                rf"(?is)^\s*(?:question|câu(?:\s+hỏi)?)?\s*{number}\s*[.):]\s*",
-                "",
-                segment[:180],
-            )
             selected = re.search(
                 r"(?i)^\s*(?:answer|đáp\s+án)?\s*[:\-–—]?\s*([A-H])\b",
                 answer_head,
@@ -766,6 +846,14 @@ def solve_output_issues(text: str, report: dict[str, Any]) -> list[str]:
         elif question_type == "true_false_not_given":
             if not re.search(r"\b(?:TRUE|FALSE|NOT\s+GIVEN)\b", segment, re.IGNORECASE):
                 issues.append(f"Question {number} is missing a TRUE/FALSE/NOT GIVEN label.")
+        elif question_type == "short_answer" and packet.get("word_limit"):
+            word_count = len(re.findall(r"\b[\w'-]+\b", answer_head, flags=re.UNICODE))
+            if not answer_head:
+                issues.append(f"Question {number} is missing a short answer.")
+            elif word_count > int(packet["word_limit"]):
+                issues.append(
+                    f"Question {number} exceeds its {packet['word_limit']}-word answer limit."
+                )
     return issues
 
 
@@ -910,7 +998,13 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             generation_debug["safe_fallback_used"] = True
             final_issues = response_output_issues(answer, contract)
         generation_debug["final_issues"] = final_issues
-        if final_issues and prepared.query_intent == "translate_questions":
+        if final_solve_issues:
+            answer = (
+                "Mình chưa thể tạo câu trả lời đáp ứng đầy đủ cấu trúc hoặc giới hạn của nhóm câu hỏi "
+                "từ bằng chứng hiện có."
+            )
+            generation_debug["validation_failed_closed"] = True
+        elif final_issues and prepared.query_intent == "translate_questions":
             answer = TRANSLATION_VALIDATION_FAILURE_RESPONSE
             generation_debug["validation_failed_closed"] = True
         elif (
@@ -2198,8 +2292,6 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                         "fallback_used": False,
                     }
                 )
-                if len(evidence_context) >= settings.rag_solve_max_evidence:
-                    break
             evidence_query = " | ".join(dict.fromkeys(evidence_queries)) or None
             evidence_context = dedupe_sources(evidence_context)
             evidence_context_count = len(evidence_context)
@@ -2209,6 +2301,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 evidence_context,
             )
             solve_report = solve_context_report(message, sources)
+            solve_report["evidence_by_question"] = evidence_by_question
         elif query_intent == "semantic_qa" and use_affinity_context and sources:
             passage_context = await run_in_threadpool(
                 store.passage_context_for_sources,
@@ -2318,11 +2411,14 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 debug=debug,
                 query_intent=query_intent,
             )
-        context = (
-            format_context(sources, max_chars_per_source=settings.rag_overview_source_chars)
-            if probe.get("is_overview")
-            else format_context(sources)
-        )
+        if query_intent == "solve_questions":
+            context = format_solve_context(sources, solve_report)
+        else:
+            context = (
+                format_context(sources, max_chars_per_source=settings.rag_overview_source_chars)
+                if probe.get("is_overview")
+                else format_context(sources)
+            )
         if query_intent == "writing_generation":
             facts = writing_table_facts(sources)
             if facts:

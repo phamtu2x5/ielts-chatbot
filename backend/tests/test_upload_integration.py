@@ -2031,6 +2031,110 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(main.solve_output_issues(invalid, report)), 2)
         self.assertEqual(main.solve_output_issues(valid, report), [])
 
+    def test_solve_output_validator_checks_coverage_and_short_answer_limit(self) -> None:
+        report = {
+            "requested_question_numbers": [25, 26],
+            "question_targets": [
+                {
+                    "question_number": 25,
+                    "question_type": "short_answer",
+                    "word_limit": 3,
+                },
+                {
+                    "question_number": 26,
+                    "question_type": "short_answer",
+                    "word_limit": 2,
+                },
+            ],
+        }
+
+        invalid = "Question 25: an answer with too many words\nEvidence: passage text"
+        valid = (
+            "Question 25: tourist numbers\nEvidence: passage text\n\n"
+            "Question 26: local farmers\nEvidence: passage text"
+        )
+
+        self.assertEqual(
+            main.solve_output_issues(invalid, report),
+            [
+                "Question 25 exceeds its 3-word answer limit.",
+                "Question 26 is missing from the response.",
+            ],
+        )
+        self.assertEqual(main.solve_output_issues(valid, report), [])
+
+    def test_format_solve_context_keeps_evidence_with_its_question(self) -> None:
+        sources = [
+            {
+                "chunk_id": "doc-passage-a",
+                "source_file": "reading.pdf",
+                "pages": [1],
+                "text": "Evidence selected only for question 1.",
+            },
+            {
+                "chunk_id": "doc-passage-b",
+                "source_file": "reading.pdf",
+                "pages": [2],
+                "text": "Evidence selected only for question 2.",
+            },
+        ]
+        report = {
+            "question_targets": [
+                {
+                    "question_number": 1,
+                    "question_stem": "First statement",
+                    "answer_options": [],
+                },
+                {
+                    "question_number": 2,
+                    "question_stem": "Second statement",
+                    "answer_options": [],
+                },
+            ],
+            "evidence_by_question": [
+                {"question_number": 1, "selected_chunk_ids": ["doc-passage-a"]},
+                {"question_number": 2, "selected_chunk_ids": ["doc-passage-b"]},
+            ],
+        }
+
+        context = main.format_solve_context(sources, report)
+        first_packet, second_packet = context.split(
+            "=== SOLVE PACKET: QUESTION 2 ===",
+            maxsplit=1,
+        )
+
+        self.assertIn("Evidence selected only for question 1.", first_packet)
+        self.assertNotIn("Evidence selected only for question 2.", first_packet)
+        self.assertIn("Evidence selected only for question 2.", second_packet)
+        self.assertNotIn("Evidence selected only for question 1.", second_packet)
+
+    def test_format_solve_context_respects_explicit_empty_evidence_selection(self) -> None:
+        sources = [
+            {
+                "chunk_id": "doc-passage-a",
+                "source_file": "reading.pdf",
+                "pages": [1],
+                "text": "Broad passage text must not be restored.",
+            }
+        ]
+        report = {
+            "question_targets": [
+                {
+                    "question_number": 1,
+                    "question_stem": "First statement",
+                    "evidence_chunk_ids": ["doc-passage-a"],
+                }
+            ],
+            "evidence_by_question": [
+                {"question_number": 1, "selected_chunk_ids": []}
+            ],
+        }
+
+        context = main.format_solve_context(sources, report)
+
+        self.assertIn("(No passage evidence was selected.)", context)
+        self.assertNotIn("Broad passage text must not be restored.", context)
+
     async def test_solve_generation_retries_invalid_answer_labels_once(self) -> None:
         report = {
             "requested_question_numbers": [11],
@@ -2061,6 +2165,37 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer, "11. B because the passage says so.")
         self.assertEqual(model.await_count, 2)
         self.assertTrue(prepared.debug["generation"]["retry_used"])
+
+    async def test_solve_generation_fails_closed_after_invalid_retry(self) -> None:
+        report = {
+            "requested_question_numbers": [11],
+            "question_targets": [
+                {
+                    "question_number": 11,
+                    "question_type": "multiple_choice",
+                    "answer_option_labels": ["A", "B", "C", "D"],
+                }
+            ],
+        }
+        prepared = main.ChatPreparation(
+            prompt="grounded solve prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={
+                "intent_decision": {"allow_solution": True},
+                "retrieval": {"solve_context_report": report},
+            },
+            query_intent="solve_questions",
+        )
+        model = AsyncMock(side_effect=["The answer is unclear.", "Question 11: Z"])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "Trả lời Question 11.")
+
+        self.assertIn("chưa thể tạo câu trả lời", answer)
+        self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
 
     async def test_solve_generation_uses_one_grounded_model_call(self) -> None:
         prepared = main.ChatPreparation(
