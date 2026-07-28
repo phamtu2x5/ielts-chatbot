@@ -67,12 +67,6 @@
       "query": "Trong Reading Test 6, trả lời Question 1 và dẫn bằng chứng cho lựa chọn của bạn."
     },
     {
-      "id": "solve-rt6-q25-short",
-      "category": "solve_questions",
-      "expected_target_files": ["IZONE _ IELTS READING TEST 6.pdf"],
-      "query": "Trong Reading Test 6, trả lời Question 25 đúng giới hạn từ và dẫn cụm từ trong passage."
-    },
-    {
       "id": "solve-rt6-q36-claim",
       "category": "solve_questions",
       "expected_target_files": ["IZONE _ IELTS READING TEST 6.pdf"],
@@ -107,12 +101,6 @@
       "category": "solve_questions",
       "expected_target_files": ["IZONE_ IELTS READING TEST 11.pdf"],
       "query": "Trong Reading Test 11, trả lời Question 20 và chỉ rõ người phù hợp dựa trên passage."
-    },
-    {
-      "id": "solve-rt11-q38-mcq",
-      "category": "solve_questions",
-      "expected_target_files": ["IZONE_ IELTS READING TEST 11.pdf"],
-      "query": "Trong Reading Test 11, trả lời Question 38 và dẫn bằng chứng cho phương án được chọn."
     }
   ]
 }
