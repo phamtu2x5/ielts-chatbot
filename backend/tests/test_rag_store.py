@@ -1203,6 +1203,53 @@ Dịch Questions 25-27 sang tiếng Việt, chưa trả lời."""
 
         self.assertEqual(response_output_issues("Chào bạn.", contract), [])
 
+    def test_solve_language_validation_allows_source_language_fields(self) -> None:
+        contract = response_output_contract(
+            "Trả lời Question 14 và dẫn bằng chứng.",
+            "solve_questions",
+            allow_solution=True,
+        )
+        response = (
+            "Question 14: Which factor is required?\n"
+            "Answer: motivation\n"
+            'Evidence: "staff motivation"\n'
+            "Relationship: supports"
+        )
+
+        self.assertTrue(contract.allow_source_language_fields)
+        self.assertEqual(response_output_issues(response, contract), [])
+        self.assertEqual(
+            response_language_debug(
+                response,
+                contract.language,
+                allow_source_language_fields=contract.allow_source_language_fields,
+            )["analyzed_tokens"],
+            0,
+        )
+
+    def test_solve_language_validation_checks_explanatory_prose(self) -> None:
+        contract = response_output_contract(
+            "Trả lời Question 14 và dẫn bằng chứng.",
+            "solve_questions",
+            allow_solution=True,
+        )
+        vietnamese = (
+            "Question 14: motivation\n"
+            'Evidence: "staff motivation"\n'
+            "Giải thích: Cụm từ này xuất hiện trực tiếp trong bài đọc."
+        )
+        english = (
+            "Question 14: motivation\n"
+            'Evidence: "staff motivation"\n'
+            "Explanation: The passage directly supports this answer."
+        )
+
+        self.assertEqual(response_output_issues(vietnamese, contract), [])
+        self.assertIn(
+            "The response is not written in Vietnamese.",
+            response_output_issues(english, contract),
+        )
+
     def test_response_selection_uses_language_evidence_to_break_ties(self) -> None:
         contract = response_output_contract(
             "Mô tả ba passage bằng tiếng Việt.",

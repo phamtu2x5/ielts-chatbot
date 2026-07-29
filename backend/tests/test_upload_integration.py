@@ -2500,6 +2500,51 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_count, 1)
         self.assertTrue(main.requires_reviewed_generation(prepared, "Trả lời Question 11."))
 
+    async def test_solve_generation_keeps_source_language_answer_and_evidence(self) -> None:
+        report = {
+            "requested_question_numbers": [14],
+            "question_targets": [
+                {
+                    "question_number": 14,
+                    "question_type": "short_answer",
+                    "answer_contract": {
+                        "kind": "short_answer",
+                        "allowed_labels": [],
+                        "word_limit": 2,
+                    },
+                }
+            ],
+        }
+        prepared = main.ChatPreparation(
+            prompt="grounded solve prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={
+                "intent_decision": {"allow_solution": True},
+                "retrieval": {"solve_context_report": report},
+            },
+            query_intent="solve_questions",
+        )
+        model = AsyncMock(
+            return_value=(
+                "Question 14: motivation\n"
+                'Evidence: "staff motivation"\n'
+                "Relationship: supports"
+            )
+        )
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Trả lời Question 14 và dẫn bằng chứng.",
+            )
+
+        self.assertIn("Question 14: motivation", answer)
+        self.assertEqual(model.await_count, 1)
+        self.assertFalse(prepared.debug["generation"]["retry_used"])
+        self.assertEqual(prepared.debug["generation"]["final_issues"], [])
+
     async def test_chat_stream_reviews_and_traces_solve_output(self) -> None:
         report = {
             "requested_question_numbers": [1],

@@ -158,6 +158,16 @@ PROTECTED_ENGLISH_RE = re.compile(
     r"\b[^\s]+\.(?:pdf|png|jpe?g|docx?)\b",
     re.IGNORECASE,
 )
+SOLVE_SOURCE_FIELD_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?(?:\*{0,2})?(?:"
+    r"(?:(?:question|câu(?:\s+hỏi)?)\s*)?\d{1,3}\s*[.):]|"
+    r"(?:answer|đáp\s+án|evidence|bằng\s+chứng|source(?:\s+quote)?|trích\s+dẫn|"
+    r"relationship|mối\s+quan\s+hệ)(?:\*{0,2})?\s*:|"
+    r">"
+    r")",
+    re.IGNORECASE,
+)
+QUOTED_SOURCE_TEXT_RE = re.compile(r'["“][^"”\n]*["”]')
 WORD_RANGE_RE = re.compile(
     r"\b(\d{2,4})\s*(?:-|–|—|to|đến|tới)\s*(\d{2,4})\s*(?:words?|từ)\b",
     re.IGNORECASE,
@@ -232,6 +242,7 @@ class WritingOutputContract:
 class ResponseOutputContract:
     language: str | None
     forbid_solution: bool
+    allow_source_language_fields: bool = False
     required_question_numbers: tuple[int, ...] = ()
     plan_duration_value: int | None = None
     plan_duration_unit: str | None = None
@@ -241,6 +252,11 @@ class ResponseOutputContract:
         lines: list[str] = []
         if self.language:
             lines.append(f"- Output language: {self.language}.")
+        if self.allow_source_language_fields:
+            lines.append(
+                "- Canonical answer labels, exact short-answer phrases, and quoted evidence may "
+                "remain in the source language. Write all explanatory prose in the output language."
+            )
         if self.required_question_numbers:
             numbers = ", ".join(str(number) for number in self.required_question_numbers)
             lines.append(f"- Preserve and answer every requested question number: {numbers}.")
@@ -445,6 +461,7 @@ def response_output_contract(
         language=language,
         forbid_solution=not allow_solution
         and query_intent in {"show_questions", "translate_questions", "explain_questions"},
+        allow_source_language_fields=query_intent == "solve_questions",
         required_question_numbers=required_numbers,
         plan_duration_value=plan_duration_value,
         plan_duration_unit=plan_duration_unit,
@@ -452,13 +469,31 @@ def response_output_contract(
     )
 
 
-def _language_analysis_text(text: str) -> str:
+def _language_analysis_text(
+    text: str,
+    *,
+    allow_source_language_fields: bool = False,
+) -> str:
     text = re.sub(r"\[Source\s+\d+\s*:[^\]]+\]", " ", text, flags=re.IGNORECASE)
+    if allow_source_language_fields:
+        text = "\n".join(
+            line
+            for line in text.splitlines()
+            if not SOLVE_SOURCE_FIELD_RE.match(line)
+        )
+        text = QUOTED_SOURCE_TEXT_RE.sub(" ", text)
     return PROTECTED_ENGLISH_RE.sub(" ", text)
 
 
-def _language_evidence(text: str) -> tuple[int, int, int]:
-    text = _language_analysis_text(text)
+def _language_evidence(
+    text: str,
+    *,
+    allow_source_language_fields: bool = False,
+) -> tuple[int, int, int]:
+    text = _language_analysis_text(
+        text,
+        allow_source_language_fields=allow_source_language_fields,
+    )
     tokens = [
         token.lower()
         for token in re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
@@ -473,12 +508,25 @@ def _language_evidence(text: str) -> tuple[int, int, int]:
     )
 
 
-def _language_mismatch_score(text: str, language: str | None) -> int:
+def _language_mismatch_score(
+    text: str,
+    language: str | None,
+    *,
+    allow_source_language_fields: bool = False,
+) -> int:
     if not language:
         return 0
-    vietnamese_score, english_score, token_count = _language_evidence(text)
+    vietnamese_score, english_score, token_count = _language_evidence(
+        text,
+        allow_source_language_fields=allow_source_language_fields,
+    )
+    if allow_source_language_fields and token_count == 0:
+        return 0
     if language == "Vietnamese":
-        analysis_text = _language_analysis_text(text)
+        analysis_text = _language_analysis_text(
+            text,
+            allow_source_language_fields=allow_source_language_fields,
+        )
         accented_characters = len(VIETNAMESE_CHARACTER_RE.findall(analysis_text))
         vietnamese_words = sum(
             token.lower() in VIETNAMESE_COMMON_WORDS
@@ -509,14 +557,27 @@ def _language_mismatch_score(text: str, language: str | None) -> int:
     return 0
 
 
-def response_language_debug(text: str, language: str | None) -> dict[str, object]:
-    vietnamese_score, english_score, token_count = _language_evidence(text)
+def response_language_debug(
+    text: str,
+    language: str | None,
+    *,
+    allow_source_language_fields: bool = False,
+) -> dict[str, object]:
+    vietnamese_score, english_score, token_count = _language_evidence(
+        text,
+        allow_source_language_fields=allow_source_language_fields,
+    )
     return {
         "expected": language,
+        "allow_source_language_fields": allow_source_language_fields,
         "vietnamese_score": vietnamese_score,
         "english_score": english_score,
         "analyzed_tokens": token_count,
-        "mismatch_score": _language_mismatch_score(text, language),
+        "mismatch_score": _language_mismatch_score(
+            text,
+            language,
+            allow_source_language_fields=allow_source_language_fields,
+        ),
         "output_preview": text[:300],
     }
 
@@ -525,9 +586,17 @@ def response_output_issues(text: str, contract: ResponseOutputContract) -> list[
     issues: list[str] = []
     if re.match(r"(?i)^\s*(?:user|assistant|system)\s*:", text):
         issues.append("The response starts with a conversation role prefix.")
-    if contract.language == "English" and _language_mismatch_score(text, "English") > 0:
+    if contract.language == "English" and _language_mismatch_score(
+        text,
+        "English",
+        allow_source_language_fields=contract.allow_source_language_fields,
+    ) > 0:
         issues.append("The response is not written in English.")
-    if contract.language == "Vietnamese" and _language_mismatch_score(text, "Vietnamese") > 0:
+    if contract.language == "Vietnamese" and _language_mismatch_score(
+        text,
+        "Vietnamese",
+        allow_source_language_fields=contract.allow_source_language_fields,
+    ) > 0:
         issues.append("The response is not written in Vietnamese.")
     if contract.forbid_solution and likely_contains_solution(text):
         issues.append("The response reveals or narrows an answer despite the no-solution constraint.")
@@ -819,7 +888,11 @@ def response_output_penalty(text: str, contract: ResponseOutputContract) -> tupl
     issues = response_output_issues(text, contract)
     return (
         int(any("reveals or narrows" in issue for issue in issues)),
-        _language_mismatch_score(text, contract.language),
+        _language_mismatch_score(
+            text,
+            contract.language,
+            allow_source_language_fields=contract.allow_source_language_fields,
+        ),
         int(any("malformed Markdown table" in issue for issue in issues)),
         len(issues),
     )

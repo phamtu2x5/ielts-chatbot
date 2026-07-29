@@ -1203,9 +1203,14 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         generation_debug["response_contract"] = {
             "language": contract.language,
             "forbid_solution": contract.forbid_solution,
+            "allow_source_language_fields": contract.allow_source_language_fields,
             "required_question_numbers": list(contract.required_question_numbers),
             "first_draft_issues": issues,
-            "first_draft_language": response_language_debug(answer, contract.language),
+            "first_draft_language": response_language_debug(
+                answer,
+                contract.language,
+                allow_source_language_fields=contract.allow_source_language_fields,
+            ),
         }
         if solve_report:
             generation_debug["solve_contract"] = {
@@ -1266,8 +1271,16 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             }
             generation_debug["selected_candidate"] = "first" if selected == answer else "retry"
             generation_debug["candidate_language"] = {
-                "first": response_language_debug(answer, contract.language),
-                "retry": response_language_debug(retry, contract.language),
+                "first": response_language_debug(
+                    answer,
+                    contract.language,
+                    allow_source_language_fields=contract.allow_source_language_fields,
+                ),
+                "retry": response_language_debug(
+                    retry,
+                    contract.language,
+                    allow_source_language_fields=contract.allow_source_language_fields,
+                ),
             }
             answer = selected
         else:
