@@ -427,10 +427,10 @@ def response_output_contract(
         language = writing_output_contract(message).language
     elif EXPLICIT_ENGLISH_RE.search(message):
         language = "English"
-    elif EXPLICIT_VIETNAMESE_RE.search(message) or VIETNAMESE_CHARACTER_RE.search(message):
+    elif EXPLICIT_VIETNAMESE_RE.search(message):
         language = "Vietnamese"
     else:
-        language = "English"
+        language = None
 
     required_numbers: tuple[int, ...] = ()
     if query_intent == "translate_questions":
@@ -906,7 +906,12 @@ def select_best_response_output(
 ) -> str:
     def rank(text: str) -> tuple[tuple[int, int, int, int], int, int]:
         language = _language_evidence(text)
-        target_language_score = language[0] if contract.language == "Vietnamese" else language[1]
+        if contract.language == "Vietnamese":
+            target_language_score = language[0]
+        elif contract.language == "English":
+            target_language_score = language[1]
+        else:
+            target_language_score = 0
         present = {
             int(value)
             for value in re.findall(
