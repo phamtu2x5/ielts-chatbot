@@ -1691,6 +1691,27 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not an automatic RAG decision", compact_prompt)
         self.assertIn("previous_answer_source=conversation", compact_prompt)
 
+    def test_route_classifier_treats_user_supplied_source_as_conversation_content(self) -> None:
+        prompt = llm.route_classifier_prompt(
+            "Write a paragraph from the prompt I sent above.",
+            [
+                ChatMessage(role="user", content="Translate this prompt: People should work fewer hours."),
+                ChatMessage(role="assistant", content="Mọi người nên làm việc ít giờ hơn."),
+            ],
+            document_context="- file=writing.pdf; type=ielts_writing",
+        )
+        compact_prompt = llm.route_classifier_prompt(
+            "Translate the text above.",
+            document_context="- file=writing.pdf; type=ielts_writing",
+            compact=True,
+        )
+
+        self.assertIn("current or previous USER messages is DIRECT", prompt)
+        self.assertIn("current message overrides earlier operations", prompt)
+        self.assertIn("ask the user to provide the missing source", prompt)
+        self.assertIn("current or previous user messages is DIRECT", compact_prompt)
+        self.assertIn("assistant can ask for the missing source", compact_prompt)
+
     def test_route_classifier_keeps_follow_up_on_conversation_content_direct(self) -> None:
         history = [
             ChatMessage(role="user", content="Dịch đề Writing Task 2 này: Some people work harder."),
@@ -1751,6 +1772,15 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("previous_answer_source=uploaded_material", prompt)
         self.assertIn("depends on that answer remains RAG", prompt)
+
+    def test_direct_answer_contract_prioritizes_current_request_and_user_source(self) -> None:
+        instructions = "\n".join(llm.direct_answer_instructions())
+
+        self.assertIn("current user message as the authoritative task", instructions)
+        self.assertIn("Match the requested task shape exactly", instructions)
+        self.assertIn("source text from prior USER messages", instructions)
+        self.assertIn("ask for it in one sentence", instructions)
+        self.assertIn("Never substitute or replay a prior assistant answer", instructions)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')
