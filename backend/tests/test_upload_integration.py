@@ -2395,6 +2395,55 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "option_text_mapping",
         )
 
+    async def test_solve_generation_maps_absent_relationship_in_returned_output(self) -> None:
+        report = {
+            "requested_question_numbers": [1],
+            "question_targets": [
+                {
+                    "question_number": 1,
+                    "question_type": "true_false_not_given",
+                    "answer_contract": {
+                        "kind": "true_false_not_given",
+                        "allowed_labels": ["TRUE", "FALSE", "NOT GIVEN"],
+                        "requires_single_label": True,
+                        "relationship_map": {
+                            "supports": "TRUE",
+                            "contradicts": "FALSE",
+                            "absent": "NOT GIVEN",
+                        },
+                    },
+                }
+            ],
+        }
+        prepared = main.ChatPreparation(
+            prompt="grounded solve prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={
+                "intent_decision": {"allow_solution": True},
+                "retrieval": {"solve_context_report": report},
+            },
+            query_intent="solve_questions",
+        )
+        raw = (
+            "Question 1: FALSE\n"
+            "Evidence: The passage does not state the claimed reason.\n"
+            "Relationship: absent"
+        )
+
+        with patch.object(main, "query_ollama", AsyncMock(return_value=raw)):
+            answer = await main.generate_answer(prepared, "Trả lời Question 1.")
+
+        solve_debug = prepared.debug["generation"]["solve_contract"]
+        self.assertIn("Question 1: NOT GIVEN", answer)
+        self.assertEqual(solve_debug["first_candidate_raw"]["text"], raw)
+        self.assertIn("Question 1: NOT GIVEN", solve_debug["first_candidate_normalized"]["text"])
+        self.assertEqual(solve_debug["selected_candidate_output"]["text"], answer)
+        self.assertEqual(solve_debug["final_adjustments"], [])
+        self.assertEqual(solve_debug["returned_output"]["text"], answer)
+        self.assertEqual(solve_debug["final_issues"], [])
+
     async def test_solve_generation_fails_closed_after_invalid_retry(self) -> None:
         report = {
             "requested_question_numbers": [11],

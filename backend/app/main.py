@@ -986,7 +986,7 @@ def _replace_solve_answer(
     )
     replaced, count = marker.subn(lambda match: f"{match.group(1)}{answer}", text, count=1)
     if count:
-        return replaced, True
+        return replaced, replaced != text
     if len(requested_numbers) == 1:
         return f"Question {question_number}: {answer}\n{text.strip()}", True
     return text, False
@@ -1131,6 +1131,15 @@ def select_best_solve_output(
     )
 
 
+def generation_candidate_debug(text: str, max_chars: int = 4_000) -> dict[str, Any]:
+    """Keep generation diagnostics useful without copying unbounded model output."""
+    return {
+        "text": text[:max_chars],
+        "char_count": len(text),
+        "truncated": len(text) > max_chars,
+    }
+
+
 async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
     prompt = prepared.prompt or ""
     answer = await query_ollama(prompt, temperature=generation_temperature(prepared))
@@ -1184,6 +1193,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             if prepared.query_intent == "solve_questions"
             else {}
         )
+        first_raw_answer = answer
         first_adjustments: list[dict[str, Any]] = []
         if solve_report:
             answer, first_adjustments = normalize_solve_output(answer, solve_report)
@@ -1200,6 +1210,8 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         if solve_report:
             generation_debug["solve_contract"] = {
                 "question_packets": solve_report.get("question_targets", []),
+                "first_candidate_raw": generation_candidate_debug(first_raw_answer),
+                "first_candidate_normalized": generation_candidate_debug(answer),
                 "first_draft_adjustments": first_adjustments,
                 "first_draft_issues": first_solve_issues,
             }
@@ -1231,10 +1243,17 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
                 retry_prompt,
                 temperature=0.1,
             )
+            retry_raw = retry
             retry_adjustments: list[dict[str, Any]] = []
             if solve_report:
                 retry, retry_adjustments = normalize_solve_output(retry, solve_report)
-                generation_debug["solve_contract"]["retry_adjustments"] = retry_adjustments
+                generation_debug["solve_contract"].update(
+                    {
+                        "retry_candidate_raw": generation_candidate_debug(retry_raw),
+                        "retry_candidate_normalized": generation_candidate_debug(retry),
+                        "retry_adjustments": retry_adjustments,
+                    }
+                )
             selected = (
                 select_best_solve_output(answer, retry, contract, solve_report)
                 if solve_report
@@ -1253,6 +1272,14 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             answer = selected
         else:
             generation_debug["retry_used"] = False
+            if solve_report:
+                generation_debug["selected_candidate"] = "first"
+        if solve_report:
+            solve_debug = generation_debug["solve_contract"]
+            solve_debug["selected_candidate_output"] = generation_candidate_debug(answer)
+            answer, final_adjustments = normalize_solve_output(answer, solve_report)
+            solve_debug["final_adjustments"] = final_adjustments
+            solve_debug["final_normalized_output"] = generation_candidate_debug(answer)
         final_solve_issues = solve_output_issues(answer, solve_report) if solve_report else []
         final_issues = response_output_issues(answer, contract) + final_solve_issues
         if solve_report:
@@ -1295,6 +1322,10 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         ):
             answer = FORMAT_VALIDATION_FAILURE_RESPONSE
             generation_debug["validation_failed_closed"] = True
+        if solve_report:
+            generation_debug["solve_contract"]["returned_output"] = generation_candidate_debug(
+                answer
+            )
     return answer
 
 
