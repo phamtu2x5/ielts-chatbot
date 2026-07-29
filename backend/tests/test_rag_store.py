@@ -1250,6 +1250,48 @@ Dịch Questions 25-27 sang tiếng Việt, chưa trả lời."""
             response_output_issues(english, contract),
         )
 
+    def test_solve_language_validation_ignores_structured_source_metadata(self) -> None:
+        contract = response_output_contract(
+            "Trả lời Question 14 và dẫn bằng chứng.",
+            "solve_questions",
+            allow_solution=True,
+        )
+        response = (
+            "Question 14: motivation\n"
+            "Evidences: [Evidence 14.1] File: reading.pdf; Pages: 2, 3\n"
+            'Passage 2: A passage title – "The source-language evidence."\n'
+            "Relationship: supports"
+        )
+
+        self.assertEqual(response_output_issues(response, contract), [])
+        self.assertEqual(
+            response_language_debug(
+                response,
+                contract.language,
+                allow_source_language_fields=contract.allow_source_language_fields,
+            )["analyzed_tokens"],
+            0,
+        )
+
+    def test_solve_language_validation_keeps_unlabelled_explanation(self) -> None:
+        contract = response_output_contract(
+            "Trả lời Question 15 và dẫn bằng chứng.",
+            "solve_questions",
+            allow_solution=True,
+        )
+        response = (
+            "Question 15: NOT GIVEN\n"
+            "Evidences: File: reading.pdf; Pages: 2, 3\n"
+            "Passage 2: A passage title\n"
+            "→ The passage does not compare the two groups directly.\n"
+            "Relationship: absent"
+        )
+
+        self.assertIn(
+            "The response is not written in Vietnamese.",
+            response_output_issues(response, contract),
+        )
+
     def test_response_selection_uses_language_evidence_to_break_ties(self) -> None:
         contract = response_output_contract(
             "Mô tả ba passage bằng tiếng Việt.",

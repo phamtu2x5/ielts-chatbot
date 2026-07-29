@@ -161,8 +161,9 @@ PROTECTED_ENGLISH_RE = re.compile(
 SOLVE_SOURCE_FIELD_RE = re.compile(
     r"^\s*(?:[-*]\s*)?(?:\*{0,2})?(?:"
     r"(?:(?:question|câu(?:\s+hỏi)?)\s*)?\d{1,3}\s*[.):]|"
-    r"(?:answer|đáp\s+án|evidence|bằng\s+chứng|source(?:\s+quote)?|trích\s+dẫn|"
-    r"relationship|mối\s+quan\s+hệ)(?:\*{0,2})?\s*:|"
+    r"(?:answer|đáp\s+án|evidences?|bằng\s+chứng|source(?:\s+quote)?|trích\s+dẫn|"
+    r"relationship|mối\s+quan\s+hệ|file|pages?|passage(?:\s+\d{1,3})?)"
+    r"(?:\*{0,2})?\s*:|"
     r">"
     r")",
     re.IGNORECASE,
