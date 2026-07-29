@@ -1369,9 +1369,31 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         document_context = gateway.await_args.args[3]
         self.assertIn('"last_route": "rag"', state_context)
         self.assertIn('"has_rag_affinity": true', state_context)
+        self.assertIn('"previous_answer_source": "uploaded_material"', state_context)
         self.assertNotIn("doc-1", state_context)
         self.assertNotIn("14", state_context)
         self.assertNotIn("attached_this_turn", document_context)
+
+    def test_gateway_state_marks_direct_answer_as_conversation_content(self) -> None:
+        request = main.ChatRequest(
+            message="Chi tiết hơn.",
+            conversation_state={
+                "last_route": "direct",
+                "last_intent": "direct",
+                "rag_affinity": {
+                    "document_ids": ["doc-1"],
+                    "passage_numbers": [2],
+                    "question_ranges": [[14, 17]],
+                },
+            },
+        )
+
+        state_context = main.gateway_state_context(request)
+
+        self.assertIn('"last_route": "direct"', state_context)
+        self.assertIn('"previous_answer_source": "conversation"', state_context)
+        self.assertNotIn("doc-1", state_context)
+        self.assertNotIn("14", state_context)
 
     async def test_gateway_can_request_rag_with_an_explicit_document_scope(self) -> None:
         catalog = [

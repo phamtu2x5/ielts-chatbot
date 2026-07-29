@@ -1689,7 +1689,68 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("if the uploaded files were unavailable", prompt)
         self.assertIn("Do not choose DIRECT by guessing", compact_prompt)
         self.assertIn("not an automatic RAG decision", compact_prompt)
-        self.assertIn("Transforming a preceding direct answer remains DIRECT", compact_prompt)
+        self.assertIn("previous_answer_source=conversation", compact_prompt)
+
+    def test_route_classifier_keeps_follow_up_on_conversation_content_direct(self) -> None:
+        history = [
+            ChatMessage(role="user", content="Dịch đề Writing Task 2 này: Some people work harder."),
+            ChatMessage(role="assistant", content="Trong giáo dục và nghề nghiệp, một số người làm việc chăm chỉ hơn."),
+        ]
+        state = json.dumps(
+            {
+                "last_route": "direct",
+                "last_intent": "direct",
+                "has_rag_affinity": False,
+                "previous_answer_source": "conversation",
+            }
+        )
+
+        prompt = llm.route_classifier_prompt(
+            "Hãy viết một đoạn khoảng 150 từ cho đề bài tôi vừa gửi trên.",
+            history,
+            state,
+            "- file=reading.pdf; type=ielts_reading",
+        )
+        compact_prompt = llm.route_classifier_prompt(
+            "Tip dành riêng cho Reading thì sao?",
+            history,
+            state,
+            "- file=reading.pdf; type=ielts_reading",
+            compact=True,
+        )
+
+        self.assertIn("pasted or typed in the conversation", prompt)
+        self.assertIn("previous_answer_source=conversation", prompt)
+        self.assertIn(
+            "refining, translating, reformatting, or writing from it is DIRECT",
+            prompt,
+        )
+        self.assertIn("previous_answer_source=conversation", compact_prompt)
+        self.assertIn("remains DIRECT", compact_prompt)
+
+    def test_route_classifier_keeps_document_grounded_follow_up_rag(self) -> None:
+        history = [
+            ChatMessage(role="user", content="Tóm tắt tài liệu vừa tải."),
+            ChatMessage(role="assistant", content="Tài liệu gồm ba passage."),
+        ]
+        state = json.dumps(
+            {
+                "last_route": "rag",
+                "last_intent": "document_overview",
+                "has_rag_affinity": True,
+                "previous_answer_source": "uploaded_material",
+            }
+        )
+
+        prompt = llm.route_classifier_prompt(
+            "Passage 2 nói gì?",
+            history,
+            state,
+            "- file=reading.pdf; type=ielts_reading",
+        )
+
+        self.assertIn("previous_answer_source=uploaded_material", prompt)
+        self.assertIn("depends on that answer remains RAG", prompt)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')
