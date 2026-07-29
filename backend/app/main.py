@@ -172,6 +172,9 @@ def format_solve_context(
             "Question: "
             + str(target.get("question_stem") or target.get("question_text") or "").strip()
         )
+        answer_contract = target.get("answer_contract") or {}
+        question_type = str(answer_contract.get("kind") or target.get("question_type") or "unknown")
+        lines.append(f"Question type: {question_type}")
         options = target.get("answer_options") or []
         if options:
             lines.append("Answer options:")
@@ -183,6 +186,18 @@ def format_solve_context(
         word_limit = target.get("word_limit")
         if word_limit:
             lines.append(f"Maximum answer words: {word_limit}")
+        allowed_labels = answer_contract.get("allowed_labels") or []
+        if allowed_labels:
+            lines.append(f"Required answer label: exactly one of {', '.join(allowed_labels)}")
+        relationship_map = answer_contract.get("relationship_map") or {}
+        if relationship_map:
+            lines.append(
+                "Required relationship mapping: "
+                + "; ".join(
+                    f"{relationship} -> {label}"
+                    for relationship, label in relationship_map.items()
+                )
+            )
 
         evidence_debug = evidence_by_question.get(number)
         evidence_ids = (
@@ -427,6 +442,92 @@ def _split_answer_options(text: str) -> tuple[str, list[dict[str, str]]]:
     return text[: matches[0].start()].strip(), options
 
 
+def _clean_group_answer_options(text: str) -> list[dict[str, str]]:
+    """Extract a shared labelled list without carrying later instructions/questions."""
+    _, options = _split_answer_options(text)
+    cleaned: list[dict[str, str]] = []
+    for option in options:
+        option_text = re.split(
+            r"(?i)\b(?:you\s+may|NB\b|questions?\s+\d{1,3})|(?<!\d)\d{1,3}\s*[.)]\s+",
+            option["text"],
+            maxsplit=1,
+        )[0].strip()
+        if option_text:
+            cleaned.append({"label": option["label"], "text": option_text})
+    return cleaned
+
+
+def _normalize_solve_question_type(
+    question_type: str,
+    instructions: str,
+    question_text: str,
+    answer_options: list[dict[str, str]],
+    word_limit: int | None,
+) -> str:
+    """Normalize answer contracts from parser metadata and generic IELTS instructions."""
+    raw_type = question_type.strip().lower().replace("-", "_")
+    contract_text = f"{instructions}\n{question_text}".casefold()
+    if raw_type == "true_false_not_given" or (
+        "true" in contract_text
+        and "false" in contract_text
+        and "not given" in contract_text
+    ):
+        return "true_false_not_given"
+    if raw_type == "yes_no_not_given" or (
+        "yes" in contract_text
+        and "no" in contract_text
+        and "not given" in contract_text
+    ):
+        return "yes_no_not_given"
+    if raw_type == "matching" or (
+        answer_options
+        and (
+            "match each" in contract_text
+            or "match the" in contract_text
+            or "with one of" in contract_text
+        )
+    ):
+        return "matching"
+    if raw_type == "multiple_choice" or answer_options:
+        return "multiple_choice"
+    if raw_type in {"short_answer", "short_answer_examples"} or word_limit:
+        return "short_answer"
+    return raw_type or "unknown"
+
+
+def _solve_answer_contract(
+    question_type: str,
+    answer_options: list[dict[str, str]],
+    word_limit: int | None,
+) -> dict[str, Any]:
+    relationship_map: dict[str, str] = {}
+    allowed_labels: list[str] = []
+    if question_type == "true_false_not_given":
+        allowed_labels = ["TRUE", "FALSE", "NOT GIVEN"]
+        relationship_map = {
+            "supports": "TRUE",
+            "contradicts": "FALSE",
+            "absent": "NOT GIVEN",
+        }
+    elif question_type == "yes_no_not_given":
+        allowed_labels = ["YES", "NO", "NOT GIVEN"]
+        relationship_map = {
+            "supports": "YES",
+            "contradicts": "NO",
+            "absent": "NOT GIVEN",
+        }
+    elif question_type in {"multiple_choice", "matching"}:
+        allowed_labels = [option["label"] for option in answer_options]
+    return {
+        "kind": question_type,
+        "allowed_labels": allowed_labels,
+        "requires_single_label": bool(allowed_labels),
+        "requires_options": question_type in {"multiple_choice", "matching"},
+        "relationship_map": relationship_map,
+        "word_limit": word_limit,
+    }
+
+
 def _question_word_limit(text: str) -> int | None:
     match = re.search(
         r"\bNO\s+MORE\s+THAN\s+(ONE|TWO|THREE|FOUR|\d+)\s+WORDS?\b",
@@ -494,11 +595,28 @@ def solve_question_packets(
             question_text,
         ).strip()
         question_stem, answer_options = _split_answer_options(question_without_number)
+        source_question_type = str(
+            metadata.get("question_type") or group_metadata.get("question_type") or "unknown"
+        )
+        word_limit = _question_word_limit(instructions or _source_text(group or {}))
+        group_answer_options = _clean_group_answer_options(_source_text(group or {}))
+        preliminary_options = answer_options or group_answer_options
+        question_type = _normalize_solve_question_type(
+            source_question_type,
+            instructions,
+            question_text,
+            preliminary_options,
+            word_limit,
+        )
+        if question_type == "matching" and not answer_options:
+            answer_options = group_answer_options
         option_labels = [option["label"] for option in answer_options]
         if not option_labels:
             option_labels = _answer_option_labels(question_text)
-        question_type = str(
-            metadata.get("question_type") or group_metadata.get("question_type") or "unknown"
+        answer_contract = _solve_answer_contract(
+            question_type,
+            answer_options,
+            word_limit,
         )
         evidence = [
             source
@@ -528,14 +646,14 @@ def solve_question_packets(
             warnings.append("question_group_passage_mismatch")
         if passage_number is None:
             warnings.append("missing_passage_link")
-        if question_type == "multiple_choice" and len(option_labels) < 2:
+        if answer_contract["requires_options"] and len(option_labels) < 2:
             warnings.append("missing_answer_options")
-        word_limit = _question_word_limit(instructions or _source_text(group or {}))
         structural_warnings = {
             "missing_question_group",
             "ambiguous_question_group",
             "question_group_passage_mismatch",
             "missing_passage_link",
+            "missing_answer_options",
         }
         packets.append(
             {
@@ -544,9 +662,11 @@ def solve_question_packets(
                 "question_text": question_text,
                 "question_stem": question_stem,
                 "question_type": question_type,
+                "source_question_type": source_question_type,
                 "instructions": instructions,
                 "answer_option_labels": option_labels,
                 "answer_options": answer_options,
+                "answer_contract": answer_contract,
                 "word_limit": word_limit,
                 "document_id": document_id,
                 "passage_number": passage_number,
@@ -823,6 +943,133 @@ def _solve_answer_head(segment: str, question_number: int) -> str:
     return first_line.strip().strip("*_`")
 
 
+def _solve_relationship(segment: str) -> str | None:
+    match = re.search(
+        r"(?i)\brelationship\s*:\s*(supports|contradicts|absent)\b",
+        segment,
+    )
+    return match.group(1).lower() if match else None
+
+
+def _normalized_option_text(text: str) -> str:
+    return " ".join(re.findall(r"[\w']+", text.casefold(), flags=re.UNICODE))
+
+
+def _option_label_from_answer(
+    answer_head: str,
+    options: list[dict[str, str]],
+) -> str | None:
+    normalized_answer = _normalized_option_text(answer_head)
+    if not normalized_answer:
+        return None
+    matches = []
+    for option in options:
+        option_text = _normalized_option_text(str(option.get("text") or ""))
+        if option_text and (
+            normalized_answer == option_text
+            or option_text in normalized_answer
+        ):
+            matches.append(str(option.get("label") or "").upper())
+    unique = list(dict.fromkeys(label for label in matches if label))
+    return unique[0] if len(unique) == 1 else None
+
+
+def _replace_solve_answer(
+    text: str,
+    question_number: int,
+    requested_numbers: list[int],
+    answer: str,
+) -> tuple[str, bool]:
+    marker = re.compile(
+        rf"(?im)^(\s*(?:[-*]\s*)?(?:\*{{0,2}})?(?:question|câu(?:\s+hỏi)?)?\s*"
+        rf"{question_number}\s*[.):]\s*(?:\*{{0,2}})?)[^\n]*"
+    )
+    replaced, count = marker.subn(lambda match: f"{match.group(1)}{answer}", text, count=1)
+    if count:
+        return replaced, True
+    if len(requested_numbers) == 1:
+        return f"Question {question_number}: {answer}\n{text.strip()}", True
+    return text, False
+
+
+def normalize_solve_output(
+    text: str,
+    report: dict[str, Any],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Apply only deterministic mappings declared by each solve contract."""
+    normalized = text
+    adjustments: list[dict[str, Any]] = []
+    requested = list(report.get("requested_question_numbers") or [])
+    for packet in report.get("question_targets") or []:
+        number = int(packet["question_number"])
+        segment = _solve_answer_segment(normalized, number, requested)
+        if not segment:
+            continue
+        contract = packet.get("answer_contract") or {}
+        answer: str | None = None
+        relationship = _solve_relationship(segment)
+        relationship_map = contract.get("relationship_map") or {}
+        if relationship and relationship in relationship_map:
+            answer = relationship_map[relationship]
+        elif contract.get("kind") in {"multiple_choice", "matching"}:
+            answer = _option_label_from_answer(
+                _solve_answer_head(segment, number),
+                packet.get("answer_options") or [],
+            )
+        if not answer:
+            continue
+        normalized, changed = _replace_solve_answer(
+            normalized,
+            number,
+            requested,
+            answer,
+        )
+        if changed:
+            adjustments.append(
+                {
+                    "question_number": number,
+                    "answer": answer,
+                    "reason": "relationship_mapping" if relationship else "option_text_mapping",
+                }
+            )
+    return normalized, adjustments
+
+
+def _selected_answer_labels(answer_head: str, allowed_labels: list[str]) -> list[str]:
+    selected: list[str] = []
+    for label in sorted(allowed_labels, key=len, reverse=True):
+        if re.search(rf"(?i)(?<![A-Z]){re.escape(label)}(?![A-Z])", answer_head):
+            selected.append(label)
+    return selected
+
+
+def _effective_solve_contract(packet: dict[str, Any]) -> dict[str, Any]:
+    contract = dict(packet.get("answer_contract") or {})
+    question_type = str(contract.get("kind") or packet.get("question_type") or "unknown")
+    allowed_labels = list(
+        contract.get("allowed_labels")
+        or packet.get("answer_option_labels")
+        or []
+    )
+    if not allowed_labels and question_type == "true_false_not_given":
+        allowed_labels = ["TRUE", "FALSE", "NOT GIVEN"]
+    elif not allowed_labels and question_type == "yes_no_not_given":
+        allowed_labels = ["YES", "NO", "NOT GIVEN"]
+    contract.setdefault("kind", question_type)
+    contract["allowed_labels"] = allowed_labels
+    contract.setdefault(
+        "requires_single_label",
+        question_type in {
+            "multiple_choice",
+            "matching",
+            "true_false_not_given",
+            "yes_no_not_given",
+        },
+    )
+    contract.setdefault("requires_options", question_type in {"multiple_choice", "matching"})
+    return contract
+
+
 def solve_output_issues(text: str, report: dict[str, Any]) -> list[str]:
     """Validate solve response shape without judging semantic correctness."""
     issues: list[str] = []
@@ -833,19 +1080,31 @@ def solve_output_issues(text: str, report: dict[str, Any]) -> list[str]:
         if not segment:
             issues.append(f"Question {number} is missing from the response.")
             continue
-        question_type = packet.get("question_type")
+        has_explicit_contract = bool(packet.get("answer_contract"))
+        answer_contract = _effective_solve_contract(packet)
+        question_type = answer_contract["kind"]
         answer_head = _solve_answer_head(segment, number)
-        if question_type == "multiple_choice":
-            allowed = set(packet.get("answer_option_labels") or [])
-            selected = re.search(
-                r"(?i)^\s*(?:answer|đáp\s+án)?\s*[:\-–—]?\s*([A-H])\b",
-                answer_head,
+        allowed_labels = answer_contract["allowed_labels"]
+        if answer_contract.get("requires_options") and len(allowed_labels) < 2:
+            issues.append(f"Question {number} is missing its answer option contract.")
+        elif answer_contract.get("requires_single_label") or question_type in {
+            "multiple_choice",
+            "matching",
+            "true_false_not_given",
+            "yes_no_not_given",
+        }:
+            selected = _selected_answer_labels(answer_head, allowed_labels)
+            starts_with_label = any(
+                re.match(rf"(?i)^\s*{re.escape(label)}(?:\b|\s)", answer_head)
+                for label in allowed_labels
             )
-            if allowed and (not selected or selected.group(1).upper() not in allowed):
+            exact_contract_label = any(
+                answer_head.strip().casefold() == label.casefold()
+                for label in allowed_labels
+            )
+            valid_label = exact_contract_label if has_explicit_contract else starts_with_label
+            if len(selected) != 1 or not valid_label:
                 issues.append(f"Question {number} is missing a valid answer option label.")
-        elif question_type == "true_false_not_given":
-            if not re.search(r"\b(?:TRUE|FALSE|NOT\s+GIVEN)\b", segment, re.IGNORECASE):
-                issues.append(f"Question {number} is missing a TRUE/FALSE/NOT GIVEN label.")
         elif question_type == "short_answer" and packet.get("word_limit"):
             word_count = len(re.findall(r"\b[\w'-]+\b", answer_head, flags=re.UNICODE))
             if not answer_head:
@@ -925,6 +1184,9 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             if prepared.query_intent == "solve_questions"
             else {}
         )
+        first_adjustments: list[dict[str, Any]] = []
+        if solve_report:
+            answer, first_adjustments = normalize_solve_output(answer, solve_report)
         first_solve_issues = solve_output_issues(answer, solve_report) if solve_report else []
         issues = response_output_issues(answer, contract) + first_solve_issues
         generation_debug = prepared.debug.setdefault("generation", {})
@@ -938,6 +1200,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         if solve_report:
             generation_debug["solve_contract"] = {
                 "question_packets": solve_report.get("question_targets", []),
+                "first_draft_adjustments": first_adjustments,
                 "first_draft_issues": first_solve_issues,
             }
         enforce_review_contract = requires_reviewed_generation(prepared, message)
@@ -968,6 +1231,10 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
                 retry_prompt,
                 temperature=0.1,
             )
+            retry_adjustments: list[dict[str, Any]] = []
+            if solve_report:
+                retry, retry_adjustments = normalize_solve_output(retry, solve_report)
+                generation_debug["solve_contract"]["retry_adjustments"] = retry_adjustments
             selected = (
                 select_best_solve_output(answer, retry, contract, solve_report)
                 if solve_report

@@ -1731,6 +1731,126 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Vintage wines are mostly better. often preferred. often discussed. more costly.",
         )
 
+    def test_solve_question_packet_infers_contract_from_question_options(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-24-26",
+                "document_id": "doc-1",
+                "text": "Questions 24-26 Choose the correct answer.",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [24, 26],
+                    "passage_number": 2,
+                    "instructions": "Questions 24-26 Choose the correct answer.",
+                },
+            },
+            {
+                "chunk_id": "question-24",
+                "document_id": "doc-1",
+                "text": "24. What is the main finding? A growth B decline C stability D uncertainty",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [24, 24],
+                    "passage_number": 2,
+                    "parent_id": "questions-24-26",
+                },
+            },
+            {
+                "chunk_id": "passage-2",
+                "document_id": "doc-1",
+                "text": "The passage reports stability.",
+                "metadata": {"unit_type": "passage", "passage_number": 2},
+            },
+        ]
+
+        packet = main.solve_question_packets("Trả lời Question 24", sources)[0]
+
+        self.assertEqual(packet["source_question_type"], "unknown")
+        self.assertEqual(packet["question_type"], "multiple_choice")
+        self.assertEqual(packet["answer_contract"]["allowed_labels"], ["A", "B", "C", "D"])
+        self.assertTrue(packet["answer_contract"]["requires_single_label"])
+
+    def test_solve_question_packet_uses_shared_matching_options(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-36-40",
+                "document_id": "doc-1",
+                "text": (
+                    "Questions 36-40 Match each statement with one of the people below. "
+                    "A Levitin B Deutsch C Gregersen D Marvin E Freimer "
+                    "36. The researcher discussed memory."
+                ),
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [36, 40],
+                    "passage_number": 3,
+                    "instructions": "Questions 36-40 Match each statement with one of the people below.",
+                },
+            },
+            {
+                "chunk_id": "question-36",
+                "document_id": "doc-1",
+                "text": "36. The researcher discussed memory.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [36, 36],
+                    "passage_number": 3,
+                    "parent_id": "questions-36-40",
+                },
+            },
+            {
+                "chunk_id": "passage-3",
+                "document_id": "doc-1",
+                "text": "Marvin discussed memory.",
+                "metadata": {"unit_type": "passage", "passage_number": 3},
+            },
+        ]
+
+        packet = main.solve_question_packets("Trả lời Question 36", sources)[0]
+
+        self.assertEqual(packet["question_type"], "matching")
+        self.assertEqual(packet["answer_option_labels"], ["A", "B", "C", "D", "E"])
+        self.assertEqual(packet["answer_options"][-1], {"label": "E", "text": "Freimer"})
+        self.assertNotIn("missing_answer_options", packet["warnings"])
+
+    def test_solve_question_packet_normalizes_yes_no_not_given(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-31-33",
+                "document_id": "doc-1",
+                "text": "Questions 31-33 Write YES, NO or NOT GIVEN.",
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [31, 33],
+                    "passage_number": 3,
+                    "instructions": "Questions 31-33 Write YES, NO or NOT GIVEN.",
+                },
+            },
+            {
+                "chunk_id": "question-33",
+                "document_id": "doc-1",
+                "text": "33. The writer agrees with the proposal.",
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [33, 33],
+                    "passage_number": 3,
+                    "parent_id": "questions-31-33",
+                },
+            },
+            {
+                "chunk_id": "passage-3",
+                "document_id": "doc-1",
+                "text": "The writer rejects the proposal.",
+                "metadata": {"unit_type": "passage", "passage_number": 3},
+            },
+        ]
+
+        packet = main.solve_question_packets("Trả lời Question 33", sources)[0]
+
+        self.assertEqual(packet["question_type"], "yes_no_not_given")
+        self.assertEqual(packet["answer_contract"]["allowed_labels"], ["YES", "NO", "NOT GIVEN"])
+        self.assertEqual(packet["answer_contract"]["relationship_map"]["contradicts"], "NO")
+
     def test_solve_sources_keep_only_selected_passage_evidence(self) -> None:
         sources = [
             {
@@ -2063,6 +2183,71 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(main.solve_output_issues(valid, report), [])
 
+    def test_solve_output_normalizes_relationship_and_unique_option_text(self) -> None:
+        report = {
+            "requested_question_numbers": [1, 36],
+            "question_targets": [
+                {
+                    "question_number": 1,
+                    "answer_contract": {
+                        "kind": "true_false_not_given",
+                        "allowed_labels": ["TRUE", "FALSE", "NOT GIVEN"],
+                        "requires_single_label": True,
+                        "relationship_map": {
+                            "supports": "TRUE",
+                            "contradicts": "FALSE",
+                            "absent": "NOT GIVEN",
+                        },
+                    },
+                },
+                {
+                    "question_number": 36,
+                    "answer_options": [
+                        {"label": "A", "text": "Levitin"},
+                        {"label": "D", "text": "Marvin"},
+                    ],
+                    "answer_contract": {
+                        "kind": "matching",
+                        "allowed_labels": ["A", "D"],
+                        "requires_single_label": True,
+                        "requires_options": True,
+                    },
+                },
+            ],
+        }
+        raw = (
+            "Question 1: FALSE\nEvidence: no relevant detail\nRelationship: absent\n\n"
+            "Question 36: Marvin\nEvidence: Marvin states it."
+        )
+
+        normalized, adjustments = main.normalize_solve_output(raw, report)
+
+        self.assertIn("Question 1: NOT GIVEN", normalized)
+        self.assertIn("Question 36: D", normalized)
+        self.assertEqual(len(adjustments), 2)
+        self.assertEqual(main.solve_output_issues(normalized, report), [])
+
+    def test_solve_output_validator_rejects_multiple_labels(self) -> None:
+        report = {
+            "requested_question_numbers": [24],
+            "question_targets": [
+                {
+                    "question_number": 24,
+                    "answer_contract": {
+                        "kind": "multiple_choice",
+                        "allowed_labels": ["A", "B", "C", "D"],
+                        "requires_single_label": True,
+                        "requires_options": True,
+                    },
+                }
+            ],
+        }
+
+        self.assertEqual(
+            main.solve_output_issues("Question 24: B or C", report),
+            ["Question 24 is missing a valid answer option label."],
+        )
+
     def test_format_solve_context_keeps_evidence_with_its_question(self) -> None:
         sources = [
             {
@@ -2165,6 +2350,50 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer, "11. B because the passage says so.")
         self.assertEqual(model.await_count, 2)
         self.assertTrue(prepared.debug["generation"]["retry_used"])
+
+    async def test_solve_generation_maps_unique_option_text_without_retry(self) -> None:
+        report = {
+            "requested_question_numbers": [36],
+            "question_targets": [
+                {
+                    "question_number": 36,
+                    "question_type": "matching",
+                    "answer_options": [
+                        {"label": "A", "text": "Levitin"},
+                        {"label": "D", "text": "Marvin"},
+                    ],
+                    "answer_contract": {
+                        "kind": "matching",
+                        "allowed_labels": ["A", "D"],
+                        "requires_single_label": True,
+                        "requires_options": True,
+                    },
+                }
+            ],
+        }
+        prepared = main.ChatPreparation(
+            prompt="grounded solve prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={
+                "intent_decision": {"allow_solution": True},
+                "retrieval": {"solve_context_report": report},
+            },
+            query_intent="solve_questions",
+        )
+        model = AsyncMock(return_value="Question 36: Marvin\nEvidence: Marvin states it.")
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "Trả lời Question 36.")
+
+        self.assertIn("Question 36: D", answer)
+        self.assertEqual(model.await_count, 1)
+        self.assertFalse(prepared.debug["generation"]["retry_used"])
+        self.assertEqual(
+            prepared.debug["generation"]["solve_contract"]["first_draft_adjustments"][0]["reason"],
+            "option_text_mapping",
+        )
 
     async def test_solve_generation_fails_closed_after_invalid_retry(self) -> None:
         report = {
