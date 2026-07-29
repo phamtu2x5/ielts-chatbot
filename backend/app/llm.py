@@ -181,16 +181,33 @@ WRITING_META_RE = re.compile(
     re.IGNORECASE,
 )
 EXPLICIT_ENGLISH_RE = re.compile(
-    r"(?:bằng|sang|viết|trả\s+lời)\s+(?:ra\s+)?tiếng\s+anh|in\s+english|translate\s+(?:it\s+)?(?:into|to)\s+english",
+    r"(?:bằng|sang|ra|dịch)\s+(?:ra\s+)?tiếng\s+anh|"
+    r"(?:viết|trả\s+lời|phản\s+hồi)(?:\s+(?:bài|đoạn|câu\s+trả\s+lời))?\s+"
+    r"(?:bằng|sang|ra)\s+tiếng\s+anh|"
+    r"(?:bang|sang|ra|dich)\s+(?:ra\s+)?tieng\s+anh|"
+    r"(?:viet|tra\s+loi|phan\s+hoi)(?:\s+(?:bai|doan|cau\s+tra\s+loi))?\s+"
+    r"(?:bang|sang|ra)\s+tieng\s+anh|"
+    r"in\s+english|translate\s+(?:it\s+)?(?:into|to)\s+english",
     re.IGNORECASE,
 )
 EXPLICIT_VIETNAMESE_RE = re.compile(
-    r"(?:bằng|sang|viết|trả\s+lời|dịch)\s+(?:ra\s+)?tiếng\s+việt|in\s+vietnamese|translate\s+(?:it\s+)?(?:into|to)\s+vietnamese",
+    r"(?:bằng|sang|ra|dịch)\s+(?:ra\s+)?tiếng\s+việt|"
+    r"(?:viết|trả\s+lời|phản\s+hồi)(?:\s+(?:bài|đoạn|câu\s+trả\s+lời))?\s+"
+    r"(?:bằng|sang|ra)\s+tiếng\s+việt|"
+    r"dich\s+(?:(?:sang|ra)\s+)?tieng\s+viet|"
+    r"(?:bang|sang|ra)\s+tieng\s+viet|"
+    r"(?:viet|tra\s+loi|phan\s+hoi)(?:\s+(?:bai|doan|cau\s+tra\s+loi))?\s+"
+    r"(?:bang|sang|ra)\s+tieng\s+viet|"
+    r"in\s+vietnamese|translate\s+(?:it\s+)?(?:into|to)\s+vietnamese",
     re.IGNORECASE,
 )
 QUESTION_RANGE_RE = re.compile(
     r"\b(?:questions?|câu(?:\s+hỏi)?)\s*(\d{1,3})\s*(?:-|\u2013|\u2014|to|đến|tới)\s*(\d{1,3})\b",
     re.IGNORECASE,
+)
+QUESTION_NUMBER_LINE_RE = re.compile(
+    r"(?im)^\s*(?:[-+*]\s+)?(?:\*{1,2}|_{1,2})?"
+    r"(?:câu(?:\s+hỏi)?\s*)?(\d{1,3})\s*[.):]"
 )
 PLAN_REQUEST_RE = re.compile(
     r"\b(?:plan|schedule)\b|kế\s+hoạch|lịch\s+(?:học|ôn|luyện)",
@@ -376,17 +393,19 @@ def clean_response(text: str) -> str:
         text,
     )
     text = re.sub(r"\[Source\s+\d+\s*:\s*([^\]]+)\]", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"(?is)^\s*(?:#{1,6}\s*)?(?:\*{1,2}|_{1,2})?"
+        r"(?:user|assistant|system)\s*:\s*(?:\*{1,2}|_{1,2})?\s*",
+        "",
+        text,
+        count=1,
+    )
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 
 def writing_output_contract(message: str) -> WritingOutputContract:
     lowered = message.lower()
-    requests_vietnamese = bool(
-        re.search(
-            r"(?:dịch|bằng|sang|viết|trả\s+lời)\s+(?:ra\s+)?tiếng\s+việt|in\s+vietnamese",
-            lowered,
-        )
-    )
+    requests_vietnamese = bool(EXPLICIT_VIETNAMESE_RE.search(message))
     range_match = WORD_RANGE_RE.search(message)
     min_words = int(range_match.group(1)) if range_match else None
     max_words = int(range_match.group(2)) if range_match else None
@@ -420,6 +439,7 @@ def response_output_contract(
     *,
     allow_solution: bool,
     writing_context: bool = False,
+    explicit_no_solution: bool = False,
 ) -> ResponseOutputContract:
     if query_intent == "translate_questions":
         language = "English" if EXPLICIT_ENGLISH_RE.search(message) else "Vietnamese"
@@ -460,9 +480,9 @@ def response_output_contract(
 
     return ResponseOutputContract(
         language=language,
-        forbid_solution=not allow_solution
-        and query_intent in {"show_questions", "translate_questions", "explain_questions"},
-        allow_source_language_fields=query_intent == "solve_questions",
+        forbid_solution=not allow_solution and explicit_no_solution,
+        allow_source_language_fields=query_intent
+        in {"document_overview", "explain_questions", "semantic_qa", "solve_questions"},
         required_question_numbers=required_numbers,
         plan_duration_value=plan_duration_value,
         plan_duration_unit=plan_duration_unit,
@@ -475,7 +495,12 @@ def _language_analysis_text(
     *,
     allow_source_language_fields: bool = False,
 ) -> str:
-    text = re.sub(r"\[Source\s+\d+\s*:[^\]]+\]", " ", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\[Source\s+\d+\s*:[^\]]+\]",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
     if allow_source_language_fields:
         text = "\n".join(
             line
@@ -522,7 +547,10 @@ def _language_mismatch_score(
         allow_source_language_fields=allow_source_language_fields,
     )
     if allow_source_language_fields and token_count == 0:
-        return 0
+        vietnamese_score, english_score, token_count = _language_evidence(
+            text,
+            allow_source_language_fields=False,
+        )
     if language == "Vietnamese":
         analysis_text = _language_analysis_text(
             text,
@@ -604,10 +632,7 @@ def response_output_issues(text: str, contract: ResponseOutputContract) -> list[
     if contract.required_question_numbers:
         present = {
             int(value)
-            for value in re.findall(
-                r"(?im)^\s*(?:câu(?:\s+hỏi)?\s*)?(\d{1,3})\s*[.):]",
-                text,
-            )
+            for value in QUESTION_NUMBER_LINE_RE.findall(text)
         }
         missing = [number for number in contract.required_question_numbers if number not in present]
         if missing:
@@ -651,7 +676,7 @@ def _plan_output_issues(text: str, contract: ResponseOutputContract) -> list[str
         stripped = line.strip()
         if not (stripped.startswith("|") and stripped.endswith("|")):
             continue
-        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        cells = _markdown_row_cells(stripped)
         if not cells or re.fullmatch(r":?-{3,}:?", cells[0]):
             continue
         period = re.sub(r"\s+", " ", cells[0].lower())
@@ -708,18 +733,26 @@ def has_malformed_markdown_table(text: str) -> bool:
         if len(block) < 2:
             return True
 
-        expected_cells = block[0].count("|") - 1
+        expected_cells = len(_markdown_row_cells(block[0]))
         if expected_cells < 2:
             return True
-        separator_cells = block[1].strip("|").split("|")
+        separator_cells = _markdown_row_cells(block[1])
         if len(separator_cells) != expected_cells or not all(
             re.fullmatch(r"\s*:?-{3,}:?\s*", cell)
             for cell in separator_cells
         ):
             return True
-        if any(row.count("|") - 1 != expected_cells for row in block[2:]):
+        if any(len(_markdown_row_cells(row)) != expected_cells for row in block[2:]):
             return True
     return False
+
+
+def _markdown_row_cells(row: str) -> list[str]:
+    """Split a pipe table row without treating escaped pipes as cell boundaries."""
+    return [
+        cell.replace(r"\|", "|").strip()
+        for cell in re.split(r"(?<!\\)\|", row.strip().strip("|"))
+    ]
 
 
 def response_retry_prompt(
@@ -993,26 +1026,6 @@ def select_best_writing_output(
     contract: WritingOutputContract,
 ) -> str:
     return min((first, second), key=lambda text: writing_output_penalty(text, contract))
-
-
-def is_near_writing_word_boundary(
-    text: str,
-    contract: WritingOutputContract,
-    tolerance: int = 4,
-) -> bool:
-    issues = writing_output_issues(text, contract)
-    if not issues or any(
-        marker in issue
-        for issue in issues
-        for marker in ("not written in", "paragraph", "meta commentary")
-    ):
-        return False
-    word_count = len(re.findall(r"\b[\w'-]+\b", text, flags=re.UNICODE))
-    return (
-        contract.min_words is not None
-        and word_count < contract.min_words
-        and contract.min_words - word_count in range(1, tolerance + 1)
-    )
 
 
 def likely_contains_solution(text: str) -> bool:

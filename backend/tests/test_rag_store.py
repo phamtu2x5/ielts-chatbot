@@ -38,7 +38,6 @@ from app.intent import (
 from app.llm import (
     clean_response,
     has_malformed_markdown_table,
-    is_near_writing_word_boundary,
     likely_contains_solution,
     looks_like_prompt_echo,
     rag_prompt,
@@ -1026,6 +1025,10 @@ class LocalVectorStoreTests(unittest.TestCase):
             "Kết quả: C tăng 33%. A → B vẫn giữ mũi tên. reading.pdf, pages 1, 2",
         )
 
+    def test_response_cleanup_removes_one_leading_role_prefix(self) -> None:
+        self.assertEqual(clean_response("User: haha"), "haha")
+        self.assertEqual(clean_response("**Assistant:** Chào bạn."), "Chào bạn.")
+
     def test_writing_output_contract_and_validation(self) -> None:
         contract = writing_output_contract(
             "Viết bài IELTS Writing Task 1 dài 170-190 từ dựa trên bảng."
@@ -1064,15 +1067,6 @@ class LocalVectorStoreTests(unittest.TestCase):
         first = "Here is the revised essay: " + " ".join(["word"] * 175)
         second = " ".join(["word"] * 169)
         self.assertEqual(select_best_writing_output(first, second, contract), second)
-        self.assertTrue(
-            is_near_writing_word_boundary(" ".join(["word"] * 166), contract)
-        )
-        self.assertFalse(
-            is_near_writing_word_boundary(" ".join(["word"] * 165), contract)
-        )
-        self.assertFalse(
-            is_near_writing_word_boundary(" ".join(["word"] * 191), contract)
-        )
 
     def test_translation_contract_requires_vietnamese_and_all_question_numbers(self) -> None:
         contract = response_output_contract(
@@ -1126,6 +1120,84 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertIn("Translate every requested numbered", retry_prompt)
         self.assertIn("Preserve the question numbers", retry_prompt)
         self.assertNotIn("Which body", retry_prompt)
+
+    def test_no_solution_validation_requires_an_explicit_user_constraint(self) -> None:
+        normal = response_output_contract(
+            "Giải thích Questions 24-27.",
+            "explain_questions",
+            allow_solution=False,
+        )
+        explicit = response_output_contract(
+            "Giải thích Questions 24-27 nhưng không chọn đáp án.",
+            "explain_questions",
+            allow_solution=False,
+            explicit_no_solution=True,
+        )
+
+        self.assertFalse(normal.forbid_solution)
+        self.assertTrue(explicit.forbid_solution)
+
+    def test_language_contract_requires_an_explicit_output_language_request(self) -> None:
+        learning_request = response_output_contract(
+            "Chỉ tôi cách viết tiếng Anh tự nhiên hơn.",
+            "direct",
+            allow_solution=False,
+        )
+        vocabulary_request = response_output_contract(
+            "Cho tôi danh sách từ vựng tiếng Anh về giáo dục.",
+            "direct",
+            allow_solution=False,
+        )
+        output_request = response_output_contract(
+            "Trả lời câu hỏi này bằng tiếng Anh.",
+            "direct",
+            allow_solution=False,
+        )
+
+        self.assertIsNone(learning_request.language)
+        self.assertIsNone(vocabulary_request.language)
+        self.assertEqual(output_request.language, "English")
+
+    def test_language_contract_handles_unaccented_explicit_requests_only(self) -> None:
+        ordinary_request = response_output_contract(
+            "Cho toi 3 tip hoc IELTS va cach viet tieng Anh tot hon.",
+            "direct",
+            allow_solution=False,
+        )
+        english_request = response_output_contract(
+            "Tra loi bang tieng Anh.",
+            "direct",
+            allow_solution=False,
+        )
+        vietnamese_request = response_output_contract(
+            "Tra loi bang tieng Viet.",
+            "direct",
+            allow_solution=False,
+        )
+        vietnamese_translation = response_output_contract(
+            "Dich tieng Viet cho doan nay.",
+            "direct",
+            allow_solution=False,
+        )
+
+        self.assertIsNone(ordinary_request.language)
+        self.assertEqual(english_request.language, "English")
+        self.assertEqual(vietnamese_request.language, "Vietnamese")
+        self.assertEqual(vietnamese_translation.language, "Vietnamese")
+
+    def test_grounded_vietnamese_answer_allows_quoted_english_evidence(self) -> None:
+        contract = response_output_contract(
+            "Giải thích nội dung bằng tiếng Việt và dẫn chứng ngắn.",
+            "semantic_qa",
+            allow_solution=False,
+        )
+        response = (
+            'Đoạn văn cho thấy lượng người dùng tăng rõ rệt. '
+            'Bằng chứng: "Internet use rose sharply during the period."'
+        )
+
+        self.assertTrue(contract.allow_source_language_fields)
+        self.assertEqual(response_output_issues(response, contract), [])
 
     def test_translation_retry_prompt_keeps_only_source_and_current_request(self) -> None:
         original_prompt = """System instructions that should not be repeated.
@@ -1227,7 +1299,7 @@ Dịch Questions 25-27 sang tiếng Việt, chưa trả lời."""
             0,
         )
 
-    def test_solve_language_validation_checks_explanatory_prose(self) -> None:
+    def test_solve_language_validation_does_not_infer_language_from_query_text(self) -> None:
         contract = response_output_contract(
             "Trả lời Question 14 và dẫn bằng chứng.",
             "solve_questions",
@@ -1245,10 +1317,7 @@ Dịch Questions 25-27 sang tiếng Việt, chưa trả lời."""
         )
 
         self.assertEqual(response_output_issues(vietnamese, contract), [])
-        self.assertIn(
-            "The response is not written in Vietnamese.",
-            response_output_issues(english, contract),
-        )
+        self.assertEqual(response_output_issues(english, contract), [])
 
     def test_solve_language_validation_ignores_structured_source_metadata(self) -> None:
         contract = response_output_contract(
@@ -1273,7 +1342,7 @@ Dịch Questions 25-27 sang tiếng Việt, chưa trả lời."""
             0,
         )
 
-    def test_solve_language_validation_keeps_unlabelled_explanation(self) -> None:
+    def test_solve_language_validation_allows_unlabelled_source_explanation(self) -> None:
         contract = response_output_contract(
             "Trả lời Question 15 và dẫn bằng chứng.",
             "solve_questions",
@@ -1287,10 +1356,7 @@ Dịch Questions 25-27 sang tiếng Việt, chưa trả lời."""
             "Relationship: absent"
         )
 
-        self.assertIn(
-            "The response is not written in Vietnamese.",
-            response_output_issues(response, contract),
-        )
+        self.assertEqual(response_output_issues(response, contract), [])
 
     def test_response_selection_uses_language_evidence_to_break_ties(self) -> None:
         contract = response_output_contract(
@@ -1435,6 +1501,27 @@ Mô tả cấu trúc tài liệu bằng tiếng Việt."""
         self.assertIn("do not leave unexplained source-language common nouns", prompt)
         self.assertIn("Translate all ordinary source-language wording", retry)
         self.assertIn("names, option labels", retry)
+
+    def test_translation_contract_accepts_markdown_formatted_question_numbers(self) -> None:
+        contract = response_output_contract(
+            "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",
+            "translate_questions",
+            allow_solution=False,
+        )
+        response = """**25.** Khía cạnh nào được chia sẻ?
+- **Câu 26:** Tác giả cảm thấy thế nào?
+27) Kết quả có thể là gì?"""
+
+        self.assertEqual(response_output_issues(response, contract), [])
+
+    def test_translation_contract_recognizes_translate_into_english_request(self) -> None:
+        contract = response_output_contract(
+            "Dịch tiếng Anh cho Questions 1-4.",
+            "translate_questions",
+            allow_solution=False,
+        )
+
+        self.assertEqual(contract.language, "English")
 
     def test_overview_prompt_preserves_source_titles_and_covers_all_sections(self) -> None:
         prompt = rag_prompt(
@@ -1888,10 +1975,14 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 | Weeks 1-4 | Read daily | 60 minutes |
 | Weeks 5-8 | Write weekly |"""
         prose_with_pipe = "Use skimming | scanning only as a comparison in this sentence."
+        escaped_pipe = """| Pattern | Meaning |
+| --- | --- |
+| A \\| B | Compare two alternatives |"""
 
         self.assertTrue(has_malformed_markdown_table(rows_without_header))
         self.assertTrue(has_malformed_markdown_table(inconsistent_columns))
         self.assertFalse(has_malformed_markdown_table(prose_with_pipe))
+        self.assertFalse(has_malformed_markdown_table(escaped_pipe))
 
     async def test_non_stream_request_retries_one_server_error(self) -> None:
         attempts = 0

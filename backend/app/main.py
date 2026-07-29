@@ -49,7 +49,6 @@ from .llm import (
     response_retry_prompt,
     resolve_rag_target,
     classify_chat_route,
-    is_near_writing_word_boundary,
     select_best_writing_output,
     select_best_response_output,
     stream_ollama,
@@ -824,28 +823,44 @@ INTENT_UNDETERMINED_RESPONSE = (
     "Vui lòng nói rõ bạn muốn xem, dịch, giải thích, trả lời câu hỏi hay phân tích nội dung."
 )
 
-WRITING_VALIDATION_FAILURE_RESPONSE = (
-    "Mình chưa tạo được bài Writing đáp ứng đúng yêu cầu về ngôn ngữ, số từ và định dạng. "
+TRANSLATION_VALIDATION_FAILURE_VI = (
+    "Mình chưa tạo được bản dịch đầy đủ bằng tiếng Việt từ nội dung đã chọn. "
     "Vui lòng thử lại."
 )
 
-TRANSLATION_VALIDATION_FAILURE_RESPONSE = (
-    "Mình chưa tạo được bản dịch đầy đủ và đúng ngôn ngữ từ nội dung đã trích xuất. "
-    "Vui lòng thử lại."
+TRANSLATION_VALIDATION_FAILURE_EN = (
+    "I could not produce a complete English translation from the selected content. "
+    "Please try again."
 )
 
-FORMAT_VALIDATION_FAILURE_RESPONSE = (
-    "Mình chưa tạo được câu trả lời theo đúng định dạng yêu cầu. Vui lòng thử lại."
+LANGUAGE_VALIDATION_FAILURE_VI = (
+    "Mình chưa tạo được câu trả lời đúng ngôn ngữ bạn yêu cầu. Vui lòng thử lại."
 )
 
-LANGUAGE_VALIDATION_FAILURE_RESPONSE_VI = (
-    "Mình chưa tạo được câu trả lời đúng ngôn ngữ yêu cầu. Vui lòng thử lại."
+LANGUAGE_VALIDATION_FAILURE_EN = (
+    "I could not produce the response in the language you requested. Please try again."
 )
 
-LANGUAGE_VALIDATION_FAILURE_RESPONSE_EN = (
-    "I could not generate the response in the requested language. Please try again."
-)
 
+def hard_validation_failure(
+    query_intent: str,
+    language: str | None,
+    issues: list[str],
+) -> str | None:
+    """Return a safe response only for explicit language/translation contracts."""
+    language_issue = any("not written in" in issue for issue in issues)
+    missing_translation_items = query_intent == "translate_questions" and any(
+        "missing question numbers" in issue for issue in issues
+    )
+    if not language_issue and not missing_translation_items:
+        return None
+    if query_intent == "translate_questions":
+        return (
+            TRANSLATION_VALIDATION_FAILURE_EN
+            if language == "English"
+            else TRANSLATION_VALIDATION_FAILURE_VI
+        )
+    return LANGUAGE_VALIDATION_FAILURE_EN if language == "English" else LANGUAGE_VALIDATION_FAILURE_VI
 
 def document_extraction_failure_detail(document: Any) -> str:
     metadata = document.metadata or {}
@@ -1175,18 +1190,23 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         final_issues = writing_output_issues(answer, contract)
         generation_debug["final_issues"] = final_issues
         if final_issues:
-            if is_near_writing_word_boundary(answer, contract):
-                generation_debug["validation_degraded"] = True
-            else:
-                answer = WRITING_VALIDATION_FAILURE_RESPONSE
+            generation_debug["validation_degraded"] = True
+            failure = hard_validation_failure(
+                prepared.query_intent,
+                contract.language,
+                final_issues,
+            )
+            if failure:
                 generation_debug["validation_failed_closed"] = True
+                generation_debug["returned_validation_fallback"] = failure
+                return failure
     else:
         allow_solution = bool(prepared.debug.get("intent_decision", {}).get("allow_solution", False))
         contract = response_output_contract(
             message,
             prepared.query_intent,
             allow_solution=allow_solution,
-            writing_context=is_writing_response(prepared),
+            explicit_no_solution=has_explicit_no_solution_constraint(message),
         )
         solve_report = (
             prepared.debug.get("retrieval", {}).get("solve_context_report", {})
@@ -1306,35 +1326,18 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             final_issues = response_output_issues(answer, contract)
         generation_debug["final_issues"] = final_issues
         if final_solve_issues:
-            answer = (
-                "Mình chưa thể tạo câu trả lời đáp ứng đầy đủ cấu trúc hoặc giới hạn của nhóm câu hỏi "
-                "từ bằng chứng hiện có."
-            )
+            generation_debug["validation_degraded"] = True
+        elif final_issues:
+            generation_debug["validation_degraded"] = True
+        failure = hard_validation_failure(
+            prepared.query_intent,
+            contract.language,
+            final_issues,
+        )
+        if failure:
             generation_debug["validation_failed_closed"] = True
-        elif final_issues and prepared.query_intent == "translate_questions":
-            answer = TRANSLATION_VALIDATION_FAILURE_RESPONSE
-            generation_debug["validation_failed_closed"] = True
-        elif (
-            enforce_review_contract
-            and final_issues
-            and any("not written in" in issue for issue in final_issues)
-        ):
-            answer = (
-                LANGUAGE_VALIDATION_FAILURE_RESPONSE_EN
-                if contract.language == "English"
-                else LANGUAGE_VALIDATION_FAILURE_RESPONSE_VI
-            )
-            generation_debug["validation_failed_closed"] = True
-        elif final_issues and any(
-            "malformed Markdown table" in issue
-            or "conversation role prefix" in issue
-            or "plan timeline" in issue
-            or "plan periods" in issue
-            or "daily time limit" in issue
-            for issue in final_issues
-        ):
-            answer = FORMAT_VALIDATION_FAILURE_RESPONSE
-            generation_debug["validation_failed_closed"] = True
+            generation_debug["returned_validation_fallback"] = failure
+            return failure
         if solve_report:
             generation_debug["solve_contract"]["returned_output"] = generation_candidate_debug(
                 answer
@@ -1357,9 +1360,7 @@ def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> b
 
 
 def is_writing_response(prepared: "ChatPreparation") -> bool:
-    return prepared.query_intent == "writing_generation" or bool(
-        prepared.debug.get("retrieval", {}).get("writing_parent_id")
-    )
+    return prepared.query_intent == "writing_generation"
 
 
 def response_chunks(text: str, size: int = 180) -> list[str]:
@@ -2745,7 +2746,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 req.conversation_history,
                 query_intent=query_intent,
                 allow_solution=bool(intent_debug.get("allow_solution")),
-                writing_context=query_intent == "writing_generation" or bool(writing_parent_id),
+                writing_context=query_intent == "writing_generation",
                 user_profile=user_profile_context(req),
             ),
             static_response=None,

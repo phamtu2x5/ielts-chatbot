@@ -2451,7 +2451,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(solve_debug["returned_output"]["text"], answer)
         self.assertEqual(solve_debug["final_issues"], [])
 
-    async def test_solve_generation_fails_closed_after_invalid_retry(self) -> None:
+    async def test_solve_generation_returns_best_candidate_after_invalid_retry(self) -> None:
         report = {
             "requested_question_numbers": [11],
             "question_targets": [
@@ -2478,9 +2478,12 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Trả lời Question 11.")
 
-        self.assertIn("chưa thể tạo câu trả lời", answer)
+        self.assertEqual(answer, "The answer is unclear.")
         self.assertEqual(model.await_count, 2)
-        self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
+        self.assertTrue(prepared.debug["generation"]["validation_degraded"])
+        self.assertFalse(
+            prepared.debug["generation"].get("validation_failed_closed", False)
+        )
 
     async def test_solve_generation_uses_one_grounded_model_call(self) -> None:
         prepared = main.ChatPreparation(
@@ -2700,7 +2703,29 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("below 170", retry_prompt.lower())
         self.assertEqual(prepared.debug["generation"]["selected_candidate"], "retry")
 
-    async def test_writing_generation_fails_closed_when_retry_still_invalid(self) -> None:
+    async def test_writing_generation_fails_closed_when_both_drafts_use_wrong_language(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="grounded writing prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={"intent_decision": {"allow_solution": True}},
+            query_intent="writing_generation",
+        )
+        vietnamese = " ".join(["nội dung"] * 175)
+        model = AsyncMock(side_effect=[vietnamese, vietnamese])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Viết bài IELTS Writing Task 1 dài 170-190 từ.",
+            )
+
+        self.assertEqual(answer, main.LANGUAGE_VALIDATION_FAILURE_EN)
+        self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
+
+    async def test_writing_generation_returns_best_candidate_when_retry_still_invalid(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded writing prompt",
             static_response=None,
@@ -2719,11 +2744,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "Viết bài IELTS Writing Task 1 dài 170-190 từ.",
             )
 
-        self.assertEqual(answer, main.WRITING_VALIDATION_FAILURE_RESPONSE)
+        self.assertEqual(answer, first)
         self.assertEqual(model.await_count, 2)
         self.assertEqual(prepared.debug["generation"]["selected_candidate"], "first")
         self.assertTrue(prepared.debug["generation"]["final_issues"])
-        self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
+        self.assertTrue(prepared.debug["generation"]["validation_degraded"])
+        self.assertFalse(
+            prepared.debug["generation"].get("validation_failed_closed", False)
+        )
 
     async def test_writing_generation_returns_a_near_boundary_retry(self) -> None:
         prepared = main.ChatPreparation(
@@ -2778,7 +2806,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_count, 2)
         self.assertTrue(prepared.debug["generation"]["retry_used"])
 
-    async def test_writing_semantic_answer_defaults_to_english(self) -> None:
+    async def test_writing_semantic_answer_does_not_force_essay_language(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded writing analysis prompt",
             static_response=None,
@@ -2800,8 +2828,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Describe the main trend in this Writing task.")
 
-        self.assertEqual(answer, "The paragraph describes a clear upward trend over the period.")
-        self.assertEqual(model.await_count, 2)
+        self.assertEqual(answer, "Bài viết mô tả xu hướng tăng rõ rệt trong giai đoạn này.")
+        self.assertEqual(model.await_count, 1)
 
     async def test_explicit_no_solution_request_is_rewritten_without_blocking(self) -> None:
         prepared = main.ChatPreparation(
@@ -2912,7 +2940,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.await_count, 2)
         self.assertEqual(prepared.debug["generation"]["final_issues"], [])
 
-    async def test_non_translation_language_mismatch_fails_closed(self) -> None:
+    async def test_explicit_language_mismatch_fails_closed_after_retry(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded overview prompt",
             static_response=None,
@@ -2934,8 +2962,9 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "Mô tả cấu trúc tài liệu bằng tiếng Việt.",
             )
 
-        self.assertEqual(answer, main.LANGUAGE_VALIDATION_FAILURE_RESPONSE_VI)
+        self.assertEqual(answer, main.LANGUAGE_VALIDATION_FAILURE_VI)
         self.assertEqual(model.await_count, 2)
+        self.assertTrue(prepared.debug["generation"]["validation_degraded"])
         self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
 
     async def test_compliant_no_solution_response_is_not_generated_twice(self) -> None:
@@ -3027,12 +3056,13 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",
             )
 
-        self.assertEqual(answer, main.TRANSLATION_VALIDATION_FAILURE_RESPONSE)
+        self.assertEqual(answer, main.TRANSLATION_VALIDATION_FAILURE_VI)
         self.assertEqual(model.await_count, 2)
         self.assertTrue(prepared.debug["generation"]["final_issues"])
+        self.assertTrue(prepared.debug["generation"]["validation_degraded"])
         self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
 
-    async def test_markdown_table_fails_closed_when_retry_is_still_invalid(self) -> None:
+    async def test_markdown_table_returns_best_candidate_when_retry_is_still_invalid(self) -> None:
         prepared = main.ChatPreparation(
             prompt="direct plan prompt",
             static_response=None,
@@ -3050,9 +3080,32 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Lập kế hoạch học trong 3 tháng.")
 
-        self.assertEqual(answer, main.FORMAT_VALIDATION_FAILURE_RESPONSE)
+        self.assertEqual(answer, malformed)
         self.assertEqual(model.await_count, 2)
-        self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
+        self.assertTrue(prepared.debug["generation"]["validation_degraded"])
+        self.assertFalse(
+            prepared.debug["generation"].get("validation_failed_closed", False)
+        )
+
+    async def test_direct_request_without_explicit_language_is_not_language_validated(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+        model = AsyncMock(return_value="Three practical IELTS study tips.")
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "cho toi 3 tip hoc ielts")
+
+        self.assertEqual(answer, "Three practical IELTS study tips.")
+        self.assertEqual(model.await_count, 1)
+        self.assertIsNone(
+            prepared.debug["generation"]["response_contract"]["language"]
+        )
 
     async def test_generation_retries_a_table_without_header_or_separator(self) -> None:
         prepared = main.ChatPreparation(
