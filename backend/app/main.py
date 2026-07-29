@@ -1333,6 +1333,7 @@ def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> b
     return (
         prepared.route_used == "base_model"
         or is_writing_response(prepared)
+        or prepared.query_intent == "solve_questions"
         or prepared.query_intent == "translate_questions"
         or prepared.query_intent == "document_overview"
         or (

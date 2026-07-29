@@ -2342,12 +2342,17 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
             query_intent="solve_questions",
         )
-        model = AsyncMock(side_effect=["The answer is unclear.", "11. B because the passage says so."])
+        model = AsyncMock(
+            side_effect=[
+                "Câu trả lời chưa rõ.",
+                "11. B vì đoạn văn nêu rõ nội dung này.",
+            ]
+        )
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Trả lời Question 11.")
 
-        self.assertEqual(answer, "11. B because the passage says so.")
+        self.assertEqual(answer, "11. B vì đoạn văn nêu rõ nội dung này.")
         self.assertEqual(model.await_count, 2)
         self.assertTrue(prepared.debug["generation"]["retry_used"])
 
@@ -2382,12 +2387,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
             query_intent="solve_questions",
         )
-        model = AsyncMock(return_value="Question 36: Marvin\nEvidence: Marvin states it.")
+        model = AsyncMock(
+            return_value="Câu 36: Marvin\nBằng chứng: Marvin nêu nội dung này."
+        )
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Trả lời Question 36.")
 
-        self.assertIn("Question 36: D", answer)
+        self.assertIn("Câu 36: D", answer)
         self.assertEqual(model.await_count, 1)
         self.assertFalse(prepared.debug["generation"]["retry_used"])
         self.assertEqual(
@@ -2427,8 +2434,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             query_intent="solve_questions",
         )
         raw = (
-            "Question 1: FALSE\n"
-            "Evidence: The passage does not state the claimed reason.\n"
+            "Câu 1: FALSE\n"
+            "Bằng chứng: Đoạn văn không nêu lý do được khẳng định.\n"
             "Relationship: absent"
         )
 
@@ -2436,9 +2443,9 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             answer = await main.generate_answer(prepared, "Trả lời Question 1.")
 
         solve_debug = prepared.debug["generation"]["solve_contract"]
-        self.assertIn("Question 1: NOT GIVEN", answer)
+        self.assertIn("Câu 1: NOT GIVEN", answer)
         self.assertEqual(solve_debug["first_candidate_raw"]["text"], raw)
-        self.assertIn("Question 1: NOT GIVEN", solve_debug["first_candidate_normalized"]["text"])
+        self.assertIn("Câu 1: NOT GIVEN", solve_debug["first_candidate_normalized"]["text"])
         self.assertEqual(solve_debug["selected_candidate_output"]["text"], answer)
         self.assertEqual(solve_debug["final_adjustments"], [])
         self.assertEqual(solve_debug["returned_output"]["text"], answer)
@@ -2484,14 +2491,82 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={"intent_decision": {"allow_solution": True}},
             query_intent="solve_questions",
         )
-        model = AsyncMock(return_value="C because it is explicitly discussed.")
+        model = AsyncMock(return_value="C vì nội dung này được nêu rõ.")
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Trả lời Question 11.")
 
-        self.assertEqual(answer, "C because it is explicitly discussed.")
+        self.assertEqual(answer, "C vì nội dung này được nêu rõ.")
         self.assertEqual(model.await_count, 1)
-        self.assertFalse(main.requires_reviewed_generation(prepared, "Trả lời Question 11."))
+        self.assertTrue(main.requires_reviewed_generation(prepared, "Trả lời Question 11."))
+
+    async def test_chat_stream_reviews_and_traces_solve_output(self) -> None:
+        report = {
+            "requested_question_numbers": [1],
+            "question_targets": [
+                {
+                    "question_number": 1,
+                    "question_type": "true_false_not_given",
+                    "answer_contract": {
+                        "kind": "true_false_not_given",
+                        "allowed_labels": ["TRUE", "FALSE", "NOT GIVEN"],
+                        "requires_single_label": True,
+                        "relationship_map": {
+                            "supports": "TRUE",
+                            "contradicts": "FALSE",
+                            "absent": "NOT GIVEN",
+                        },
+                    },
+                }
+            ],
+        }
+        prepared = main.ChatPreparation(
+            prompt="grounded solve prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[],
+            debug={
+                "intent_decision": {"allow_solution": True},
+                "retrieval": {"solve_context_report": report},
+            },
+            query_intent="solve_questions",
+        )
+        raw = (
+            "Câu 1: FALSE\n"
+            "Bằng chứng: Đoạn văn không nêu lý do được khẳng định.\n"
+            "Relationship: absent"
+        )
+        snapshots = [
+            {"ram": {"backend_rss_mb": 100.0}, "vram": {"available": False}},
+            {"ram": {"backend_rss_mb": 100.0}, "vram": {"available": False}},
+        ]
+
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "collect_user_fact_updates", AsyncMock()),
+            patch.object(main, "query_ollama", AsyncMock(return_value=raw)),
+            patch.object(main, "stream_ollama") as raw_stream,
+            patch.object(main, "resource_snapshot", side_effect=snapshots),
+        ):
+            response = await main.chat_stream(
+                main.ChatRequest(message="Trả lời Question 1.")
+            )
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        returned = "".join(
+            event["token"] for event in events if event["type"] == "token"
+        )
+        final_metadata = [event for event in events if event["type"] == "metadata"][-1]
+        solve_debug = final_metadata["debug"]["generation"]["solve_contract"]
+
+        self.assertIn("Câu 1: NOT GIVEN", returned)
+        self.assertEqual(solve_debug["first_candidate_raw"]["text"], raw)
+        self.assertIn(
+            "Câu 1: NOT GIVEN",
+            solve_debug["final_normalized_output"]["text"],
+        )
+        self.assertEqual(solve_debug["returned_output"]["text"], returned)
+        raw_stream.assert_not_called()
 
     def test_direct_generation_is_buffered_for_output_validation(self) -> None:
         prepared = main.ChatPreparation(
