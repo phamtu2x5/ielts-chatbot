@@ -290,79 +290,24 @@ def format_document_catalog_context(
     )
 
 
-def format_route_catalog_context(
+def format_route_environment_context(
     catalog: list[dict[str, Any]],
     attached_document_ids: list[str] | None = None,
 ) -> str:
-    """Build bounded, query-independent document signatures for Patch 0."""
-    if not catalog:
-        return "Uploaded documents: none"
-
+    """Expose document availability to Patch 0 without document identities."""
     attached = set(attached_document_ids or [])
-    catalog = [
-        *[
-            item
-            for item in catalog
-            if set(item.get("document_ids") or []).intersection(attached)
-        ],
-        *[
-            item
-            for item in catalog
-            if not set(item.get("document_ids") or []).intersection(attached)
-        ],
-    ]
-    lines: list[str] = []
-    for item in catalog:
-        fields = [f"file={item.get('source_file', 'unknown')}"]
-        document_ids = set(item.get("document_ids") or [])
-        if document_ids & attached:
-            fields.append("attached_this_turn=true")
-        for label, key in (
-            ("document_type", "document_types"),
-            ("task_type", "task_types"),
-            ("mime_type", "mime_types"),
-            ("sections", "section_titles"),
-            ("passages", "passage_numbers"),
-            ("visual_types", "visual_types"),
-            ("question_ranges", "question_ranges"),
-            ("question_types", "question_types"),
-            ("units", "unit_types"),
-        ):
-            values = [str(value) for value in item.get(key) or []]
-            if values:
-                fields.append(f"{label}={', '.join(values)}")
-        line = "- " + "; ".join(fields)
-        limit = settings.route_catalog_document_chars
-        if len(line) > limit:
-            line = line[: limit - 3].rstrip() + "..."
-        if lines and len("\n".join([*lines, line])) > settings.route_catalog_chars:
-            break
-        lines.append(line)
-
-    omitted = len(catalog) - len(lines)
-    if omitted > 0:
-        suffix = f"- {omitted} additional uploaded document(s) omitted by the route context limit."
-        available = settings.route_catalog_chars - len("\n".join(lines)) - 1
-        if available > 0:
-            lines.append(suffix[:available])
-    return "\n".join(lines)
-
-
-def format_route_request_anchors(message: str) -> str:
-    """Expose parser-derived request anchors without deciding the route."""
-    fields: list[str] = []
-    question_ranges = parse_question_ranges(message)
-    if question_ranges:
-        fields.append(
-            "question_ranges="
-            + ", ".join(f"{start}-{end}" for start, end in question_ranges)
-        )
-    passage_number = parse_passage_number(message)
-    if passage_number is not None:
-        fields.append(f"passage_number={passage_number}")
-    if not fields:
-        return ""
-    return "current_request_anchors: " + "; ".join(fields)
+    available_ids = {
+        str(document_id)
+        for item in catalog
+        for document_id in item.get("document_ids") or []
+    }
+    return json.dumps(
+        {
+            "documents_available": bool(available_ids),
+            "attached_this_turn": bool(attached.intersection(available_ids)),
+        },
+        ensure_ascii=False,
+    )
 
 
 def evidence_query_for_sources(sources: list[dict[str, Any]], fallback: str) -> str:
@@ -2005,7 +1950,6 @@ def gateway_state_context(req: ChatRequest) -> str:
         {
             "last_route": req.conversation_state.last_route,
             "last_intent": req.conversation_state.last_intent,
-            "has_rag_affinity": bool(req.conversation_state.rag_affinity.document_ids),
         },
         ensure_ascii=False,
     )
@@ -2084,38 +2028,31 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         for item in full_catalog
         if any(document_id in allowed_scope_ids for document_id in item.get("document_ids", []))
     ]
-    route_catalog_context = "\n".join(
-        part
-        for part in (
-            format_route_request_anchors(message),
-            format_route_catalog_context(
-                full_catalog,
-                req.document_ids if req.document_scope == "explicit" else None,
-            ),
-        )
-        if part
+    attached_document_ids = (
+        req.document_ids
+        if req.document_scope == "explicit" and req.document_ids
+        else []
+    )
+    route_environment_context = format_route_environment_context(
+        full_catalog,
+        attached_document_ids,
     )
     gateway_decision = await classify_chat_route(
         message,
         req.conversation_history,
         gateway_state_context(req),
-        route_catalog_context,
+        route_environment_context,
     )
     route = gateway_decision.route
-    route_catalog_count = sum(
-        line.startswith("- file=") for line in route_catalog_context.splitlines()
-    )
     gateway_debug = {
         "used": True,
         **gateway_decision.to_debug(),
         "catalog_context": {
-            "order": "same_turn_attachments_then_recent_ingestion",
+            "mode": "environment_only",
             "available_documents": len(full_catalog),
-            "included_documents": route_catalog_count,
-            "omitted_documents": max(0, len(full_catalog) - route_catalog_count),
-            "attached_document_ids": (
-                req.document_ids if req.document_scope == "explicit" else []
-            ),
+            "included_documents": 0,
+            "omitted_documents": len(full_catalog),
+            "attached_document_ids": attached_document_ids,
         },
     }
 

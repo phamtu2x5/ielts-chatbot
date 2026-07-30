@@ -1125,7 +1125,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(prepared.static_response)
         self.assertIn("Give me three IELTS Speaking tips.", prepared.prompt)
 
-    async def test_semantic_gateway_receives_bounded_catalog_but_not_retrieval_snippets(self) -> None:
+    async def test_semantic_gateway_receives_environment_without_document_identity(self) -> None:
         catalog = [
             {
                 "source_file": "reading.pdf",
@@ -1173,11 +1173,13 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         state_context = gateway.await_args.args[2]
         document_context = gateway.await_args.args[3]
         self.assertEqual(state_context, "")
-        self.assertIn("file=reading.pdf", document_context)
-        self.assertIn("attached_this_turn=true", document_context)
-        self.assertIn("sections=Urban transport", document_context)
+        self.assertEqual(
+            json.loads(document_context),
+            {"documents_available": True, "attached_this_turn": True},
+        )
+        self.assertNotIn("reading.pdf", document_context)
+        self.assertNotIn("Urban transport", document_context)
         self.assertNotIn("rail network expanded", document_context)
-        self.assertLessEqual(len(document_context), main.settings.route_catalog_chars)
         self.assertEqual(prepared.debug["document_resolution"]["resolved_document_ids"], ["doc-1"])
         self.assertEqual(store.routing_candidates, [
             {
@@ -1227,29 +1229,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("internet access and smartphone ownership", context.text)
         self.assertLessEqual(len(context.text), main.settings.target_catalog_chars)
 
-    def test_route_catalog_context_is_bounded_per_document_and_in_total(self) -> None:
-        catalog = [
-            {
-                "source_file": f"reading-{index}.pdf",
-                "document_ids": [f"doc-{index}"],
-                "document_types": ["ielts_reading"],
-                "section_titles": ["A" * 1_000],
-                "unit_types": ["passage", "question_group", "question"],
-            }
-            for index in range(20)
-        ]
-
-        context = main.format_route_catalog_context(catalog)
-
-        self.assertLessEqual(len(context), main.settings.route_catalog_chars)
-        self.assertIn("file=reading-0.pdf", context)
-        document_lines = [line for line in context.splitlines() if line.startswith("- file=")]
-        self.assertTrue(document_lines)
-        self.assertTrue(
-            all(len(line) <= main.settings.route_catalog_document_chars for line in document_lines)
-        )
-
-    def test_route_catalog_marks_only_documents_attached_in_current_turn(self) -> None:
+    def test_route_environment_exposes_only_availability_booleans(self) -> None:
         catalog = [
             {
                 "source_file": "reading.pdf",
@@ -1263,45 +1243,15 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
         ]
 
-        context = main.format_route_catalog_context(catalog, ["doc-writing"])
-
-        writing_line, reading_line = context.splitlines()
-        self.assertNotIn("attached_this_turn", reading_line)
-        self.assertIn("attached_this_turn=true", writing_line)
-
-    def test_route_catalog_exposes_visual_and_question_structure(self) -> None:
-        context = main.format_route_catalog_context(
-            [
-                {
-                    "source_file": "reading.pdf",
-                    "document_ids": ["doc-reading"],
-                    "mime_types": ["application/pdf"],
-                    "document_types": ["ielts_reading"],
-                    "visual_types": ["diagram"],
-                    "question_ranges": ["27-32"],
-                    "question_types": ["matching_information"],
-                }
-            ]
-        )
-
-        self.assertIn("mime_type=application/pdf", context)
-        self.assertIn("visual_types=diagram", context)
-        self.assertIn("question_ranges=27-32", context)
-        self.assertIn("question_types=matching_information", context)
-
-    def test_route_request_anchors_are_parser_derived(self) -> None:
-        anchors = main.format_route_request_anchors(
-            "Explain the strategy for Questions 27-32 in Passage 3."
-        )
+        context = main.format_route_environment_context(catalog, ["doc-writing"])
 
         self.assertEqual(
-            anchors,
-            "current_request_anchors: question_ranges=27-32; passage_number=3",
+            json.loads(context),
+            {"documents_available": True, "attached_this_turn": True},
         )
-        self.assertEqual(
-            main.format_route_request_anchors("Give me general IELTS study tips."),
-            "",
-        )
+        self.assertNotIn("reading.pdf", context)
+        self.assertNotIn("writing.png", context)
+        self.assertNotIn("ielts_reading", context)
 
     def test_target_catalog_reports_documents_omitted_by_context_limit(self) -> None:
         catalog = [
@@ -1368,10 +1318,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         state_context = gateway.await_args.args[2]
         document_context = gateway.await_args.args[3]
         self.assertIn('"last_route": "rag"', state_context)
-        self.assertIn('"has_rag_affinity": true', state_context)
+        self.assertIn('"last_intent": "semantic_qa"', state_context)
+        self.assertNotIn("has_rag_affinity", state_context)
         self.assertNotIn("doc-1", state_context)
         self.assertNotIn("14", state_context)
-        self.assertNotIn("attached_this_turn", document_context)
+        self.assertEqual(
+            json.loads(document_context),
+            {"documents_available": True, "attached_this_turn": False},
+        )
 
     async def test_gateway_can_request_rag_with_an_explicit_document_scope(self) -> None:
         catalog = [

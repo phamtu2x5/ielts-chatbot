@@ -57,12 +57,6 @@ class AppSettings:
     route_history_message_chars: int = field(
         default_factory=lambda: int(os.getenv("ROUTE_HISTORY_MESSAGE_CHARS", "600"))
     )
-    route_catalog_chars: int = field(
-        default_factory=lambda: int(os.getenv("ROUTE_CATALOG_CHARS", "3000"))
-    )
-    route_catalog_document_chars: int = field(
-        default_factory=lambda: int(os.getenv("ROUTE_CATALOG_DOCUMENT_CHARS", "360"))
-    )
     target_catalog_chars: int = field(
         default_factory=lambda: int(os.getenv("TARGET_CATALOG_CHARS", "3000"))
     )
@@ -116,8 +110,6 @@ class AppSettings:
             raise ValueError("OLLAMA_TIMEOUT_SECONDS must be positive.")
         if (
             self.route_history_message_chars <= 0
-            or self.route_catalog_chars <= 0
-            or self.route_catalog_document_chars <= 0
             or self.target_catalog_chars <= 0
             or self.target_catalog_document_chars <= 0
             or self.target_descriptor_chars <= 0

@@ -1492,6 +1492,7 @@ def route_classifier_prompt(
             "Do not choose DIRECT by guessing, assuming, or reconstructing file content.",
             "attached_this_turn=true is a relevance signal, not an automatic RAG decision.",
             "Transforming a preceding direct answer remains DIRECT; continuing a document-grounded answer remains RAG.",
+            "If the referenced conversation source is absent, choose DIRECT so the assistant can ask for it.",
             'Return JSON only: {"route":"direct"} or {"route":"rag"}.',
         ]
     else:
@@ -1503,7 +1504,8 @@ def route_classifier_prompt(
             "Do not choose DIRECT by guessing, assuming, inventing, or reconstructing what a document might contain. If the requested answer must be checked against the uploaded material, choose RAG.",
             "Explaining general IELTS strategy is DIRECT. Explaining instructions or strategy for a specific named uploaded test, numbered question range, or uploaded visual is RAG because the exact task must first be checked.",
             "For follow-ups, use the prior successful route and content: transforming or expanding a preceding direct answer remains DIRECT unless the current request asks to use uploaded material; a follow-up that depends on a preceding document-grounded answer remains RAG.",
-            "The uploaded catalog only describes what is available. Its presence alone does not make an independent request RAG.",
+            "If a request refers to conversation content that is absent, choose DIRECT so the assistant can ask for the missing source. Do not infer an uploaded source from document availability alone.",
+            "The existence of uploaded documents alone does not make an independent request RAG.",
             "The marker attached_this_turn=true means the user attached that file with the current request. It is a relevance signal, not sufficient by itself to choose RAG.",
             "Do not answer the user, classify intent, choose a document, or explain the decision.",
             'Return one JSON object only: {"route":"direct"} or {"route":"rag"}.',
@@ -1514,7 +1516,7 @@ def route_classifier_prompt(
         parts.append(f"Previous conversation:\n{history_text}")
     if document_context:
         parts.append(
-            "Structured routing context (metadata only; it does not preselect a document):\n"
+            "Routing environment (availability only; no document identity or content):\n"
             f"{document_context}"
         )
     parts.append(

@@ -1658,9 +1658,9 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(history_text), 1_230)
         self.assertIn("\n...\n", history_text)
 
-    def test_route_classifier_prompt_includes_metadata_and_highlights_request(self) -> None:
-        document_context = (
-            "- file=reading.pdf; attached_this_turn=true; sections=Urban transport"
+    def test_route_classifier_prompt_includes_environment_and_highlights_request(self) -> None:
+        document_context = json.dumps(
+            {"documents_available": True, "attached_this_turn": True}
         )
 
         prompt = llm.route_classifier_prompt(
@@ -1668,12 +1668,12 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             document_context=document_context,
         )
 
-        self.assertIn("Structured routing context (metadata only", prompt)
-        self.assertIn("file=reading.pdf", prompt)
+        self.assertIn("Routing environment (availability only", prompt)
+        self.assertNotIn("reading.pdf", prompt)
         self.assertIn("=== CURRENT REQUEST TO CLASSIFY ===\nTranslate Questions 1-4.", prompt)
         self.assertIn("translating uploaded content", prompt)
         self.assertIn("Do not choose DIRECT by guessing", prompt)
-        self.assertIn("attached_this_turn=true", prompt)
+        self.assertIn('"attached_this_turn": true', prompt)
         self.assertIn("not sufficient by itself to choose RAG", prompt)
         self.assertIn("numbered question range", prompt)
 
@@ -1690,6 +1690,7 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Do not choose DIRECT by guessing", compact_prompt)
         self.assertIn("not an automatic RAG decision", compact_prompt)
         self.assertIn("Transforming a preceding direct answer remains DIRECT", compact_prompt)
+        self.assertIn("referenced conversation source is absent", compact_prompt)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')
