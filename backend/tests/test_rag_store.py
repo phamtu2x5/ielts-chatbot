@@ -1826,9 +1826,47 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("current user message as the authoritative task", instructions)
         self.assertIn("Match the requested task shape exactly", instructions)
-        self.assertIn("source text from prior USER messages", instructions)
-        self.assertIn("ask for it in one sentence", instructions)
-        self.assertIn("Never substitute or replay a prior assistant answer", instructions)
+        self.assertIn("content the user sent", instructions)
+        self.assertIn("immediately preceding ASSISTANT answer", instructions)
+
+    def test_direct_operations_resolve_the_requested_conversation_source(self) -> None:
+        task = (
+            "Nations should spend more money on skills and vocational training for practical "
+            "work, rather than on university education. To what extent do you agree or disagree?"
+        )
+        first_message = f'Dịch đề IELTS Writing Task 2 sau: "{task}"'
+        first = llm.direct_conversation_operation(first_message, None)
+        history = [
+            ChatMessage(role="user", content=first_message),
+            ChatMessage(role="assistant", content="Các quốc gia nên đầu tư nhiều hơn vào đào tạo nghề."),
+        ]
+        second = llm.direct_conversation_operation(
+            "Viết đoạn văn cho đề bài trên tôi vừa gửi.",
+            history,
+        )
+        essay = "Đào tạo nghề giúp người lao động có được những kỹ năng thực tế."
+        history.extend(
+            [
+                ChatMessage(role="user", content="Viết đoạn văn cho đề bài trên tôi vừa gửi."),
+                ChatMessage(role="assistant", content=essay),
+            ]
+        )
+        third = llm.direct_conversation_operation("Dịch sang tiếng Anh.", history)
+
+        self.assertEqual(first, ("direct_translation", task))
+        self.assertEqual(second, ("writing_generation", task))
+        self.assertEqual(third, ("direct_translation", essay))
+        third_prompt = llm.direct_answer_prompt("Dịch sang tiếng Anh.", history)
+        self.assertIn(essay, third_prompt)
+        self.assertNotIn(task, third_prompt)
+        self.assertEqual(
+            response_output_contract(
+                "Dịch sang tiếng Anh.",
+                "direct_translation",
+                allow_solution=False,
+            ).language,
+            "English",
+        )
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')

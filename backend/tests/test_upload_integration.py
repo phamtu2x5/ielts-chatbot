@@ -922,6 +922,36 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("why it helps", advice.prompt)
         self.assertEqual(store.probe_dense_flags, [])
 
+    async def test_direct_conversation_writing_uses_english_writing_contract(self) -> None:
+        task = (
+            "Nations should spend more money on skills and vocational training for practical "
+            "work, rather than on university education."
+        )
+        history = [
+            {"role": "user", "content": f'Dịch đề IELTS Writing Task 2 sau: "{task}"'},
+            {"role": "assistant", "content": "Các quốc gia nên đầu tư nhiều hơn vào đào tạo nghề."},
+        ]
+        with (
+            patch.object(main, "get_store", return_value=_FakeChatStore([])),
+            patch.object(
+                main,
+                "classify_chat_route",
+                AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
+            ),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Viết đoạn văn cho đề bài trên tôi vừa gửi.",
+                    conversation_history=history,
+                    conversation_state={"last_route": "direct"},
+                )
+            )
+
+        self.assertEqual(prepared.route_used, "base_model")
+        self.assertEqual(prepared.query_intent, "writing_generation")
+        self.assertIn(task, prepared.prompt)
+        self.assertIn("Write the requested IELTS response in English", prepared.prompt)
+
     async def test_generic_ielts_categories_do_not_trigger_document_ambiguity(self) -> None:
         catalog = [
             {

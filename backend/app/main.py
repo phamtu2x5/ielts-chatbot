@@ -37,6 +37,7 @@ from .llm import (
     RouteGatewayDecision,
     classify_rag_intent,
     direct_chat_messages,
+    direct_conversation_operation,
     direct_answer_prompt,
     extract_user_facts,
     is_rag_no_match_output,
@@ -912,7 +913,7 @@ def no_rag_match_response(message: str) -> str:
 
 
 def generation_temperature(prepared: "ChatPreparation") -> float:
-    if is_writing_response(prepared):
+    if is_writing_response(prepared) or prepared.query_intent == "direct_translation":
         return 0.1
     return 0.2 if prepared.route_used.startswith("vector_rag") else 0.7
 
@@ -1244,7 +1245,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             }
         enforce_review_contract = requires_reviewed_generation(prepared, message)
         should_retry = bool(issues) and (
-            prepared.query_intent == "translate_questions"
+            prepared.query_intent in {"translate_questions", "direct_translation"}
             or (
                 enforce_review_contract
                 and any("not written in" in issue for issue in issues)
@@ -1263,7 +1264,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
         if should_retry:
             retry_prompt = (
                 translation_retry_prompt(prompt, contract)
-                if prepared.query_intent == "translate_questions"
+                if prepared.query_intent in {"translate_questions", "direct_translation"}
                 else response_retry_prompt(prompt, contract, prepared.query_intent)
             )
             retry = await query_ollama(
@@ -2141,6 +2142,11 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     }
 
     if route == "direct":
+        direct_operation = direct_conversation_operation(
+            message,
+            req.conversation_history,
+        )
+        direct_intent = direct_operation[0] if direct_operation else "direct"
         return ChatPreparation(
             prompt=direct_answer_prompt(
                 message,
@@ -2152,13 +2158,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             sources=[],
             debug={
                 "route_decision": "direct",
-                "query_intent": "direct",
+                "query_intent": direct_intent,
                 "route_gateway": gateway_debug,
                 "document_resolution": {"skipped": True, "reason": "direct_route"},
                 "intent_classifier": {"skipped": True, "reason": "direct_route"},
                 "direct_generation": {
                     "used": True,
-                    "response_contract": "adaptive_direct_answer",
+                    "response_contract": direct_intent,
                     "primary_endpoint": "generate",
                     "fallback_endpoint": "chat",
                     "fallback_used": False,
@@ -2167,7 +2173,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
                 "source_count": 0,
             },
-            query_intent="direct",
+            query_intent=direct_intent,
         )
 
     has_safe_rag_fallback = bool(
