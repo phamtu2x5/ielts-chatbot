@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -37,8 +38,9 @@ from .llm import (
     RouteGatewayDecision,
     classify_rag_intent,
     direct_chat_messages,
-    direct_conversation_operation,
     direct_answer_prompt,
+    direct_operation_has_source,
+    direct_source_candidates,
     extract_user_facts,
     is_rag_no_match_output,
     query_ollama_chat,
@@ -49,11 +51,11 @@ from .llm import (
     response_language_debug,
     response_output_penalty,
     response_retry_prompt,
+    resolve_direct_operation,
     resolve_rag_target,
     classify_chat_route,
     select_best_writing_output,
     select_best_response_output,
-    should_force_direct_conversation_followup,
     stream_ollama,
     translation_retry_prompt,
     writing_output_contract,
@@ -1163,7 +1165,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
     answer = await query_ollama(prompt, temperature=generation_temperature(prepared))
 
     if is_writing_response(prepared):
-        contract = writing_output_contract(message)
+        contract = writing_output_contract(message, prepared.output_language)
         issues = writing_output_issues(answer, contract)
         generation_debug = prepared.debug.setdefault("generation", {})
         generation_debug["writing_contract"] = {
@@ -1210,6 +1212,7 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             prepared.query_intent,
             allow_solution=allow_solution,
             explicit_no_solution=has_explicit_no_solution_constraint(message),
+            output_language=prepared.output_language,
         )
         solve_report = (
             prepared.debug.get("retrieval", {}).get("solve_context_report", {})
@@ -1921,6 +1924,7 @@ class ChatPreparation:
     sources: list[dict[str, Any]]
     debug: dict[str, Any]
     query_intent: str = "direct"
+    output_language: str | None = None
     user_fact_updates: list[ChatUserFact] = field(default_factory=list)
 
 
@@ -2106,30 +2110,39 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         )
         if part
     )
-    gateway_decision = await classify_chat_route(
+    direct_candidates = direct_source_candidates(
         message,
         req.conversation_history,
-        gateway_state_context(req),
-        route_catalog_context,
     )
-    route = gateway_decision.route
-    force_direct = (
-        not (scope.request_mode == "explicit" and scope.resolved_document_ids)
-        and should_force_direct_conversation_followup(
+    gateway_decision, direct_operation = await asyncio.gather(
+        classify_chat_route(
             message,
             req.conversation_history,
-            req.conversation_state.last_route if req.conversation_state else None,
-        )
+            gateway_state_context(req),
+            route_catalog_context,
+        ),
+        resolve_direct_operation(
+            message,
+            req.conversation_history,
+        ),
     )
-    if force_direct:
-        route = "direct"
+    conversation_source_selected = direct_operation_has_source(
+        direct_operation,
+        direct_candidates,
+    )
+    route = "direct" if conversation_source_selected else gateway_decision.route
     route_catalog_count = sum(
         line.startswith("- file=") for line in route_catalog_context.splitlines()
     )
     gateway_debug = {
         "used": True,
         **gateway_decision.to_debug(),
-        "safety_override": "conversation_source_followup" if force_direct else None,
+        "safety_override": (
+            "resolved_conversation_source"
+            if conversation_source_selected and gateway_decision.route != "direct"
+            else None
+        ),
+        "conversation_source_resolver": direct_operation.to_debug(),
         "catalog_context": {
             "order": "same_turn_attachments_then_recent_ingestion",
             "available_documents": len(full_catalog),
@@ -2142,16 +2155,23 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     }
 
     if route == "direct":
-        direct_operation = direct_conversation_operation(
-            message,
-            req.conversation_history,
+        direct_intent = {
+            "translate": "direct_translation",
+            "writing_generation": "writing_generation",
+        }.get(direct_operation.operation, "direct")
+        output_language = (
+            direct_operation.target_language
+            if direct_operation.target_language in {"English", "Vietnamese"}
+            else None
         )
-        direct_intent = direct_operation[0] if direct_operation else "direct"
+        direct_source = direct_candidates.get(direct_operation.source_ref, "")
         return ChatPreparation(
             prompt=direct_answer_prompt(
                 message,
                 req.conversation_history,
                 user_profile_context(req),
+                direct_operation,
+                direct_source,
             ),
             static_response=None,
             route_used="base_model",
@@ -2165,6 +2185,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 "direct_generation": {
                     "used": True,
                     "response_contract": direct_intent,
+                    "operation_resolver": direct_operation.to_debug(),
                     "primary_endpoint": "generate",
                     "fallback_endpoint": "chat",
                     "fallback_used": False,
@@ -2174,6 +2195,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 "source_count": 0,
             },
             query_intent=direct_intent,
+            output_language=output_language,
         )
 
     has_safe_rag_fallback = bool(

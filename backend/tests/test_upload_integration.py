@@ -53,7 +53,12 @@ except ImportError:
 
 from app import main
 from app.document_pipeline.models import DocumentChunk, ProcessedDocument, ProcessedPage
-from app.llm import IntentClassifierDecision, RouteGatewayDecision, TargetResolverDecision
+from app.llm import (
+    DirectOperationDecision,
+    IntentClassifierDecision,
+    RouteGatewayDecision,
+    TargetResolverDecision,
+)
 
 
 def _gateway_decision(
@@ -271,10 +276,26 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
             ),
         )
+        self.direct_operation_patcher = patch.object(
+            main,
+            "resolve_direct_operation",
+            AsyncMock(
+                return_value=DirectOperationDecision(
+                    operation="answer",
+                    source_ref="NONE",
+                    target_language="unspecified",
+                    attempts=1,
+                    duration_seconds=0.01,
+                    raw_output_preview="",
+                )
+            ),
+        )
         self.intent_patcher.start()
         self.target_patcher.start()
+        self.direct_operation_patcher.start()
 
     async def asyncTearDown(self) -> None:
+        self.direct_operation_patcher.stop()
         self.intent_patcher.stop()
         self.target_patcher.stop()
 
@@ -922,15 +943,19 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("why it helps", advice.prompt)
         self.assertEqual(store.probe_dense_flags, [])
 
-    async def test_direct_conversation_writing_uses_english_writing_contract(self) -> None:
-        task = (
-            "Nations should spend more money on skills and vocational training for practical "
-            "work, rather than on university education."
-        )
+    async def test_direct_source_resolver_controls_route_source_and_contract(self) -> None:
         history = [
-            {"role": "user", "content": f'Dịch đề IELTS Writing Task 2 sau: "{task}"'},
-            {"role": "assistant", "content": "Các quốc gia nên đầu tư nhiều hơn vào đào tạo nghề."},
+            {"role": "user", "content": "Source supplied by the user"},
+            {"role": "assistant", "content": "Output produced by the assistant"},
         ]
+        decision = DirectOperationDecision(
+            operation="writing_generation",
+            source_ref="U1",
+            target_language="English",
+            attempts=1,
+            duration_seconds=0.01,
+            raw_output_preview="",
+        )
         with (
             patch.object(main, "get_store", return_value=_FakeChatStore([])),
             patch.object(
@@ -938,19 +963,28 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "classify_chat_route",
                 AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
             ),
+            patch.object(
+                main,
+                "resolve_direct_operation",
+                AsyncMock(return_value=decision),
+            ),
         ):
             prepared = await main.prepare_chat(
                 main.ChatRequest(
-                    message="Viết đoạn văn cho đề bài trên tôi vừa gửi.",
+                    message="Current generation request",
                     conversation_history=history,
-                    conversation_state={"last_route": "direct"},
                 )
             )
 
         self.assertEqual(prepared.route_used, "base_model")
         self.assertEqual(prepared.query_intent, "writing_generation")
-        self.assertIn(task, prepared.prompt)
-        self.assertIn("Write the requested IELTS response in English", prepared.prompt)
+        self.assertEqual(prepared.output_language, "English")
+        self.assertIn("Source supplied by the user", prepared.prompt)
+        self.assertNotIn("Output produced by the assistant", prepared.prompt)
+        self.assertEqual(
+            prepared.debug["route_gateway"]["safety_override"],
+            "resolved_conversation_source",
+        )
 
     async def test_generic_ielts_categories_do_not_trigger_document_ambiguity(self) -> None:
         catalog = [

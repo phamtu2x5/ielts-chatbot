@@ -49,7 +49,6 @@ from app.llm import (
     response_retry_prompt,
     select_best_response_output,
     select_best_writing_output,
-    should_force_direct_conversation_followup,
     translation_retry_prompt,
     writing_output_contract,
     writing_output_issues,
@@ -1673,98 +1672,22 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Structured routing context (metadata only", prompt)
         self.assertIn("file=reading.pdf", prompt)
         self.assertIn("=== CURRENT REQUEST TO CLASSIFY ===\nTranslate Questions 1-4.", prompt)
-        self.assertIn("translating uploaded content", prompt)
         self.assertIn("Do not choose DIRECT by guessing", prompt)
         self.assertIn("attached_this_turn=true", prompt)
-        self.assertIn("not sufficient by itself to choose RAG", prompt)
-        self.assertIn("numbered question range", prompt)
+        self.assertIn("not automatic route decisions", prompt)
 
-    def test_route_classifier_uses_document_dependency_not_topic_domain(self) -> None:
+    def test_route_classifier_uses_semantic_source_dependency(self) -> None:
         prompt = llm.route_classifier_prompt("Explain a common technology concept.")
         compact_prompt = llm.route_classifier_prompt(
             "Explain a common technology concept.",
             compact=True,
         )
 
-        self.assertIn("DIRECT: the answer is independent of uploaded-file content", prompt)
-        self.assertIn("RAG: the answer needs to know or verify any specific content", prompt)
-        self.assertNotIn("if the uploaded files were unavailable", prompt)
+        self.assertIn("content already present in the conversation", prompt)
+        self.assertIn("must be read from or verified against uploaded material", prompt)
+        self.assertIn("Resolve source references semantically", prompt)
         self.assertIn("Do not choose DIRECT by guessing", compact_prompt)
-        self.assertIn("not an automatic RAG decision", compact_prompt)
-        self.assertIn("previous_answer_source=conversation", compact_prompt)
-
-    def test_route_classifier_treats_user_supplied_source_as_conversation_content(self) -> None:
-        prompt = llm.route_classifier_prompt(
-            "Write a paragraph from the prompt I sent above.",
-            [
-                ChatMessage(role="user", content="Translate this prompt: People should work fewer hours."),
-                ChatMessage(role="assistant", content="Mọi người nên làm việc ít giờ hơn."),
-            ],
-            document_context="- file=writing.pdf; type=ielts_writing",
-        )
-        compact_prompt = llm.route_classifier_prompt(
-            "Translate the text above.",
-            document_context="- file=writing.pdf; type=ielts_writing",
-            compact=True,
-        )
-
-        self.assertIn("current or previous USER messages is DIRECT", prompt)
-        self.assertIn("current message overrides earlier operations", prompt)
-        self.assertIn("ask the user to provide the missing source", prompt)
-        self.assertIn("current or previous user messages is DIRECT", compact_prompt)
-        self.assertIn("assistant can ask for the missing source", compact_prompt)
-
-    def test_route_classifier_keeps_follow_up_on_conversation_content_direct(self) -> None:
-        history = [
-            ChatMessage(role="user", content="Dịch đề Writing Task 2 này: Some people work harder."),
-            ChatMessage(role="assistant", content="Trong giáo dục và nghề nghiệp, một số người làm việc chăm chỉ hơn."),
-        ]
-        state = json.dumps(
-            {
-                "last_route": "direct",
-                "last_intent": "direct",
-                "has_rag_affinity": False,
-                "previous_answer_source": "conversation",
-            }
-        )
-
-        prompt = llm.route_classifier_prompt(
-            "Hãy viết một đoạn khoảng 150 từ cho đề bài tôi vừa gửi trên.",
-            history,
-            state,
-            "- file=reading.pdf; type=ielts_reading",
-        )
-        compact_prompt = llm.route_classifier_prompt(
-            "Tip dành riêng cho Reading thì sao?",
-            history,
-            state,
-            "- file=reading.pdf; type=ielts_reading",
-            compact=True,
-        )
-
-        self.assertIn("pasted or typed in the conversation", prompt)
-        self.assertIn("previous_answer_source=conversation", prompt)
-        self.assertIn(
-            "refining, translating, reformatting, or writing from it is DIRECT",
-            prompt,
-        )
-        self.assertIn("previous_answer_source=conversation", compact_prompt)
-        self.assertIn("remains DIRECT", compact_prompt)
-
-        self.assertTrue(
-            should_force_direct_conversation_followup(
-                "Hãy viết đoạn paragraph khoảng 250 từ cho đề bài tôi vừa gửi trên.",
-                history,
-                "direct",
-            )
-        )
-        self.assertFalse(
-            should_force_direct_conversation_followup(
-                "Hãy viết từ đề trong ảnh tôi vừa gửi.",
-                history,
-                "direct",
-            )
-        )
+        self.assertIn("topic labels and catalog presence are not source dependencies", compact_prompt)
 
     def test_no_match_output_is_removed_from_history_and_prompt_echo_is_invalid(self) -> None:
         no_match = "I cannot find this information in the selected uploaded material."
@@ -1812,61 +1735,76 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("previous_answer_source=uploaded_material", prompt)
-        self.assertIn("depends on that answer remains RAG", prompt)
-        self.assertFalse(
-            should_force_direct_conversation_followup(
-                "Hãy giải thích nội dung vừa gửi trên.",
-                history,
-                "rag",
-            )
-        )
+        self.assertIn("Resolve source references semantically", prompt)
 
     def test_direct_answer_contract_prioritizes_current_request_and_user_source(self) -> None:
         instructions = "\n".join(llm.direct_answer_instructions())
 
         self.assertIn("current user message as the authoritative task", instructions)
         self.assertIn("Match the requested task shape exactly", instructions)
-        self.assertIn("content the user sent", instructions)
-        self.assertIn("immediately preceding ASSISTANT answer", instructions)
+        self.assertIn("resolved conversation source", instructions)
 
-    def test_direct_operations_resolve_the_requested_conversation_source(self) -> None:
-        task = (
-            "Nations should spend more money on skills and vocational training for practical "
-            "work, rather than on university education. To what extent do you agree or disagree?"
-        )
-        first_message = f'Dịch đề IELTS Writing Task 2 sau: "{task}"'
-        first = llm.direct_conversation_operation(first_message, None)
+    async def test_direct_operation_resolver_selects_validated_turn_references(self) -> None:
         history = [
-            ChatMessage(role="user", content=first_message),
-            ChatMessage(role="assistant", content="Các quốc gia nên đầu tư nhiều hơn vào đào tạo nghề."),
+            ChatMessage(role="user", content="Older source text"),
+            ChatMessage(role="assistant", content="Older transformed output"),
+            ChatMessage(role="user", content="Most recent source text"),
+            ChatMessage(role="assistant", content="Most recent transformed output"),
         ]
-        second = llm.direct_conversation_operation(
-            "Viết đoạn văn cho đề bài trên tôi vừa gửi.",
-            history,
+        model = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "operation": "translate",
+                    "source_ref": "A1",
+                    "target_language": "English",
+                }
+            )
         )
-        essay = "Đào tạo nghề giúp người lao động có được những kỹ năng thực tế."
-        history.extend(
-            [
-                ChatMessage(role="user", content="Viết đoạn văn cho đề bài trên tôi vừa gửi."),
-                ChatMessage(role="assistant", content=essay),
-            ]
-        )
-        third = llm.direct_conversation_operation("Dịch sang tiếng Anh.", history)
+        with patch.object(llm, "query_ollama", model):
+            decision = await llm.resolve_direct_operation(
+                "Apply the requested transformation.",
+                history,
+            )
 
-        self.assertEqual(first, ("direct_translation", task))
-        self.assertEqual(second, ("writing_generation", task))
-        self.assertEqual(third, ("direct_translation", essay))
-        third_prompt = llm.direct_answer_prompt("Dịch sang tiếng Anh.", history)
-        self.assertIn(essay, third_prompt)
-        self.assertNotIn(task, third_prompt)
-        self.assertEqual(
-            response_output_contract(
-                "Dịch sang tiếng Anh.",
-                "direct_translation",
-                allow_solution=False,
-            ).language,
-            "English",
+        candidates = llm.direct_source_candidates("Current request", history)
+        self.assertEqual(candidates["A1"], "Most recent transformed output")
+        self.assertEqual(candidates["U1"], "Most recent source text")
+        self.assertEqual(candidates["A2"], "Older transformed output")
+        self.assertEqual(decision.operation, "translate")
+        self.assertEqual(decision.source_ref, "A1")
+        self.assertEqual(decision.target_language, "English")
+        self.assertIn('"ref": "A1"', model.await_args.args[0])
+        with self.assertRaises(llm.OllamaRequestError):
+            llm.parse_direct_operation_response(
+                '{"operation":"translate","source_ref":"A9","target_language":"English"}',
+                set(candidates),
+            )
+        with patch.object(llm, "query_ollama", AsyncMock(return_value='{"invalid":true}')):
+            fallback = await llm.resolve_direct_operation("Ambiguous request", history)
+        self.assertEqual((fallback.operation, fallback.source_ref), ("clarify", "NONE"))
+
+    def test_direct_prompt_is_scoped_to_the_resolved_source(self) -> None:
+        history = [
+            ChatMessage(role="user", content="Unselected user source"),
+            ChatMessage(role="assistant", content="Selected assistant source"),
+        ]
+        decision = llm.DirectOperationDecision(
+            operation="rewrite",
+            source_ref="A1",
+            target_language="source",
+            attempts=1,
+            duration_seconds=0.01,
+            raw_output_preview="",
         )
+        prompt = llm.direct_answer_prompt(
+            "Current transformation request",
+            history,
+            operation_decision=decision,
+            source="Selected assistant source",
+        )
+
+        self.assertIn("Selected assistant source", prompt)
+        self.assertNotIn("Unselected user source", prompt)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')
