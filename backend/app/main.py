@@ -2205,6 +2205,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         for reference, document_id in gateway_context.document_refs.items()
         if affinity and document_id in affinity.document_ids
     )
+    has_target_evidence = bool(evidence_candidates or affinity_document_refs)
     target_decision = (
         await resolve_rag_target(
             message,
@@ -2212,7 +2213,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             req.conversation_history,
             affinity_document_refs,
         )
-        if needs_target_model and deterministic_candidate is None
+        if needs_target_model and deterministic_candidate is None and has_target_evidence
         else None
     )
     use_affinity_context = False
@@ -2275,7 +2276,11 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 : settings.target_clarification_max_candidates
             ]
         document_resolution_debug = {
-            "method": "semantic_target_clarify",
+            "method": (
+                "semantic_target_clarify"
+                if has_target_evidence
+                else "no_target_evidence"
+            ),
             **(target_decision.to_debug() if target_decision else {}),
             "candidate_document_ids": clarification_document_ids,
             "invalid_candidate_refs": invalid_candidate_refs,
