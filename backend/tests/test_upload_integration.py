@@ -951,6 +951,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         decision = DirectOperationDecision(
             operation="writing_generation",
             source_ref="U1",
+            source_text="Source supplied by the user",
             target_language="English",
             attempts=1,
             duration_seconds=0.01,
@@ -985,6 +986,53 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             prepared.debug["route_gateway"]["safety_override"],
             "resolved_conversation_source",
         )
+
+    async def test_attached_document_source_cannot_be_forced_onto_direct_route(self) -> None:
+        catalog = [
+            {
+                "source_file": "topic.png",
+                "document_ids": ["doc-topic"],
+                "document_types": [],
+                "mime_types": ["image/png"],
+            }
+        ]
+        store = _FakeChatStore(catalog)
+        decision = DirectOperationDecision(
+            operation="translate",
+            source_ref="D1",
+            source_text="",
+            target_language="Vietnamese",
+            attempts=1,
+            duration_seconds=0.01,
+            raw_output_preview="",
+        )
+        with (
+            patch.object(main, "get_store", return_value=store),
+            patch.object(
+                main,
+                "classify_chat_route",
+                AsyncMock(return_value=_gateway_decision("direct", "direct")),
+            ),
+            patch.object(
+                main,
+                "resolve_direct_operation",
+                AsyncMock(return_value=decision),
+            ),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Translate the topic shown above.",
+                    document_ids=["doc-topic"],
+                    document_scope="explicit",
+                )
+            )
+
+        self.assertNotEqual(prepared.route_used, "base_model")
+        self.assertEqual(
+            prepared.debug["route_gateway"]["safety_override"],
+            "resolved_document_source",
+        )
+        self.assertEqual(store.routing_document_ids, [["doc-topic"]])
 
     async def test_generic_ielts_categories_do_not_trigger_document_ambiguity(self) -> None:
         catalog = [

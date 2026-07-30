@@ -1756,6 +1756,7 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "operation": "translate",
                     "source_ref": "A1",
+                    "source_text": "Most recent transformed output",
                     "target_language": "English",
                 }
             )
@@ -1772,16 +1773,63 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(candidates["A2"], "Older transformed output")
         self.assertEqual(decision.operation, "translate")
         self.assertEqual(decision.source_ref, "A1")
+        self.assertEqual(decision.source_text, "Most recent transformed output")
         self.assertEqual(decision.target_language, "English")
         self.assertIn('"ref": "A1"', model.await_args.args[0])
         with self.assertRaises(llm.OllamaRequestError):
             llm.parse_direct_operation_response(
-                '{"operation":"translate","source_ref":"A9","target_language":"English"}',
-                set(candidates),
+                '{"operation":"translate","source_ref":"A9","source_text":"missing","target_language":"English"}',
+                candidates,
             )
         with patch.object(llm, "query_ollama", AsyncMock(return_value='{"invalid":true}')):
             fallback = await llm.resolve_direct_operation("Ambiguous request", history)
         self.assertEqual((fallback.operation, fallback.source_ref), ("clarify", "NONE"))
+
+    def test_direct_operation_requires_source_evidence_and_accepts_documents(self) -> None:
+        candidates = {
+            "C0": "Translate this text: A complete source sentence.",
+            "D1": "Attached document: topic.png",
+        }
+        inline = llm.parse_direct_operation_response(
+            json.dumps(
+                {
+                    "operation": "translate",
+                    "source_ref": "C0",
+                    "source_text": "A complete source sentence.",
+                    "target_language": "Vietnamese",
+                }
+            ),
+            candidates,
+            {"D1"},
+        )
+        document = llm.parse_direct_operation_response(
+            json.dumps(
+                {
+                    "operation": "translate",
+                    "source_ref": "D1",
+                    "source_text": "",
+                    "target_language": "Vietnamese",
+                }
+            ),
+            candidates,
+            {"D1"},
+        )
+
+        self.assertEqual(inline.source_text, "A complete source sentence.")
+        self.assertEqual(document.source_ref, "D1")
+        with self.assertRaises(llm.OllamaRequestError):
+            llm.parse_direct_operation_response(
+                json.dumps(
+                    {
+                        "operation": "writing_generation",
+                        "source_ref": "C0",
+                        "source_text": candidates["C0"],
+                        "target_language": "English",
+                    }
+                ),
+                candidates,
+                {"D1"},
+            )
 
     def test_direct_prompt_is_scoped_to_the_resolved_source(self) -> None:
         history = [

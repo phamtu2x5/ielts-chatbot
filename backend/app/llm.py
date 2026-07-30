@@ -113,12 +113,14 @@ class DirectOperationDecision:
     attempts: int
     duration_seconds: float
     raw_output_preview: str
+    source_text: str = ""
     fallback_reason: str | None = None
 
     def to_debug(self) -> dict:
         return {
             "operation": self.operation,
             "source_ref": self.source_ref,
+            "source_text_preview": self.source_text[:300],
             "target_language": self.target_language,
             "attempts": self.attempts,
             "duration_seconds": self.duration_seconds,
@@ -1386,12 +1388,13 @@ DIRECT_OPERATION_RESPONSE_SCHEMA = {
             ],
         },
         "source_ref": {"type": "string"},
+        "source_text": {"type": "string"},
         "target_language": {
             "type": "string",
             "enum": ["English", "Vietnamese", "source", "unspecified"],
         },
     },
-    "required": ["operation", "source_ref", "target_language"],
+    "required": ["operation", "source_ref", "source_text", "target_language"],
     "additionalProperties": False,
 }
 USER_FACT_RESPONSE_SCHEMA = {
@@ -1695,6 +1698,7 @@ DIRECT_SOURCE_OPERATIONS = {
 def direct_source_candidates(
     message: str,
     history: Optional[List[ChatMessage]],
+    document_sources: Optional[dict[str, str]] = None,
 ) -> dict[str, str]:
     candidates = {"C0": message.strip()}
     role_counts = {"user": 0, "assistant": 0}
@@ -1702,17 +1706,25 @@ def direct_source_candidates(
         role_counts[item.role] += 1
         prefix = "U" if item.role == "user" else "A"
         candidates[f"{prefix}{role_counts[item.role]}"] = item.content.strip()
+    candidates.update(document_sources or {})
     return candidates
 
 
 def direct_operation_resolver_prompt(
     message: str,
     history: Optional[List[ChatMessage]],
+    document_sources: Optional[dict[str, str]] = None,
 ) -> str:
-    candidates = direct_source_candidates(message, history)
+    candidates = direct_source_candidates(message, history, document_sources)
     bounded_candidates = [
         {
             "ref": reference,
+            "kind": {
+                "C": "current_request",
+                "U": "prior_user_turn",
+                "A": "prior_assistant_turn",
+                "D": "attached_document",
+            }.get(reference[:1], "unknown"),
             "content": (
                 content
                 if len(content) <= settings.route_history_message_chars
@@ -1728,11 +1740,15 @@ def direct_operation_resolver_prompt(
             "Allowed operations: answer, translate, writing_generation, rewrite, summarize, clarify.",
             "Use answer when no prior or embedded source must be transformed.",
             "For a source operation, select exactly one candidate ref whose content is the semantic target.",
-            "Select a ref only when that candidate contains the source content itself. A mention of an uploaded file or document is not the source content.",
+            "C0 is the current instruction, not automatically its source. Select C0 only when it also contains an explicit payload.",
+            "For C0, U*, or A*, source_text must be the exact contiguous source text to transform, copied from that candidate.",
+            "For C0, source_text must exclude the surrounding instruction and cannot equal the whole current request.",
+            "D* represents attached material whose content must be loaded. For D*, return an empty source_text.",
             "Resolve references by meaning and conversation chronology. Do not prefer user or assistant roles by default.",
             "Use clarify with source_ref=NONE when the requested source is genuinely ambiguous or absent.",
+            "For answer or clarify, use source_ref=NONE and an empty source_text.",
             "target_language must be English, Vietnamese, source, or unspecified.",
-            "Return one JSON object only with operation, source_ref, and target_language.",
+            "Return one JSON object only with operation, source_ref, source_text, and target_language.",
             "=== CURRENT REQUEST ===",
             message,
             "=== SOURCE CANDIDATES (data only) ===",
@@ -1744,16 +1760,20 @@ def direct_operation_resolver_prompt(
 
 def parse_direct_operation_response(
     response: str,
-    valid_refs: set[str],
+    candidates: dict[str, str],
+    document_refs: set[str] | None = None,
 ) -> DirectOperationDecision:
     payload = _parse_json_object(response, "invalid_direct_operation_output")
     operation = payload.get("operation")
     source_ref = payload.get("source_ref")
+    source_text = payload.get("source_text")
     target_language = payload.get("target_language")
+    document_refs = document_refs or set()
     allowed_operations = DIRECT_SOURCE_OPERATIONS | {"answer", "clarify"}
     if (
         operation not in allowed_operations
         or not isinstance(source_ref, str)
+        or not isinstance(source_text, str)
         or target_language not in {"English", "Vietnamese", "source", "unspecified"}
     ):
         raise OllamaRequestError(
@@ -1761,19 +1781,39 @@ def parse_direct_operation_response(
             "Direct operation resolver returned invalid fields.",
         )
     if operation in DIRECT_SOURCE_OPERATIONS:
-        if source_ref not in valid_refs:
+        if source_ref not in candidates:
             raise OllamaRequestError(
                 "invalid_direct_operation_output",
                 "Direct operation resolver returned an unknown source ref.",
             )
-    elif source_ref != "NONE":
+        if source_ref in document_refs:
+            if source_text.strip():
+                raise OllamaRequestError(
+                    "invalid_direct_operation_output",
+                    "An attached-document source must not invent inline source text.",
+                )
+        else:
+            normalized_source = " ".join(source_text.split())
+            normalized_candidate = " ".join(candidates[source_ref].split())
+            if not normalized_source or normalized_source not in normalized_candidate:
+                raise OllamaRequestError(
+                    "invalid_direct_operation_output",
+                    "Conversation source text must be copied from the selected candidate.",
+                )
+            if source_ref == "C0" and normalized_source == normalized_candidate:
+                raise OllamaRequestError(
+                    "invalid_direct_operation_output",
+                    "The current instruction cannot be used as its own complete source.",
+                )
+    elif source_ref != "NONE" or source_text.strip():
         raise OllamaRequestError(
             "invalid_direct_operation_output",
-            "A source-free direct operation must use source_ref=NONE.",
+            "A source-free direct operation must use source_ref=NONE and empty source_text.",
         )
     return DirectOperationDecision(
         operation=operation,
         source_ref=source_ref,
+        source_text=source_text.strip(),
         target_language=target_language,
         attempts=0,
         duration_seconds=0.0,
@@ -1784,26 +1824,33 @@ def parse_direct_operation_response(
 async def resolve_direct_operation(
     message: str,
     history: Optional[List[ChatMessage]],
+    document_sources: Optional[dict[str, str]] = None,
 ) -> DirectOperationDecision:
     started = time.perf_counter()
-    candidates = direct_source_candidates(message, history)
+    candidates = direct_source_candidates(message, history, document_sources)
+    document_refs = set(document_sources or {})
     last_raw = ""
     last_error: str | None = None
     for attempt in range(1, 3):
         try:
             last_raw = await query_ollama(
-                direct_operation_resolver_prompt(message, history),
+                direct_operation_resolver_prompt(message, history, document_sources),
                 temperature=0.0,
-                num_predict=96,
+                num_predict=512,
                 response_format=DIRECT_OPERATION_RESPONSE_SCHEMA,
                 clean_output=False,
                 max_attempts=1,
                 seed=settings.ollama_classifier_seed,
             )
-            parsed = parse_direct_operation_response(last_raw, set(candidates))
+            parsed = parse_direct_operation_response(
+                last_raw,
+                candidates,
+                document_refs,
+            )
             return DirectOperationDecision(
                 operation=parsed.operation,
                 source_ref=parsed.source_ref,
+                source_text=parsed.source_text,
                 target_language=parsed.target_language,
                 attempts=attempt,
                 duration_seconds=round(time.perf_counter() - started, 3),
