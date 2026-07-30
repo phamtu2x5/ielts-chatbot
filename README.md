@@ -48,7 +48,7 @@ User-provided profile facts are stored separately from document affinity. Only
 successful direct or grounded RAG results may update the trusted route, intent,
 and affinity; clarification, no-match, and classifier failures preserve the
 previous trusted state.
-The frontend and the 66-case capture runner use this single chat endpoint.
+The frontend and the 78-case capture runner use this single chat endpoint.
 
 ### Current chat patch boundaries
 
@@ -68,7 +68,7 @@ The current baseline intentionally separates routing responsibilities:
 4. Structured lookup/retrieval and generation then operate only inside the
    resolved document scope.
 
-The 66-case runner follows this same product path through `/chat/stream`. It sends
+The 78-case runner follows this same product path through `/chat/stream`. It sends
 `document_ids=null`, `document_scope="available"`, and no conversation state for
 each independent case. `expected_target_files` remains report-only ground truth;
 it is never included in the chat request, so it cannot leak the answer document
@@ -226,7 +226,7 @@ backend with all models warmed up, then run:
 python backend/tools/chat_evaluation.py --base-url http://127.0.0.1:8765
 ```
 
-The runner verifies and uploads all seven files in `docs/`, sends the 66 independent questions
+The runner verifies and uploads all seven files in `docs/`, sends the 78 independent questions
 from `backend/evaluation/chat_corpus_v2.json`, and writes the raw answers, routes,
 resolved document IDs, conversation state, sources and debug metadata under
 `backend/data/chat_evaluation/`. It does not

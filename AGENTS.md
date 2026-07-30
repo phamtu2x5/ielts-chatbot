@@ -284,7 +284,7 @@ Patch boundaries:
 - Patch 1 owns only the final RAG intent enum after the document is resolved.
 - The frontend and evaluation runner use `/chat/stream`, the only chat endpoint.
 - Evaluation ground truth such as `expected_target_files` is report-only and
-  must never be sent as `document_ids` in the 66-case requests.
+  must never be sent as `document_ids` in the 78-case requests.
 
 Intent policy:
 

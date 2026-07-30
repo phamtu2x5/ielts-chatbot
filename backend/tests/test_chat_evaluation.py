@@ -46,6 +46,7 @@ class ChatEvaluationManifestTests(unittest.TestCase):
         verified = verify_corpus(self.manifest, CORPUS_DIR)
         self.assertEqual(len(verified), len(documents))
         cases = self.manifest["cases"]
+        self.assertEqual(len(cases), 78)
         ids = [case["id"] for case in cases]
         self.assertEqual(len(ids), len(set(ids)))
         filenames = {document["filename"] for document in documents}
