@@ -38,7 +38,6 @@ from app.intent import (
 from app.llm import (
     clean_response,
     has_malformed_markdown_table,
-    is_rag_no_match_output,
     likely_contains_solution,
     looks_like_prompt_echo,
     rag_prompt,
@@ -1672,187 +1671,25 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Structured routing context (metadata only", prompt)
         self.assertIn("file=reading.pdf", prompt)
         self.assertIn("=== CURRENT REQUEST TO CLASSIFY ===\nTranslate Questions 1-4.", prompt)
+        self.assertIn("translating uploaded content", prompt)
         self.assertIn("Do not choose DIRECT by guessing", prompt)
         self.assertIn("attached_this_turn=true", prompt)
-        self.assertIn("not automatic route decisions", prompt)
+        self.assertIn("not sufficient by itself to choose RAG", prompt)
+        self.assertIn("numbered question range", prompt)
 
-    def test_route_classifier_uses_semantic_source_dependency(self) -> None:
+    def test_route_classifier_uses_document_dependency_not_topic_domain(self) -> None:
         prompt = llm.route_classifier_prompt("Explain a common technology concept.")
         compact_prompt = llm.route_classifier_prompt(
             "Explain a common technology concept.",
             compact=True,
         )
 
-        self.assertIn("content already present in the conversation", prompt)
-        self.assertIn("must be read from or verified against uploaded material", prompt)
-        self.assertIn("Resolve source references semantically", prompt)
+        self.assertIn("DIRECT: the answer is independent of uploaded-file content", prompt)
+        self.assertIn("RAG: the answer needs to know or verify any specific content", prompt)
+        self.assertNotIn("if the uploaded files were unavailable", prompt)
         self.assertIn("Do not choose DIRECT by guessing", compact_prompt)
-        self.assertIn("topic labels and catalog presence are not source dependencies", compact_prompt)
-
-    def test_no_match_output_is_removed_from_history_and_prompt_echo_is_invalid(self) -> None:
-        no_match = "I cannot find this information in the selected uploaded material."
-        history = [
-            ChatMessage(role="user", content="Write from the prompt above."),
-            ChatMessage(
-                role="assistant",
-                content=f"{no_match}\n\nCurrent user message: là sao vậy",
-            ),
-            ChatMessage(role="user", content="là sao vậy"),
-        ]
-        contract = response_output_contract("là sao vậy", "direct", allow_solution=False)
-        formatted = llm.format_history(history)
-
-        self.assertTrue(is_rag_no_match_output(no_match))
-        self.assertNotIn(no_match, formatted)
-        self.assertNotIn("Write from the prompt above.", formatted)
-        self.assertIn(
-            "conversation role prefix",
-            response_output_issues(
-                f"{no_match}\n\nCurrent user message: là sao vậy",
-                contract,
-            )[0],
-        )
-
-    def test_route_classifier_keeps_document_grounded_follow_up_rag(self) -> None:
-        history = [
-            ChatMessage(role="user", content="Tóm tắt tài liệu vừa tải."),
-            ChatMessage(role="assistant", content="Tài liệu gồm ba passage."),
-        ]
-        state = json.dumps(
-            {
-                "last_route": "rag",
-                "last_intent": "document_overview",
-                "has_rag_affinity": True,
-                "previous_answer_source": "uploaded_material",
-            }
-        )
-
-        prompt = llm.route_classifier_prompt(
-            "Passage 2 nói gì?",
-            history,
-            state,
-            "- file=reading.pdf; type=ielts_reading",
-        )
-
-        self.assertIn("previous_answer_source=uploaded_material", prompt)
-        self.assertIn("Resolve source references semantically", prompt)
-
-    def test_direct_answer_contract_prioritizes_current_request_and_user_source(self) -> None:
-        instructions = "\n".join(llm.direct_answer_instructions())
-
-        self.assertIn("current user message as the authoritative task", instructions)
-        self.assertIn("Match the requested task shape exactly", instructions)
-        self.assertIn("resolved conversation source", instructions)
-
-    async def test_direct_operation_resolver_selects_validated_turn_references(self) -> None:
-        history = [
-            ChatMessage(role="user", content="Older source text"),
-            ChatMessage(role="assistant", content="Older transformed output"),
-            ChatMessage(role="user", content="Most recent source text"),
-            ChatMessage(role="assistant", content="Most recent transformed output"),
-        ]
-        model = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "operation": "translate",
-                    "source_ref": "A1",
-                    "source_text": "Most recent transformed output",
-                    "target_language": "English",
-                }
-            )
-        )
-        with patch.object(llm, "query_ollama", model):
-            decision = await llm.resolve_direct_operation(
-                "Apply the requested transformation.",
-                history,
-            )
-
-        candidates = llm.direct_source_candidates("Current request", history)
-        self.assertEqual(candidates["A1"], "Most recent transformed output")
-        self.assertEqual(candidates["U1"], "Most recent source text")
-        self.assertEqual(candidates["A2"], "Older transformed output")
-        self.assertEqual(decision.operation, "translate")
-        self.assertEqual(decision.source_ref, "A1")
-        self.assertEqual(decision.source_text, "Most recent transformed output")
-        self.assertEqual(decision.target_language, "English")
-        self.assertIn('"ref": "A1"', model.await_args.args[0])
-        with self.assertRaises(llm.OllamaRequestError):
-            llm.parse_direct_operation_response(
-                '{"operation":"translate","source_ref":"A9","source_text":"missing","target_language":"English"}',
-                candidates,
-            )
-        with patch.object(llm, "query_ollama", AsyncMock(return_value='{"invalid":true}')):
-            fallback = await llm.resolve_direct_operation("Ambiguous request", history)
-        self.assertEqual((fallback.operation, fallback.source_ref), ("clarify", "NONE"))
-
-    def test_direct_operation_requires_source_evidence_and_accepts_documents(self) -> None:
-        candidates = {
-            "C0": "Translate this text: A complete source sentence.",
-            "D1": "Attached document: topic.png",
-        }
-        inline = llm.parse_direct_operation_response(
-            json.dumps(
-                {
-                    "operation": "translate",
-                    "source_ref": "C0",
-                    "source_text": "A complete source sentence.",
-                    "target_language": "Vietnamese",
-                }
-            ),
-            candidates,
-            {"D1"},
-        )
-        document = llm.parse_direct_operation_response(
-            json.dumps(
-                {
-                    "operation": "translate",
-                    "source_ref": "D1",
-                    "source_text": "",
-                    "target_language": "Vietnamese",
-                }
-            ),
-            candidates,
-            {"D1"},
-        )
-
-        self.assertEqual(inline.source_text, "A complete source sentence.")
-        self.assertEqual(document.source_ref, "D1")
-        with self.assertRaises(llm.OllamaRequestError):
-            llm.parse_direct_operation_response(
-                json.dumps(
-                    {
-                        "operation": "writing_generation",
-                        "source_ref": "C0",
-                        "source_text": candidates["C0"],
-                        "target_language": "English",
-                    }
-                ),
-                candidates,
-                {"D1"},
-            )
-
-    def test_direct_prompt_is_scoped_to_the_resolved_source(self) -> None:
-        history = [
-            ChatMessage(role="user", content="Unselected user source"),
-            ChatMessage(role="assistant", content="Selected assistant source"),
-        ]
-        decision = llm.DirectOperationDecision(
-            operation="rewrite",
-            source_ref="A1",
-            target_language="source",
-            attempts=1,
-            duration_seconds=0.01,
-            raw_output_preview="",
-        )
-        prompt = llm.direct_answer_prompt(
-            "Current transformation request",
-            history,
-            operation_decision=decision,
-            source="Selected assistant source",
-        )
-
-        self.assertIn("Selected assistant source", prompt)
-        self.assertNotIn("Unselected user source", prompt)
+        self.assertIn("not an automatic RAG decision", compact_prompt)
+        self.assertIn("Transforming a preceding direct answer remains DIRECT", compact_prompt)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')

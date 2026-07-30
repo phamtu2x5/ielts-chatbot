@@ -53,12 +53,7 @@ except ImportError:
 
 from app import main
 from app.document_pipeline.models import DocumentChunk, ProcessedDocument, ProcessedPage
-from app.llm import (
-    DirectOperationDecision,
-    IntentClassifierDecision,
-    RouteGatewayDecision,
-    TargetResolverDecision,
-)
+from app.llm import IntentClassifierDecision, RouteGatewayDecision, TargetResolverDecision
 
 
 def _gateway_decision(
@@ -276,26 +271,10 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 )
             ),
         )
-        self.direct_operation_patcher = patch.object(
-            main,
-            "resolve_direct_operation",
-            AsyncMock(
-                return_value=DirectOperationDecision(
-                    operation="answer",
-                    source_ref="NONE",
-                    target_language="unspecified",
-                    attempts=1,
-                    duration_seconds=0.01,
-                    raw_output_preview="",
-                )
-            ),
-        )
         self.intent_patcher.start()
         self.target_patcher.start()
-        self.direct_operation_patcher.start()
 
     async def asyncTearDown(self) -> None:
-        self.direct_operation_patcher.stop()
         self.intent_patcher.stop()
         self.target_patcher.stop()
 
@@ -943,97 +922,6 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("why it helps", advice.prompt)
         self.assertEqual(store.probe_dense_flags, [])
 
-    async def test_direct_source_resolver_controls_route_source_and_contract(self) -> None:
-        history = [
-            {"role": "user", "content": "Source supplied by the user"},
-            {"role": "assistant", "content": "Output produced by the assistant"},
-        ]
-        decision = DirectOperationDecision(
-            operation="writing_generation",
-            source_ref="U1",
-            source_text="Source supplied by the user",
-            target_language="English",
-            attempts=1,
-            duration_seconds=0.01,
-            raw_output_preview="",
-        )
-        with (
-            patch.object(main, "get_store", return_value=_FakeChatStore([])),
-            patch.object(
-                main,
-                "classify_chat_route",
-                AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
-            ),
-            patch.object(
-                main,
-                "resolve_direct_operation",
-                AsyncMock(return_value=decision),
-            ),
-        ):
-            prepared = await main.prepare_chat(
-                main.ChatRequest(
-                    message="Current generation request",
-                    conversation_history=history,
-                )
-            )
-
-        self.assertEqual(prepared.route_used, "base_model")
-        self.assertEqual(prepared.query_intent, "writing_generation")
-        self.assertEqual(prepared.output_language, "English")
-        self.assertIn("Source supplied by the user", prepared.prompt)
-        self.assertNotIn("Output produced by the assistant", prepared.prompt)
-        self.assertEqual(
-            prepared.debug["route_gateway"]["safety_override"],
-            "resolved_conversation_source",
-        )
-
-    async def test_attached_document_source_cannot_be_forced_onto_direct_route(self) -> None:
-        catalog = [
-            {
-                "source_file": "topic.png",
-                "document_ids": ["doc-topic"],
-                "document_types": [],
-                "mime_types": ["image/png"],
-            }
-        ]
-        store = _FakeChatStore(catalog)
-        decision = DirectOperationDecision(
-            operation="translate",
-            source_ref="D1",
-            source_text="",
-            target_language="Vietnamese",
-            attempts=1,
-            duration_seconds=0.01,
-            raw_output_preview="",
-        )
-        with (
-            patch.object(main, "get_store", return_value=store),
-            patch.object(
-                main,
-                "classify_chat_route",
-                AsyncMock(return_value=_gateway_decision("direct", "direct")),
-            ),
-            patch.object(
-                main,
-                "resolve_direct_operation",
-                AsyncMock(return_value=decision),
-            ),
-        ):
-            prepared = await main.prepare_chat(
-                main.ChatRequest(
-                    message="Translate the topic shown above.",
-                    document_ids=["doc-topic"],
-                    document_scope="explicit",
-                )
-            )
-
-        self.assertNotEqual(prepared.route_used, "base_model")
-        self.assertEqual(
-            prepared.debug["route_gateway"]["safety_override"],
-            "resolved_document_source",
-        )
-        self.assertEqual(store.routing_document_ids, [["doc-topic"]])
-
     async def test_generic_ielts_categories_do_not_trigger_document_ambiguity(self) -> None:
         catalog = [
             {
@@ -1481,31 +1369,9 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         document_context = gateway.await_args.args[3]
         self.assertIn('"last_route": "rag"', state_context)
         self.assertIn('"has_rag_affinity": true', state_context)
-        self.assertIn('"previous_answer_source": "uploaded_material"', state_context)
         self.assertNotIn("doc-1", state_context)
         self.assertNotIn("14", state_context)
         self.assertNotIn("attached_this_turn", document_context)
-
-    def test_gateway_state_marks_direct_answer_as_conversation_content(self) -> None:
-        request = main.ChatRequest(
-            message="Chi tiết hơn.",
-            conversation_state={
-                "last_route": "direct",
-                "last_intent": "direct",
-                "rag_affinity": {
-                    "document_ids": ["doc-1"],
-                    "passage_numbers": [2],
-                    "question_ranges": [[14, 17]],
-                },
-            },
-        )
-
-        state_context = main.gateway_state_context(request)
-
-        self.assertIn('"last_route": "direct"', state_context)
-        self.assertIn('"previous_answer_source": "conversation"', state_context)
-        self.assertNotIn("doc-1", state_context)
-        self.assertNotIn("14", state_context)
 
     async def test_gateway_can_request_rag_with_an_explicit_document_scope(self) -> None:
         catalog = [
@@ -1565,33 +1431,6 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             prepared = await main.prepare_chat(main.ChatRequest(message="Liệt kê Questions 1-4"))
 
         self.assertEqual(prepared.route_used, "vector_rag_ambiguous_document")
-        self.assertIn("Vui lòng nêu tên file", prepared.static_response)
-
-    async def test_zero_score_candidates_skip_target_model_and_request_a_file(self) -> None:
-        catalog = [
-            {"source_file": "reading.pdf", "document_ids": ["doc-reading"]},
-            {"source_file": "writing.png", "document_ids": ["doc-writing"]},
-        ]
-        target_resolver = AsyncMock()
-        with (
-            patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
-            patch.object(
-                main,
-                "classify_chat_route",
-                AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
-            ),
-            patch.object(main, "resolve_rag_target", target_resolver),
-        ):
-            prepared = await main.prepare_chat(
-                main.ChatRequest(message="Nội dung cụ thể là gì?")
-            )
-
-        target_resolver.assert_not_awaited()
-        self.assertEqual(prepared.route_used, "vector_rag_ambiguous_document")
-        self.assertEqual(
-            prepared.debug["document_resolution"]["method"],
-            "no_target_evidence",
-        )
         self.assertIn("Vui lòng nêu tên file", prepared.static_response)
 
     async def test_unique_metadata_candidate_skips_target_model(self) -> None:
