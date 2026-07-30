@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -34,9 +35,12 @@ from .llm import (
     OLLAMA_NUM_PREDICT,
     ROUTING_INTENTS,
     OllamaRequestError,
+    RouteGatewayDecision,
     classify_rag_intent,
     direct_chat_messages,
     direct_answer_prompt,
+    direct_operation_has_source,
+    direct_source_candidates,
     extract_user_facts,
     is_rag_no_match_output,
     query_ollama_chat,
@@ -47,7 +51,7 @@ from .llm import (
     response_language_debug,
     response_output_penalty,
     response_retry_prompt,
-    classify_direct_operation,
+    resolve_direct_operation,
     resolve_rag_target,
     classify_chat_route,
     select_best_writing_output,
@@ -2106,29 +2110,61 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         )
         if part
     )
-    explicit_document_scope = (
-        req.document_scope == "explicit" and bool(scope.allowed_document_ids)
+    attached_ids = set(
+        req.document_ids
+        if req.document_scope == "explicit" and req.document_ids
+        else []
     )
-    gateway_source_context = "\n".join(
-        part
-        for part in (
-            format_route_request_anchors(message),
-            "current_attachment_scope=true" if explicit_document_scope else "",
-            (
-                "current_request_matches_uploaded_metadata=true"
-                if scope.document_grounded
-                else ""
-            ),
+    attached_catalog = [
+        item
+        for item in full_catalog
+        if attached_ids.intersection(item.get("document_ids") or [])
+    ]
+    document_source_ids: dict[str, list[str]] = {}
+    document_sources: dict[str, str] = {}
+    for index, item in enumerate(attached_catalog, 1):
+        reference = f"D{index}"
+        document_source_ids[reference] = [
+            document_id
+            for document_id in item.get("document_ids") or []
+            if document_id in attached_ids
+        ]
+        document_sources[reference] = (
+            f"Attached document: {item.get('source_file', 'unknown')}; "
+            f"types={', '.join(item.get('document_types') or []) or 'unknown'}"
         )
-        if part
-    )
-    gateway_decision = await classify_chat_route(
+    direct_candidates = direct_source_candidates(
         message,
         req.conversation_history,
-        gateway_state_context(req),
-        gateway_source_context,
+        document_sources,
     )
-    route = "rag" if explicit_document_scope else gateway_decision.route
+    gateway_decision, direct_operation = await asyncio.gather(
+        classify_chat_route(
+            message,
+            req.conversation_history,
+            gateway_state_context(req),
+            route_catalog_context,
+        ),
+        resolve_direct_operation(
+            message,
+            req.conversation_history,
+            document_sources,
+        ),
+    )
+    conversation_source_selected = direct_operation_has_source(
+        direct_operation,
+        direct_candidates,
+    ) and direct_operation.source_ref not in document_source_ids
+    document_source_selected = (
+        direct_operation.operation in {"translate", "writing_generation", "rewrite", "summarize"}
+        and direct_operation.source_ref in document_source_ids
+    )
+    if document_source_selected:
+        route = "rag"
+    elif conversation_source_selected:
+        route = "direct"
+    else:
+        route = gateway_decision.route
     route_catalog_count = sum(
         line.startswith("- file=") for line in route_catalog_context.splitlines()
     )
@@ -2136,10 +2172,15 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         "used": True,
         **gateway_decision.to_debug(),
         "safety_override": (
-            "explicit_document_scope"
-            if explicit_document_scope and gateway_decision.route != "rag"
-            else None
+            "resolved_document_source"
+            if document_source_selected and gateway_decision.route != "rag"
+            else (
+                "resolved_conversation_source"
+                if conversation_source_selected and gateway_decision.route != "direct"
+                else None
+            )
         ),
+        "conversation_source_resolver": direct_operation.to_debug(),
         "catalog_context": {
             "order": "same_turn_attachments_then_recent_ingestion",
             "available_documents": len(full_catalog),
@@ -2152,11 +2193,6 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     }
 
     if route == "direct":
-        direct_operation = await classify_direct_operation(
-            message,
-            req.conversation_history,
-        )
-        gateway_debug["direct_operation_classifier"] = direct_operation.to_debug()
         direct_intent = {
             "translate": "direct_translation",
             "writing_generation": "writing_generation",
@@ -2166,12 +2202,17 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             if direct_operation.target_language in {"English", "Vietnamese"}
             else None
         )
+        direct_source = (
+            direct_operation.source_text
+            or direct_candidates.get(direct_operation.source_ref, "")
+        )
         return ChatPreparation(
             prompt=direct_answer_prompt(
                 message,
                 req.conversation_history,
                 user_profile_context(req),
                 direct_operation,
+                direct_source,
             ),
             static_response=None,
             route_used="base_model",
@@ -2185,7 +2226,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 "direct_generation": {
                     "used": True,
                     "response_contract": direct_intent,
-                    "operation_classifier": direct_operation.to_debug(),
+                    "operation_resolver": direct_operation.to_debug(),
                     "primary_endpoint": "generate",
                     "fallback_endpoint": "chat",
                     "fallback_used": False,
@@ -2224,11 +2265,11 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         route = "rag"
         gateway_debug["fallback_reason"] = "valid_document_scope_or_rag_affinity"
 
-    gateway_debug["direct_operation_classifier"] = {
-        "used": False,
-        "reason": "rag_route",
-    }
-    scope_ids = list(scope.resolved_document_ids)
+    scope_ids = (
+        document_source_ids.get(direct_operation.source_ref, [])
+        if document_source_selected
+        else list(scope.resolved_document_ids)
+    )
     needs_target_model = not scope_ids and len(allowed_scope_ids) > 1
     ranked_candidates = (
         rank_document_candidates(

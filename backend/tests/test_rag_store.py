@@ -1742,9 +1742,9 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("current user message as the authoritative task", instructions)
         self.assertIn("Match the requested task shape exactly", instructions)
-        self.assertIn("current message or relevant prior conversation", instructions)
+        self.assertIn("resolved conversation source", instructions)
 
-    async def test_direct_operation_classifier_only_returns_operation_and_language(self) -> None:
+    async def test_direct_operation_resolver_selects_validated_turn_references(self) -> None:
         history = [
             ChatMessage(role="user", content="Older source text"),
             ChatMessage(role="assistant", content="Older transformed output"),
@@ -1755,36 +1755,90 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             return_value=json.dumps(
                 {
                     "operation": "translate",
+                    "source_ref": "A1",
+                    "source_text": "Most recent transformed output",
                     "target_language": "English",
                 }
             )
         )
         with patch.object(llm, "query_ollama", model):
-            decision = await llm.classify_direct_operation(
+            decision = await llm.resolve_direct_operation(
                 "Apply the requested transformation.",
                 history,
             )
 
+        candidates = llm.direct_source_candidates("Current request", history)
+        self.assertEqual(candidates["A1"], "Most recent transformed output")
+        self.assertEqual(candidates["U1"], "Most recent source text")
+        self.assertEqual(candidates["A2"], "Older transformed output")
         self.assertEqual(decision.operation, "translate")
+        self.assertEqual(decision.source_ref, "A1")
+        self.assertEqual(decision.source_text, "Most recent transformed output")
         self.assertEqual(decision.target_language, "English")
-        self.assertIn("Most recent transformed output", model.await_args.args[0])
-        self.assertIn("Do not select, copy, extract", model.await_args.args[0])
+        self.assertIn('"ref": "A1"', model.await_args.args[0])
         with self.assertRaises(llm.OllamaRequestError):
             llm.parse_direct_operation_response(
-                '{"operation":"invalid","target_language":"English"}',
+                '{"operation":"translate","source_ref":"A9","source_text":"missing","target_language":"English"}',
+                candidates,
             )
         with patch.object(llm, "query_ollama", AsyncMock(return_value='{"invalid":true}')):
-            fallback = await llm.classify_direct_operation("Ambiguous request", history)
-        self.assertEqual(fallback.operation, "answer")
-        self.assertEqual(fallback.attempts, 1)
+            fallback = await llm.resolve_direct_operation("Ambiguous request", history)
+        self.assertEqual((fallback.operation, fallback.source_ref), ("clarify", "NONE"))
 
-    def test_direct_operation_prompt_keeps_bounded_conversation_context(self) -> None:
+    def test_direct_operation_requires_source_evidence_and_accepts_documents(self) -> None:
+        candidates = {
+            "C0": "Translate this text: A complete source sentence.",
+            "D1": "Attached document: topic.png",
+        }
+        inline = llm.parse_direct_operation_response(
+            json.dumps(
+                {
+                    "operation": "translate",
+                    "source_ref": "C0",
+                    "source_text": "A complete source sentence.",
+                    "target_language": "Vietnamese",
+                }
+            ),
+            candidates,
+            {"D1"},
+        )
+        document = llm.parse_direct_operation_response(
+            json.dumps(
+                {
+                    "operation": "translate",
+                    "source_ref": "D1",
+                    "source_text": "",
+                    "target_language": "Vietnamese",
+                }
+            ),
+            candidates,
+            {"D1"},
+        )
+
+        self.assertEqual(inline.source_text, "A complete source sentence.")
+        self.assertEqual(document.source_ref, "D1")
+        with self.assertRaises(llm.OllamaRequestError):
+            llm.parse_direct_operation_response(
+                json.dumps(
+                    {
+                        "operation": "writing_generation",
+                        "source_ref": "C0",
+                        "source_text": candidates["C0"],
+                        "target_language": "English",
+                    }
+                ),
+                candidates,
+                {"D1"},
+            )
+
+    def test_direct_prompt_is_scoped_to_the_resolved_source(self) -> None:
         history = [
             ChatMessage(role="user", content="Unselected user source"),
             ChatMessage(role="assistant", content="Selected assistant source"),
         ]
         decision = llm.DirectOperationDecision(
             operation="rewrite",
+            source_ref="A1",
             target_language="source",
             attempts=1,
             duration_seconds=0.01,
@@ -1794,11 +1848,11 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             "Current transformation request",
             history,
             operation_decision=decision,
+            source="Selected assistant source",
         )
 
         self.assertIn("Selected assistant source", prompt)
-        self.assertIn("Unselected user source", prompt)
-        self.assertIn("Current user message:\nCurrent transformation request", prompt)
+        self.assertNotIn("Unselected user source", prompt)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')

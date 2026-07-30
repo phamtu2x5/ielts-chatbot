@@ -278,10 +278,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.direct_operation_patcher = patch.object(
             main,
-            "classify_direct_operation",
+            "resolve_direct_operation",
             AsyncMock(
                 return_value=DirectOperationDecision(
                     operation="answer",
+                    source_ref="NONE",
                     target_language="unspecified",
                     attempts=1,
                     duration_seconds=0.01,
@@ -698,7 +699,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["sources"], [])
         self.assertTrue(any(event["type"] == "done" for event in events))
 
-    async def test_single_explicit_document_cannot_fall_back_to_direct(self) -> None:
+    async def test_single_explicit_document_still_uses_direct_rag_gateway(self) -> None:
         catalog = [
             {"source_file": "reading.pdf", "document_ids": ["doc-1"], "mime_types": ["application/pdf"]},
             {"source_file": "other.pdf", "document_ids": ["doc-2"], "mime_types": ["application/pdf"]},
@@ -720,12 +721,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         target.assert_not_awaited()
         gateway.assert_awaited_once()
-        self.assertEqual(prepared.route_used, "vector_rag_no_match")
-        self.assertEqual(prepared.debug["route_decision"], "rag")
-        self.assertEqual(
-            prepared.debug["route_gateway"]["safety_override"],
-            "explicit_document_scope",
-        )
+        self.assertEqual(prepared.route_used, "base_model")
+        self.assertEqual(prepared.debug["route_decision"], "direct")
 
     async def test_intent_failure_does_not_fall_back_to_semantic_qa(self) -> None:
         catalog = [
@@ -946,13 +943,15 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("why it helps", advice.prompt)
         self.assertEqual(store.probe_dense_flags, [])
 
-    async def test_direct_operation_classifier_sets_contract_without_changing_route(self) -> None:
+    async def test_direct_source_resolver_controls_route_source_and_contract(self) -> None:
         history = [
             {"role": "user", "content": "Source supplied by the user"},
             {"role": "assistant", "content": "Output produced by the assistant"},
         ]
         decision = DirectOperationDecision(
             operation="writing_generation",
+            source_ref="U1",
+            source_text="Source supplied by the user",
             target_language="English",
             attempts=1,
             duration_seconds=0.01,
@@ -963,11 +962,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 main,
                 "classify_chat_route",
-                AsyncMock(return_value=_gateway_decision("direct", "direct")),
+                AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
             ),
             patch.object(
                 main,
-                "classify_direct_operation",
+                "resolve_direct_operation",
                 AsyncMock(return_value=decision),
             ),
         ):
@@ -982,8 +981,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.query_intent, "writing_generation")
         self.assertEqual(prepared.output_language, "English")
         self.assertIn("Source supplied by the user", prepared.prompt)
-        self.assertIn("Output produced by the assistant", prepared.prompt)
-        self.assertIsNone(prepared.debug["route_gateway"]["safety_override"])
+        self.assertNotIn("Output produced by the assistant", prepared.prompt)
+        self.assertEqual(
+            prepared.debug["route_gateway"]["safety_override"],
+            "resolved_conversation_source",
+        )
 
     async def test_attached_document_source_cannot_be_forced_onto_direct_route(self) -> None:
         catalog = [
@@ -995,7 +997,15 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
         store = _FakeChatStore(catalog)
-        operation_classifier = AsyncMock()
+        decision = DirectOperationDecision(
+            operation="translate",
+            source_ref="D1",
+            source_text="",
+            target_language="Vietnamese",
+            attempts=1,
+            duration_seconds=0.01,
+            raw_output_preview="",
+        )
         with (
             patch.object(main, "get_store", return_value=store),
             patch.object(
@@ -1005,8 +1015,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 main,
-                "classify_direct_operation",
-                operation_classifier,
+                "resolve_direct_operation",
+                AsyncMock(return_value=decision),
             ),
         ):
             prepared = await main.prepare_chat(
@@ -1020,9 +1030,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(prepared.route_used, "base_model")
         self.assertEqual(
             prepared.debug["route_gateway"]["safety_override"],
-            "explicit_document_scope",
+            "resolved_document_source",
         )
-        operation_classifier.assert_not_awaited()
         self.assertEqual(store.routing_document_ids, [["doc-topic"]])
 
     async def test_generic_ielts_categories_do_not_trigger_document_ambiguity(self) -> None:
@@ -1228,7 +1237,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(prepared.static_response)
         self.assertIn("Give me three IELTS Speaking tips.", prepared.prompt)
 
-    async def test_semantic_gateway_receives_source_flags_without_retrieval_snippets(self) -> None:
+    async def test_semantic_gateway_receives_bounded_catalog_but_not_retrieval_snippets(self) -> None:
         catalog = [
             {
                 "source_file": "reading.pdf",
@@ -1276,11 +1285,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         state_context = gateway.await_args.args[2]
         document_context = gateway.await_args.args[3]
         self.assertEqual(state_context, "")
-        self.assertEqual(
-            document_context,
-            "current_attachment_scope=true\ncurrent_request_matches_uploaded_metadata=true",
-        )
+        self.assertIn("file=reading.pdf", document_context)
+        self.assertIn("attached_this_turn=true", document_context)
+        self.assertIn("sections=Urban transport", document_context)
         self.assertNotIn("rail network expanded", document_context)
+        self.assertLessEqual(len(document_context), main.settings.route_catalog_chars)
         self.assertEqual(prepared.debug["document_resolution"]["resolved_document_ids"], ["doc-1"])
         self.assertEqual(store.routing_candidates, [
             {
