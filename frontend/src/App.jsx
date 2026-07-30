@@ -365,6 +365,11 @@ function App() {
     const selectedFiles = Array.from(event.target.files || []);
     if (!selectedFiles.length) return;
 
+    queueFiles(selectedFiles);
+    event.target.value = "";
+  }
+
+  function queueFiles(selectedFiles) {
     setPendingFiles((current) => {
       const existing = new Set(current.map((item) => item.id));
       const additions = selectedFiles
@@ -377,7 +382,33 @@ function App() {
         .filter((item) => !existing.has(item.id));
       return [...current, ...additions];
     });
-    event.target.value = "";
+  }
+
+  function pasteImages(event) {
+    const supportedTypes = new Set(["image/png", "image/jpeg", "image/webp"]);
+    const pastedImages = Array.from(event.clipboardData?.items || [])
+      .filter((item) => item.kind === "file" && supportedTypes.has(item.type))
+      .map((item) => item.getAsFile())
+      .filter(Boolean);
+    if (!pastedImages.length) return;
+
+    event.preventDefault();
+    const timestamp = new Date().toISOString().replace(/\D/g, "").slice(0, 14);
+    const extensions = {
+      "image/png": "png",
+      "image/jpeg": "jpg",
+      "image/webp": "webp",
+    };
+    queueFiles(
+      pastedImages.map(
+        (file, index) =>
+          new File(
+            [file],
+            `clipboard-image-${timestamp}-${index + 1}.${extensions[file.type]}`,
+            { type: file.type, lastModified: Date.now() + index }
+          )
+      )
+    );
   }
 
   function updateAttachment(messageId, attachmentId, changes) {
@@ -774,13 +805,14 @@ function App() {
             <textarea
               value={input}
               onChange={(event) => setInput(event.target.value)}
+              onPaste={pasteImages}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
                   sendMessage(event);
                 }
               }}
-              placeholder="Nhập câu hỏi IELTS..."
+              placeholder="Nhập câu hỏi IELTS hoặc dán ảnh..."
               rows={1}
             />
             <button
