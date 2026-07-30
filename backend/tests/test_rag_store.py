@@ -38,6 +38,7 @@ from app.intent import (
 from app.llm import (
     clean_response,
     has_malformed_markdown_table,
+    is_rag_no_match_output,
     likely_contains_solution,
     looks_like_prompt_echo,
     rag_prompt,
@@ -48,6 +49,7 @@ from app.llm import (
     response_retry_prompt,
     select_best_response_output,
     select_best_writing_output,
+    should_force_direct_conversation_followup,
     translation_retry_prompt,
     writing_output_contract,
     writing_output_issues,
@@ -1749,6 +1751,45 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("previous_answer_source=conversation", compact_prompt)
         self.assertIn("remains DIRECT", compact_prompt)
 
+        self.assertTrue(
+            should_force_direct_conversation_followup(
+                "Hãy viết đoạn paragraph khoảng 250 từ cho đề bài tôi vừa gửi trên.",
+                history,
+                "direct",
+            )
+        )
+        self.assertFalse(
+            should_force_direct_conversation_followup(
+                "Hãy viết từ đề trong ảnh tôi vừa gửi.",
+                history,
+                "direct",
+            )
+        )
+
+    def test_no_match_output_is_removed_from_history_and_prompt_echo_is_invalid(self) -> None:
+        no_match = "I cannot find this information in the selected uploaded material."
+        history = [
+            ChatMessage(role="user", content="Write from the prompt above."),
+            ChatMessage(
+                role="assistant",
+                content=f"{no_match}\n\nCurrent user message: là sao vậy",
+            ),
+            ChatMessage(role="user", content="là sao vậy"),
+        ]
+        contract = response_output_contract("là sao vậy", "direct", allow_solution=False)
+        formatted = llm.format_history(history)
+
+        self.assertTrue(is_rag_no_match_output(no_match))
+        self.assertNotIn(no_match, formatted)
+        self.assertNotIn("Write from the prompt above.", formatted)
+        self.assertIn(
+            "conversation role prefix",
+            response_output_issues(
+                f"{no_match}\n\nCurrent user message: là sao vậy",
+                contract,
+            )[0],
+        )
+
     def test_route_classifier_keeps_document_grounded_follow_up_rag(self) -> None:
         history = [
             ChatMessage(role="user", content="Tóm tắt tài liệu vừa tải."),
@@ -1772,6 +1813,13 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("previous_answer_source=uploaded_material", prompt)
         self.assertIn("depends on that answer remains RAG", prompt)
+        self.assertFalse(
+            should_force_direct_conversation_followup(
+                "Hãy giải thích nội dung vừa gửi trên.",
+                history,
+                "rag",
+            )
+        )
 
     def test_direct_answer_contract_prioritizes_current_request_and_user_source(self) -> None:
         instructions = "\n".join(llm.direct_answer_instructions())

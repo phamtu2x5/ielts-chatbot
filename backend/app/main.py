@@ -39,6 +39,7 @@ from .llm import (
     direct_chat_messages,
     direct_answer_prompt,
     extract_user_facts,
+    is_rag_no_match_output,
     query_ollama_chat,
     query_ollama,
     rag_prompt,
@@ -51,6 +52,7 @@ from .llm import (
     classify_chat_route,
     select_best_writing_output,
     select_best_response_output,
+    should_force_direct_conversation_followup,
     stream_ollama,
     translation_retry_prompt,
     writing_output_contract,
@@ -1342,6 +1344,9 @@ async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
             generation_debug["solve_contract"]["returned_output"] = generation_candidate_debug(
                 answer
             )
+    if prepared.route_used == "vector_rag" and is_rag_no_match_output(answer):
+        prepared.route_used = "vector_rag_no_match"
+        prepared.debug.setdefault("generation", {})["no_match_guard"] = "model_no_match_output"
     return answer
 
 
@@ -2107,12 +2112,23 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         route_catalog_context,
     )
     route = gateway_decision.route
+    force_direct = (
+        not (scope.request_mode == "explicit" and scope.resolved_document_ids)
+        and should_force_direct_conversation_followup(
+            message,
+            req.conversation_history,
+            req.conversation_state.last_route if req.conversation_state else None,
+        )
+    )
+    if force_direct:
+        route = "direct"
     route_catalog_count = sum(
         line.startswith("- file=") for line in route_catalog_context.splitlines()
     )
     gateway_debug = {
         "used": True,
         **gateway_decision.to_debug(),
+        "safety_override": "conversation_source_followup" if force_direct else None,
         "catalog_context": {
             "order": "same_turn_attachments_then_recent_ingestion",
             "available_documents": len(full_catalog),

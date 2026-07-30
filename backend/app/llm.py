@@ -347,9 +347,17 @@ def _selected_history(history: Optional[List[ChatMessage]]) -> list[ChatMessage]
     if not history:
         return []
 
+    filtered: list[ChatMessage] = []
+    for message in history:
+        if message.role == "assistant" and is_rag_no_match_output(message.content):
+            if filtered and filtered[-1].role == "user":
+                filtered.pop()
+            continue
+        filtered.append(message)
+
     selected: list[ChatMessage] = []
     total_chars = 0
-    for msg in reversed(history[-8:]):
+    for msg in reversed(filtered[-8:]):
         length = len(msg.content)
         if selected and total_chars + length > 12_000:
             break
@@ -401,6 +409,14 @@ def clean_response(text: str) -> str:
         count=1,
     )
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
+
+
+def is_rag_no_match_output(text: str) -> bool:
+    normalized = " ".join(text.strip().split()).rstrip(".")
+    return any(normalized.startswith(prefix) for prefix in {
+        "I cannot find this information in the selected uploaded material",
+        "Mình không tìm thấy thông tin này trong tài liệu đã chọn",
+    })
 
 
 def writing_output_contract(message: str) -> WritingOutputContract:
@@ -613,7 +629,12 @@ def response_language_debug(
 
 def response_output_issues(text: str, contract: ResponseOutputContract) -> list[str]:
     issues: list[str] = []
-    if re.match(r"(?i)^\s*(?:user|assistant|system)\s*:", text):
+    has_role_prefix = re.match(r"(?i)^\s*(?:user|assistant|system)\s*:", text)
+    has_current_message_echo = re.search(
+        r"(?im)^\s*current\s+user\s+message\s*:",
+        text,
+    )
+    if has_role_prefix or has_current_message_echo:
         issues.append("The response starts with a conversation role prefix.")
     if contract.language == "English" and _language_mismatch_score(
         text,
@@ -1570,6 +1591,29 @@ def parse_gateway_response(response: str) -> str:
     if route not in {"direct", "rag"}:
         raise OllamaRequestError("invalid_gateway_output", "Gateway returned an invalid route.")
     return route
+
+
+CONVERSATION_REFERENCE_RE = re.compile(
+    r"(?i)\b(?:above|earlier|previous(?:ly)?|just\s+(?:sent|shared)|"
+    r"vừa\s+gửi|đã\s+gửi|ở\s+trên|phía\s+trên|trước\s+đó)\b"
+)
+EXPLICIT_UPLOADED_MATERIAL_RE = re.compile(
+    r"(?i)\b(?:uploads?|uploaded|attachments?|attached|files?|documents?|pdf|"
+    r"images?|photos?|screenshots?|tài\s+liệu|tệp|đính\s+kèm|ảnh|hình)\b"
+)
+
+
+def should_force_direct_conversation_followup(
+    message: str,
+    history: Optional[List[ChatMessage]],
+    previous_route: str | None,
+) -> bool:
+    return bool(
+        previous_route == "direct"
+        and any(item.role == "user" and item.content.strip() for item in history or [])
+        and CONVERSATION_REFERENCE_RE.search(message)
+        and not EXPLICIT_UPLOADED_MATERIAL_RE.search(message)
+    )
 
 
 async def classify_chat_route(
