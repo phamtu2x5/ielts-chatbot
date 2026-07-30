@@ -1455,6 +1455,33 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.route_used, "vector_rag_ambiguous_document")
         self.assertIn("Vui lòng nêu tên file", prepared.static_response)
 
+    async def test_zero_score_candidates_skip_target_model_and_request_a_file(self) -> None:
+        catalog = [
+            {"source_file": "reading.pdf", "document_ids": ["doc-reading"]},
+            {"source_file": "writing.png", "document_ids": ["doc-writing"]},
+        ]
+        target_resolver = AsyncMock()
+        with (
+            patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
+            patch.object(
+                main,
+                "classify_chat_route",
+                AsyncMock(return_value=_gateway_decision("rag", "semantic_qa")),
+            ),
+            patch.object(main, "resolve_rag_target", target_resolver),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(message="Nội dung cụ thể là gì?")
+            )
+
+        target_resolver.assert_not_awaited()
+        self.assertEqual(prepared.route_used, "vector_rag_ambiguous_document")
+        self.assertEqual(
+            prepared.debug["document_resolution"]["method"],
+            "no_target_evidence",
+        )
+        self.assertIn("Vui lòng nêu tên file", prepared.static_response)
+
     async def test_unique_metadata_candidate_skips_target_model(self) -> None:
         catalog = [
             {
