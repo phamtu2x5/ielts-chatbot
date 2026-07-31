@@ -1102,9 +1102,16 @@ def generation_candidate_debug(text: str, max_chars: int = 4_000) -> dict[str, A
     }
 
 
-async def generate_answer(prepared: "ChatPreparation", message: str) -> str:
+async def generate_answer(
+    prepared: "ChatPreparation",
+    message: str,
+    *,
+    initial_answer: str | None = None,
+) -> str:
     prompt = prepared.prompt or ""
-    answer = await query_ollama(prompt, temperature=generation_temperature(prepared))
+    answer = initial_answer
+    if answer is None:
+        answer = await query_ollama(prompt, temperature=generation_temperature(prepared))
 
     if is_writing_response(prepared):
         contract = writing_output_contract(message)
@@ -1995,6 +2002,17 @@ async def direct_reviewed_generation_fallback(
             temperature=generation_temperature(prepared),
         )
     except Exception as exc:
+        if isinstance(exc, OllamaRequestError) and exc.kind in {
+            "empty_response",
+            "prompt_echo",
+        }:
+            generation_debug.update(
+                {
+                    "fallback_status": "exhausted",
+                    "fallback_error": exc.kind,
+                }
+            )
+            return ""
         generation_debug.update(
             {
                 "fallback_status": "failed",
@@ -2130,7 +2148,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 "direct_generation": {
                     "used": True,
                     "response_contract": "adaptive_direct_answer",
-                    "primary_endpoint": "generate",
+                    "primary_endpoint": "chat",
                     "fallback_endpoint": "chat",
                     "fallback_used": False,
                     "previous_answer_source": previous_answer_source,
@@ -2959,33 +2977,46 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
             yield stream_event("status", message="Đang soạn câu trả lời...")
             if requires_reviewed_generation(prepared, req.message):
-                direct_fallback_enabled = (
+                direct_reviewed = (
                     prepared.query_intent == "direct"
                     and prepared.route_used == "base_model"
-                    and settings.ollama_chat_fallback
                 )
-                fallback_attempted = False
-                try:
+                direct_fallback_enabled = (
+                    direct_reviewed and settings.ollama_chat_fallback
+                )
+                if direct_reviewed:
+                    try:
+                        initial_answer = await query_ollama_chat(
+                            direct_chat_messages(
+                                req.message,
+                                req.conversation_history,
+                                user_profile_context(req),
+                                previous_answer_source=direct_conversation_source(req),
+                            ),
+                            temperature=generation_temperature(prepared),
+                        )
+                    except OllamaRequestError as exc:
+                        if not direct_fallback_enabled or exc.kind not in {
+                            "empty_response",
+                            "prompt_echo",
+                        }:
+                            raise
+                        initial_answer = await direct_reviewed_generation_fallback(
+                            prepared,
+                            req,
+                            exc.kind,
+                        )
+                    answer = (
+                        await generate_answer(
+                            prepared,
+                            req.message,
+                            initial_answer=initial_answer,
+                        )
+                        if initial_answer.strip()
+                        else ""
+                    )
+                else:
                     answer = await generate_answer(prepared, req.message)
-                except OllamaRequestError as exc:
-                    if not direct_fallback_enabled or exc.kind != "prompt_echo":
-                        raise
-                    fallback_attempted = True
-                    answer = await direct_reviewed_generation_fallback(
-                        prepared,
-                        req,
-                        exc.kind,
-                    )
-                if (
-                    direct_fallback_enabled
-                    and not fallback_attempted
-                    and not answer.strip()
-                ):
-                    answer = await direct_reviewed_generation_fallback(
-                        prepared,
-                        req,
-                        "empty_response",
-                    )
                 if not answer.strip():
                     answer = generation_fallback(prepared)
                 for token in response_chunks(answer):
