@@ -2562,6 +2562,24 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(main.requires_reviewed_generation(prepared, "Lập kế hoạch học trong 3 tháng."))
 
+    def test_direct_generation_fallback_asks_for_a_clearer_request(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+
+        answer = main.generation_fallback(prepared)
+
+        self.assertEqual(
+            answer,
+            "Bạn muốn mình hỗ trợ nội dung gì? Hãy mô tả yêu cầu cụ thể hơn nhé.",
+        )
+        self.assertNotIn("model", answer.lower())
+
     async def test_reviewed_direct_uses_chat_primary_with_conversation_messages(self) -> None:
         prepared = main.ChatPreparation(
             prompt="direct conversation prompt",

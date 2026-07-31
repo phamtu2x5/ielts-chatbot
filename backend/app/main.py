@@ -842,7 +842,7 @@ def document_extraction_failure_detail(document: Any) -> str:
 def generation_fallback(prepared: "ChatPreparation") -> str:
     if prepared.route_used.startswith("vector_rag"):
         return NO_RAG_MATCH_RESPONSE
-    return "Mình chưa nhận được nội dung trả lời từ model. Vui lòng thử lại."
+    return "Bạn muốn mình hỗ trợ nội dung gì? Hãy mô tả yêu cầu cụ thể hơn nhé."
 
 
 def no_rag_match_response(message: str) -> str:
