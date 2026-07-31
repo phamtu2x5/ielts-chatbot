@@ -54,6 +54,9 @@ class AppSettings:
     ollama_classifier_seed: int = field(
         default_factory=lambda: int(os.getenv("OLLAMA_CLASSIFIER_SEED", "42"))
     )
+    ollama_direct_temperature: float = field(
+        default_factory=lambda: float(os.getenv("OLLAMA_DIRECT_TEMPERATURE", "0.3"))
+    )
     route_history_message_chars: int = field(
         default_factory=lambda: int(os.getenv("ROUTE_HISTORY_MESSAGE_CHARS", "600"))
     )

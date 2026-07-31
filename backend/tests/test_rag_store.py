@@ -1879,12 +1879,27 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
     def test_direct_answer_prompt_does_not_invent_a_missing_task_source(self) -> None:
         prompt = llm.direct_answer_prompt(
-            "Write an English paragraph about the topic above."
+            "Write an English paragraph about the topic above.",
+            previous_answer_source="none",
         )
 
         self.assertIn("ask for that missing source briefly", prompt)
         self.assertIn("Never invent or substitute the missing source", prompt)
         self.assertIn("never use assumptions to replace missing task content", prompt)
+        self.assertIn("Trusted direct-conversation source: unavailable", prompt)
+
+    def test_direct_answer_prompt_marks_a_trusted_conversation_source(self) -> None:
+        prompt = llm.direct_answer_prompt(
+            "Write an English paragraph about the topic above.",
+            [
+                ChatMessage(role="user", content="Translate this topic."),
+                ChatMessage(role="assistant", content="Translated topic."),
+            ],
+            previous_answer_source="conversation",
+        )
+
+        self.assertIn("Trusted direct-conversation source: available", prompt)
+        self.assertIn("Previous conversation:", prompt)
 
     def test_user_fact_candidate_requires_an_explicit_personal_statement(self) -> None:
         self.assertTrue(llm.should_extract_user_facts("Hiện tại tôi đang ở band 5.5."))

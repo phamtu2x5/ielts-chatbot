@@ -1094,7 +1094,34 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.route_used, "base_model")
         self.assertIsNone(prepared.static_response)
         self.assertIn("three IELTS Speaking tips", prepared.prompt)
+        self.assertIn("Trusted direct-conversation source: unavailable", prepared.prompt)
         self.assertEqual(store.probe_queries, [])
+
+    def test_direct_conversation_source_requires_trusted_direct_history(self) -> None:
+        no_history = main.ChatRequest(
+            message="Write about the topic above.",
+            conversation_state={"last_route": "direct"},
+        )
+        direct_history = main.ChatRequest(
+            message="Write about the topic above.",
+            conversation_history=[
+                {"role": "user", "content": "Translate this topic."},
+                {"role": "assistant", "content": "Translated topic."},
+            ],
+            conversation_state={"last_route": "direct"},
+        )
+        rag_history = main.ChatRequest(
+            message="Give me three general IELTS tips.",
+            conversation_history=[
+                {"role": "user", "content": "What does Passage 1 say?"},
+                {"role": "assistant", "content": "It discusses wine."},
+            ],
+            conversation_state={"last_route": "rag"},
+        )
+
+        self.assertEqual(main.direct_conversation_source(no_history), "none")
+        self.assertEqual(main.direct_conversation_source(direct_history), "conversation")
+        self.assertEqual(main.direct_conversation_source(rag_history), "none")
 
     async def test_retrieval_score_does_not_bypass_gateway_for_direct_intent(self) -> None:
         catalog = [

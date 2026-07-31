@@ -857,7 +857,9 @@ def no_rag_match_response(message: str) -> str:
 def generation_temperature(prepared: "ChatPreparation") -> float:
     if is_writing_response(prepared):
         return 0.1
-    return 0.2 if prepared.route_used.startswith("vector_rag") else 0.7
+    if prepared.route_used.startswith("vector_rag"):
+        return 0.2
+    return settings.ollama_direct_temperature
 
 
 def _solve_answer_segment(
@@ -1959,6 +1961,16 @@ def gateway_state_context(req: ChatRequest) -> str:
     )
 
 
+def direct_conversation_source(req: ChatRequest) -> str:
+    if not req.conversation_state or req.conversation_state.last_route != "direct":
+        return "none"
+    if not req.conversation_history or not any(
+        message.role == "assistant" for message in req.conversation_history
+    ):
+        return "none"
+    return "conversation"
+
+
 def resolve_target_refs(
     references: tuple[str, ...],
     routing_context: DocumentCatalogContext,
@@ -2061,11 +2073,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     }
 
     if route == "direct":
+        previous_answer_source = direct_conversation_source(req)
         return ChatPreparation(
             prompt=direct_answer_prompt(
                 message,
                 req.conversation_history,
                 user_profile_context(req),
+                previous_answer_source=previous_answer_source,
             ),
             static_response=None,
             route_used="base_model",
@@ -2082,6 +2096,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                     "primary_endpoint": "generate",
                     "fallback_endpoint": "chat",
                     "fallback_used": False,
+                    "previous_answer_source": previous_answer_source,
+                    "temperature": settings.ollama_direct_temperature,
                 },
                 "retrieval": {"skipped": True, "final_context": []},
                 "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
@@ -2722,6 +2738,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             message,
             req.conversation_history,
             user_profile_context(req),
+            previous_answer_source=direct_conversation_source(req),
         ),
         static_response=None,
         route_used="base_model",
@@ -2948,6 +2965,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                                 req.message,
                                 req.conversation_history,
                                 user_profile_context(req),
+                                previous_answer_source=direct_conversation_source(req),
                             ),
                             temperature=temperature,
                         )
