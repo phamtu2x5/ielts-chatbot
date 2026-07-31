@@ -2641,6 +2641,126 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(main.requires_reviewed_generation(prepared, "Lập kế hoạch học trong 3 tháng."))
 
+    async def test_reviewed_direct_prompt_echo_uses_chat_fallback(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct conversation prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+        primary = AsyncMock(
+            side_effect=main.OllamaRequestError(
+                "prompt_echo",
+                "Ollama echoed the direct prompt.",
+            )
+        )
+        fallback = AsyncMock(return_value="Chào bạn.")
+        request = main.ChatRequest(
+            message="Viết lại câu trả lời vừa rồi.",
+            conversation_history=[
+                {"role": "user", "content": "Viết một câu giới thiệu."},
+                {"role": "assistant", "content": "I enjoy learning English."},
+            ],
+            conversation_state={
+                "last_route": "direct",
+                "last_intent": "direct",
+            },
+        )
+
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "query_ollama", primary),
+            patch.object(main, "query_ollama_chat", fallback),
+        ):
+            response = await main.chat_stream(request)
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        self.assertEqual(
+            "".join(event["token"] for event in events if event["type"] == "token"),
+            "Chào bạn.",
+        )
+        primary.assert_awaited_once()
+        fallback.assert_awaited_once()
+        self.assertEqual(fallback.await_args.kwargs["temperature"], 0.3)
+        fallback_messages = fallback.await_args.args[0]
+        self.assertIn("source: available", fallback_messages[0]["content"])
+        self.assertEqual(
+            fallback_messages[-2:],
+            [
+                {"role": "assistant", "content": "I enjoy learning English."},
+                {"role": "user", "content": "Viết lại câu trả lời vừa rồi."},
+            ],
+        )
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        generation_debug = metadata["debug"]["direct_generation"]
+        self.assertTrue(generation_debug["fallback_used"])
+        self.assertEqual(generation_debug["fallback_reason"], "prompt_echo")
+        self.assertEqual(generation_debug["fallback_endpoint"], "chat")
+        self.assertEqual(generation_debug["fallback_status"], "succeeded")
+
+    async def test_reviewed_direct_empty_response_uses_only_one_chat_fallback(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct conversation prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+        primary = AsyncMock(return_value="")
+        fallback = AsyncMock(return_value="")
+
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "query_ollama", primary),
+            patch.object(main, "query_ollama_chat", fallback),
+        ):
+            response = await main.chat_stream(main.ChatRequest(message="xin chào"))
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        self.assertEqual(
+            "".join(event["token"] for event in events if event["type"] == "token"),
+            main.generation_fallback(prepared),
+        )
+        primary.assert_awaited_once()
+        fallback.assert_awaited_once()
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        generation_debug = metadata["debug"]["direct_generation"]
+        self.assertEqual(generation_debug["fallback_reason"], "empty_response")
+        self.assertEqual(generation_debug["fallback_status"], "empty")
+
+    async def test_reviewed_direct_non_echo_error_is_not_hidden_by_fallback(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct conversation prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+        primary = AsyncMock(
+            side_effect=main.OllamaRequestError(
+                "timeout",
+                "Ollama request timed out.",
+            )
+        )
+        fallback = AsyncMock(return_value="Không được gọi.")
+
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "query_ollama", primary),
+            patch.object(main, "query_ollama_chat", fallback),
+        ):
+            response = await main.chat_stream(main.ChatRequest(message="xin chào"))
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        error = next(event for event in events if event["type"] == "error")
+        self.assertEqual(error["detail"]["ollama"]["kind"], "timeout")
+        primary.assert_awaited_once()
+        fallback.assert_not_awaited()
+
     async def test_direct_generation_retries_a_multiline_markdown_table(self) -> None:
         prepared = main.ChatPreparation(
             prompt="direct plan prompt",
