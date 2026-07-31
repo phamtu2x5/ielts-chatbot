@@ -37,7 +37,9 @@ from app.intent import (
 )
 from app.llm import (
     clean_response,
+    conversation_language,
     has_malformed_markdown_table,
+    is_direct_writing_request,
     likely_contains_solution,
     looks_like_prompt_echo,
     rag_prompt,
@@ -1067,6 +1069,52 @@ class LocalVectorStoreTests(unittest.TestCase):
         first = "Here is the revised essay: " + " ".join(["word"] * 175)
         second = " ".join(["word"] * 169)
         self.assertEqual(select_best_writing_output(first, second, contract), second)
+
+    def test_writing_output_contract_parses_approximate_and_one_sided_lengths(self) -> None:
+        vietnamese_approximate = writing_output_contract(
+            "Hãy viết một đoạn văn khoảng 150 từ bằng tiếng Anh."
+        )
+        english_approximate = writing_output_contract(
+            "Write a paragraph about 150 words long."
+        )
+        minimum = writing_output_contract("Write an essay of at least 250 words.")
+        maximum = writing_output_contract("Viết đoạn văn không quá 180 từ.")
+        unaccented = writing_output_contract("Viet doan van khoang 150 tu bang tieng Anh.")
+
+        self.assertEqual(
+            (vietnamese_approximate.min_words, vietnamese_approximate.max_words),
+            (128, 172),
+        )
+        self.assertEqual(
+            (english_approximate.min_words, english_approximate.max_words),
+            (128, 172),
+        )
+        self.assertEqual((minimum.min_words, minimum.max_words), (250, None))
+        self.assertIn("Required minimum length: 250 words", "\n".join(minimum.prompt_lines()))
+        self.assertEqual((maximum.min_words, maximum.max_words), (None, 180))
+        self.assertIn("Required maximum length: 180 words", "\n".join(maximum.prompt_lines()))
+        self.assertEqual((unaccented.min_words, unaccented.max_words), (128, 172))
+
+    def test_direct_writing_request_and_conversation_language_are_generic(self) -> None:
+        self.assertTrue(
+            is_direct_writing_request(
+                "Hãy viết một đoạn văn khoảng 150 từ bằng tiếng Anh."
+            )
+        )
+        self.assertTrue(is_direct_writing_request("Write an IELTS essay about education."))
+        self.assertTrue(is_direct_writing_request("Viet doan van khoang 150 tu."))
+        self.assertFalse(is_direct_writing_request("Dịch đoạn văn này sang tiếng Việt."))
+        self.assertFalse(
+            is_direct_writing_request("Cho tôi cấu trúc chung của IELTS Writing Task 2.")
+        )
+        self.assertEqual(
+            conversation_language(
+                "Hãy viết một đoạn văn bằng tiếng Anh trả lời đề bài vừa gửi."
+            ),
+            "Vietnamese",
+        )
+        self.assertEqual(conversation_language("Write an English paragraph."), "English")
+        self.assertEqual(conversation_language("hmm"), "Vietnamese")
 
     def test_translation_contract_requires_vietnamese_and_all_question_numbers(self) -> None:
         contract = response_output_contract(

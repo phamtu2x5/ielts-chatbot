@@ -2,7 +2,8 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -36,9 +37,11 @@ from .llm import (
     OllamaRequestError,
     RouteGatewayDecision,
     classify_rag_intent,
+    conversation_language,
     direct_chat_messages,
     direct_answer_prompt,
     extract_user_facts,
+    is_direct_writing_request,
     query_ollama_chat,
     query_ollama,
     rag_prompt,
@@ -839,9 +842,11 @@ def document_extraction_failure_detail(document: Any) -> str:
     return "Không trích xuất được văn bản từ tài liệu. File có thể quá mờ, không có chữ, hoặc OCR chưa phù hợp."
 
 
-def generation_fallback(prepared: "ChatPreparation") -> str:
+def generation_fallback(prepared: "ChatPreparation", message: str = "") -> str:
     if prepared.route_used.startswith("vector_rag"):
         return NO_RAG_MATCH_RESPONSE
+    if conversation_language(message) == "English":
+        return "What would you like help with? Please describe your request more specifically."
     return "Bạn muốn mình hỗ trợ nội dung gì? Hãy mô tả yêu cầu cụ thể hơn nhé."
 
 
@@ -1102,20 +1107,69 @@ def generation_candidate_debug(text: str, max_chars: int = 4_000) -> dict[str, A
     }
 
 
+DirectGenerationRetry = Callable[
+    [list[str]],
+    Awaitable[tuple[str | None, str | None]],
+]
+INCOMPLETE_GENERATION_ISSUE = (
+    "The response stopped because the model reached the output length limit."
+)
+
+
+def _writing_candidate_has_substance(text: str, minimum_words: int | None) -> bool:
+    word_count = len(re.findall(r"\b[\w'-]+\b", text, flags=re.UNICODE))
+    threshold = max(40, (minimum_words or 80) // 2)
+    return word_count >= threshold
+
+
+def _select_complete_candidate(
+    first: str,
+    retry: str,
+    *,
+    first_incomplete: bool,
+    retry_incomplete: bool,
+    selector: Callable[[str, str], str],
+) -> str:
+    if first_incomplete != retry_incomplete:
+        return retry if not retry_incomplete else first
+    return selector(first, retry)
+
+
 async def generate_answer(
     prepared: "ChatPreparation",
     message: str,
     *,
     initial_answer: str | None = None,
+    initial_done_reason: str | None = None,
+    direct_source_available: bool = False,
+    direct_retry: DirectGenerationRetry | None = None,
 ) -> str:
     prompt = prepared.prompt or ""
     answer = initial_answer
     if answer is None:
         answer = await query_ollama(prompt, temperature=generation_temperature(prepared))
+    selected_done_reason = initial_done_reason
+    first_incomplete = initial_done_reason == "length"
 
-    if is_writing_response(prepared):
-        contract = writing_output_contract(message)
+    direct_writing = (
+        prepared.route_used == "base_model"
+        and prepared.query_intent == "direct"
+        and is_direct_writing_request(message)
+    )
+    direct_writing_contract = writing_output_contract(message) if direct_writing else None
+    apply_writing_contract = prepared.query_intent == "writing_generation" or bool(
+        direct_writing_contract
+        and (
+            direct_source_available
+            or _writing_candidate_has_substance(answer, direct_writing_contract.min_words)
+        )
+    )
+
+    if apply_writing_contract:
+        contract = direct_writing_contract or writing_output_contract(message)
         issues = writing_output_issues(answer, contract)
+        if first_incomplete:
+            issues.append(INCOMPLETE_GENERATION_ISSUE)
         generation_debug = prepared.debug.setdefault("generation", {})
         generation_debug["writing_contract"] = {
             "language": contract.language,
@@ -1125,30 +1179,67 @@ async def generate_answer(
             "single_paragraph": contract.single_paragraph,
             "overview_only": contract.overview_only,
             "first_draft_issues": issues,
+            "first_done_reason": initial_done_reason,
         }
         if issues:
-            retry = await query_ollama(
-                writing_retry_prompt(prompt, contract),
-                temperature=0.1,
+            if direct_retry:
+                retry, retry_done_reason = await direct_retry(
+                    contract.prompt_lines()
+                    + ["- Keep the response concise enough to finish within the output limit."]
+                )
+                retry_available = retry is not None
+                if retry is None:
+                    retry = answer
+                    retry_done_reason = initial_done_reason
+            else:
+                retry = await query_ollama(
+                    writing_retry_prompt(prompt, contract),
+                    temperature=0.1,
+                )
+                retry_done_reason = None
+                retry_available = True
+            retry_incomplete = retry_done_reason == "length"
+            selected = _select_complete_candidate(
+                answer,
+                retry,
+                first_incomplete=first_incomplete,
+                retry_incomplete=retry_incomplete,
+                selector=lambda first, second: select_best_writing_output(
+                    first,
+                    second,
+                    contract,
+                ),
             )
-            selected = select_best_writing_output(answer, retry, contract)
             generation_debug["retry_used"] = True
+            generation_debug["retry_succeeded"] = retry_available
+            generation_debug["retry_endpoint"] = "chat" if direct_retry else "generate"
+            generation_debug["retry_done_reason"] = retry_done_reason
             generation_debug["candidate_penalties"] = {
                 "first": list(writing_output_penalty(answer, contract)),
                 "retry": list(writing_output_penalty(retry, contract)),
             }
-            generation_debug["selected_candidate"] = "first" if selected == answer else "retry"
+            selected_is_first = selected == answer
+            generation_debug["selected_candidate"] = "first" if selected_is_first else "retry"
             answer = selected
+            selected_done_reason = (
+                initial_done_reason if selected_is_first else retry_done_reason
+            )
         else:
             generation_debug["retry_used"] = False
         final_issues = writing_output_issues(answer, contract)
+        if selected_done_reason == "length":
+            final_issues.append(INCOMPLETE_GENERATION_ISSUE)
         generation_debug["final_issues"] = final_issues
         if final_issues:
             generation_debug["validation_degraded"] = True
-            failure = hard_validation_failure(
-                prepared.query_intent,
-                contract.language,
-                final_issues,
+            failure = (
+                None
+                if direct_writing
+                else hard_validation_failure(
+                    prepared.query_intent,
+                    contract.language,
+                    final_issues,
+                )
             )
             if failure:
                 generation_debug["validation_failed_closed"] = True
@@ -1162,6 +1253,8 @@ async def generate_answer(
             allow_solution=allow_solution,
             explicit_no_solution=has_explicit_no_solution_constraint(message),
         )
+        if direct_writing and not apply_writing_contract:
+            contract = replace(contract, language=conversation_language(message))
         solve_report = (
             prepared.debug.get("retrieval", {}).get("solve_context_report", {})
             if prepared.query_intent == "solve_questions"
@@ -1173,6 +1266,8 @@ async def generate_answer(
             answer, first_adjustments = normalize_solve_output(answer, solve_report)
         first_solve_issues = solve_output_issues(answer, solve_report) if solve_report else []
         issues = response_output_issues(answer, contract) + first_solve_issues
+        if first_incomplete:
+            issues.append(INCOMPLETE_GENERATION_ISSUE)
         generation_debug = prepared.debug.setdefault("generation", {})
         generation_debug["response_contract"] = {
             "language": contract.language,
@@ -1185,6 +1280,7 @@ async def generate_answer(
                 contract.language,
                 allow_source_language_fields=contract.allow_source_language_fields,
             ),
+            "first_done_reason": initial_done_reason,
         }
         if solve_report:
             generation_debug["solve_contract"] = {
@@ -1206,6 +1302,7 @@ async def generate_answer(
             or any("plan timeline" in issue for issue in issues)
             or any("plan periods" in issue for issue in issues)
             or any("daily time limit" in issue for issue in issues)
+            or first_incomplete
             or bool(first_solve_issues)
             or (
                 has_explicit_no_solution_constraint(message)
@@ -1218,10 +1315,25 @@ async def generate_answer(
                 if prepared.query_intent == "translate_questions"
                 else response_retry_prompt(prompt, contract, prepared.query_intent)
             )
-            retry = await query_ollama(
-                retry_prompt,
-                temperature=0.1,
-            )
+            retry_contract = contract.prompt_lines()
+            if first_incomplete:
+                retry_contract.append(
+                    "- Keep the response concise enough to finish every sentence and structure within the output limit."
+                )
+            if direct_retry:
+                retry, retry_done_reason = await direct_retry(retry_contract)
+                retry_available = retry is not None
+                if retry is None:
+                    retry = answer
+                    retry_done_reason = initial_done_reason
+            else:
+                retry = await query_ollama(
+                    retry_prompt,
+                    temperature=0.1,
+                )
+                retry_done_reason = None
+                retry_available = True
+            retry_incomplete = retry_done_reason == "length"
             retry_raw = retry
             retry_adjustments: list[dict[str, Any]] = []
             if solve_report:
@@ -1233,17 +1345,36 @@ async def generate_answer(
                         "retry_adjustments": retry_adjustments,
                     }
                 )
-            selected = (
-                select_best_solve_output(answer, retry, contract, solve_report)
-                if solve_report
-                else select_best_response_output(answer, retry, contract)
+            if solve_report:
+                selector = lambda first, second: select_best_solve_output(
+                    first,
+                    second,
+                    contract,
+                    solve_report,
+                )
+            else:
+                selector = lambda first, second: select_best_response_output(
+                    first,
+                    second,
+                    contract,
+                )
+            selected = _select_complete_candidate(
+                answer,
+                retry,
+                first_incomplete=first_incomplete,
+                retry_incomplete=retry_incomplete,
+                selector=selector,
             )
             generation_debug["retry_used"] = True
+            generation_debug["retry_succeeded"] = retry_available
+            generation_debug["retry_endpoint"] = "chat" if direct_retry else "generate"
+            generation_debug["retry_done_reason"] = retry_done_reason
             generation_debug["candidate_penalties"] = {
                 "first": list(response_output_penalty(answer, contract)),
                 "retry": list(response_output_penalty(retry, contract)),
             }
-            generation_debug["selected_candidate"] = "first" if selected == answer else "retry"
+            selected_is_first = selected == answer
+            generation_debug["selected_candidate"] = "first" if selected_is_first else "retry"
             generation_debug["candidate_language"] = {
                 "first": response_language_debug(
                     answer,
@@ -1257,6 +1388,9 @@ async def generate_answer(
                 ),
             }
             answer = selected
+            selected_done_reason = (
+                initial_done_reason if selected_is_first else retry_done_reason
+            )
         else:
             generation_debug["retry_used"] = False
             if solve_report:
@@ -1269,6 +1403,8 @@ async def generate_answer(
             solve_debug["final_normalized_output"] = generation_candidate_debug(answer)
         final_solve_issues = solve_output_issues(answer, solve_report) if solve_report else []
         final_issues = response_output_issues(answer, contract) + final_solve_issues
+        if selected_done_reason == "length":
+            final_issues.append(INCOMPLETE_GENERATION_ISSUE)
         if solve_report:
             generation_debug["solve_contract"]["final_issues"] = final_solve_issues
         if contract.forbid_solution and any("reveals or narrows" in issue for issue in final_issues):
@@ -1296,6 +1432,13 @@ async def generate_answer(
             generation_debug["solve_contract"]["returned_output"] = generation_candidate_debug(
                 answer
             )
+    if (
+        direct_retry
+        and selected_done_reason == "length"
+        and not generation_debug.get("retry_succeeded", True)
+    ):
+        generation_debug["returned_incomplete_fallback"] = True
+        return ""
     return answer
 
 
@@ -1313,8 +1456,16 @@ def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> b
     )
 
 
-def is_writing_response(prepared: "ChatPreparation") -> bool:
-    return prepared.query_intent == "writing_generation"
+def is_writing_response(
+    prepared: "ChatPreparation",
+    message: str = "",
+) -> bool:
+    return prepared.query_intent == "writing_generation" or bool(
+        message
+        and prepared.route_used == "base_model"
+        and prepared.query_intent == "direct"
+        and is_direct_writing_request(message)
+    )
 
 
 def response_chunks(text: str, size: int = 180) -> list[str]:
@@ -1984,6 +2135,11 @@ async def direct_reviewed_generation_fallback(
     reason: str,
 ) -> str:
     generation_debug = prepared.debug.setdefault("direct_generation", {})
+    output_contract: list[str] | None = None
+    if is_direct_writing_request(req.message):
+        output_contract = [
+            "- Apply the Writing constraints below only when the requested task source is available; otherwise ask briefly for the missing source."
+        ] + writing_output_contract(req.message).prompt_lines()
     generation_debug.update(
         {
             "fallback_used": True,
@@ -1999,6 +2155,7 @@ async def direct_reviewed_generation_fallback(
                 req.conversation_history,
                 user_profile_context(req),
                 previous_answer_source=direct_conversation_source(req),
+                output_contract=output_contract,
             ),
             temperature=generation_temperature(prepared),
             response_debug=fallback_response_debug,
@@ -2988,15 +3145,22 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     direct_reviewed and settings.ollama_chat_fallback
                 )
                 if direct_reviewed:
+                    previous_answer_source = direct_conversation_source(req)
                     generation_debug = prepared.debug.setdefault("direct_generation", {})
                     primary_response_debug = generation_debug.setdefault("primary_response", {})
+                    primary_output_contract: list[str] | None = None
+                    if is_direct_writing_request(req.message):
+                        primary_output_contract = [
+                            "- Apply the Writing constraints below only when the requested task source is available; otherwise ask briefly for the missing source."
+                        ] + writing_output_contract(req.message).prompt_lines()
                     try:
                         initial_answer = await query_ollama_chat(
                             direct_chat_messages(
                                 req.message,
                                 req.conversation_history,
                                 user_profile_context(req),
-                                previous_answer_source=direct_conversation_source(req),
+                                previous_answer_source=previous_answer_source,
+                                output_contract=primary_output_contract,
                             ),
                             temperature=generation_temperature(prepared),
                             response_debug=primary_response_debug,
@@ -3013,11 +3177,51 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             req,
                             exc.kind,
                         )
+                    active_response_debug = (
+                        generation_debug.get("fallback_response", {})
+                        if generation_debug.get("fallback_used")
+                        else primary_response_debug
+                    )
+
+                    async def retry_direct_generation(
+                        output_contract: list[str],
+                    ) -> tuple[str | None, str | None]:
+                        retry_response_debug = generation_debug.setdefault(
+                            "contract_retry_response",
+                            {},
+                        )
+                        generation_debug["contract_retry_endpoint"] = "chat"
+                        try:
+                            retry_answer = await query_ollama_chat(
+                                direct_chat_messages(
+                                    req.message,
+                                    req.conversation_history,
+                                    user_profile_context(req),
+                                    previous_answer_source=previous_answer_source,
+                                    output_contract=output_contract,
+                                ),
+                                temperature=0.1,
+                                response_debug=retry_response_debug,
+                            )
+                        except OllamaRequestError as exc:
+                            generation_debug.update(
+                                {
+                                    "contract_retry_status": "failed",
+                                    "contract_retry_error": exc.kind,
+                                }
+                            )
+                            return None, None
+                        generation_debug["contract_retry_status"] = "succeeded"
+                        return retry_answer, retry_response_debug.get("done_reason")
+
                     answer = (
                         await generate_answer(
                             prepared,
                             req.message,
                             initial_answer=initial_answer,
+                            initial_done_reason=active_response_debug.get("done_reason"),
+                            direct_source_available=previous_answer_source == "conversation",
+                            direct_retry=retry_direct_generation,
                         )
                         if initial_answer.strip()
                         else ""
@@ -3025,7 +3229,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 else:
                     answer = await generate_answer(prepared, req.message)
                 if not answer.strip():
-                    answer = generation_fallback(prepared)
+                    answer = generation_fallback(prepared, req.message)
                 for token in response_chunks(answer):
                     yield stream_event("token", token=token)
                 finish_resource_debug()
@@ -3089,7 +3293,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     )
                     raise
                 if not fallback_answer.strip():
-                    fallback_answer = generation_fallback(prepared)
+                    fallback_answer = generation_fallback(prepared, req.message)
                 generation_debug.update(
                     {
                         "fallback_used": True,

@@ -2579,6 +2579,10 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "Bạn muốn mình hỗ trợ nội dung gì? Hãy mô tả yêu cầu cụ thể hơn nhé.",
         )
         self.assertNotIn("model", answer.lower())
+        self.assertEqual(
+            main.generation_fallback(prepared, "What should I practice today?"),
+            "What would you like help with? Please describe your request more specifically.",
+        )
 
     async def test_reviewed_direct_uses_chat_primary_with_conversation_messages(self) -> None:
         prepared = main.ChatPreparation(
@@ -2639,6 +2643,262 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(generation_debug["fallback_used"])
         self.assertIn("response_debug", chat_model.await_args.kwargs)
         self.assertIn("primary_response", generation_debug)
+
+    async def test_reviewed_direct_retries_a_length_stopped_answer_through_chat(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct speaking prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+        attempts = 0
+
+        async def chat_model(messages, *, temperature, response_debug, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            response_debug.update(
+                {
+                    "response_role": "assistant",
+                    "detected_role_prefix": None,
+                    "done_reason": "length" if attempts == 1 else "stop",
+                }
+            )
+            if attempts == 1:
+                return "Cách thứ nhất là luyện nói mỗi ngày nhưng câu trả lời bị"
+            self.assertIn("finish every sentence", messages[0]["content"])
+            self.assertEqual(temperature, 0.1)
+            return "Luyện nói mỗi ngày, ghi âm và nghe lại để sửa phát âm và độ trôi chảy."
+
+        generate_model = AsyncMock(return_value="Không được gọi.")
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "query_ollama_chat", side_effect=chat_model) as chat,
+            patch.object(main, "query_ollama", generate_model),
+        ):
+            response = await main.chat_stream(
+                main.ChatRequest(message="Hãy nói rõ hơn cách luyện kỹ năng nói.")
+            )
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        returned = "".join(event["token"] for event in events if event["type"] == "token")
+        self.assertIn("ghi âm và nghe lại", returned)
+        self.assertEqual(chat.await_count, 2)
+        generate_model.assert_not_awaited()
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        self.assertEqual(metadata["debug"]["generation"]["retry_endpoint"], "chat")
+        self.assertEqual(metadata["debug"]["generation"]["selected_candidate"], "retry")
+        self.assertEqual(metadata["debug"]["generation"]["final_issues"], [])
+
+    async def test_reviewed_direct_writing_uses_shared_contract_and_chat_retry(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct writing prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+        short_draft = " ".join(["word"] * 100)
+        valid_draft = " ".join(["word"] * 145)
+        attempts = 0
+
+        async def chat_model(messages, *, temperature, response_debug, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            response_debug.update(
+                {
+                    "response_role": "assistant",
+                    "detected_role_prefix": None,
+                    "done_reason": "stop",
+                }
+            )
+            if attempts == 1:
+                self.assertIn("Required length: 128-172 words", messages[0]["content"])
+                return short_draft
+            self.assertIn("Required length: 128-172 words", messages[0]["content"])
+            self.assertEqual(temperature, 0.1)
+            return valid_draft
+
+        request = main.ChatRequest(
+            message="Hãy viết một đoạn văn khoảng 150 từ bằng tiếng Anh trả lời đề bài vừa gửi.",
+            conversation_history=[
+                {"role": "user", "content": "Dịch đề bài về government spending."},
+                {"role": "assistant", "content": "Bản dịch đề bài."},
+            ],
+            conversation_state={"last_route": "direct", "last_intent": "direct"},
+        )
+        generate_model = AsyncMock(return_value="Không được gọi.")
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "query_ollama_chat", side_effect=chat_model) as chat,
+            patch.object(main, "query_ollama", generate_model),
+        ):
+            response = await main.chat_stream(request)
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        returned = "".join(event["token"] for event in events if event["type"] == "token")
+        self.assertEqual(returned, valid_draft)
+        self.assertEqual(chat.await_count, 2)
+        generate_model.assert_not_awaited()
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        writing_debug = metadata["debug"]["generation"]["writing_contract"]
+        self.assertEqual((writing_debug["min_words"], writing_debug["max_words"]), (128, 172))
+        self.assertEqual(metadata["debug"]["generation"]["retry_endpoint"], "chat")
+
+    async def test_missing_direct_writing_source_clarifies_in_conversation_language(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct missing source prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+        english_clarification = "Please provide the Writing topic you want me to answer."
+        clarification = "Bạn vui lòng gửi lại đề bài cần viết để mình trả lời đúng nội dung."
+        attempts = 0
+
+        async def chat_model(messages, *, temperature, response_debug, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            response_debug.update(
+                {
+                    "response_role": "assistant",
+                    "detected_role_prefix": None,
+                    "done_reason": "stop",
+                }
+            )
+            self.assertIn("Clarification language: Vietnamese", messages[0]["content"])
+            if attempts == 1:
+                self.assertIn(
+                    "only when the requested task source is available",
+                    messages[0]["content"],
+                )
+                return english_clarification
+            self.assertIn("Output language: Vietnamese", messages[0]["content"])
+            return clarification
+
+        generate_model = AsyncMock(return_value="Không được gọi.")
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "query_ollama_chat", side_effect=chat_model) as chat,
+            patch.object(main, "query_ollama", generate_model),
+        ):
+            response = await main.chat_stream(
+                main.ChatRequest(
+                    message="Hãy viết một đoạn văn khoảng 150 từ bằng tiếng Anh trả lời đề bài vừa gửi."
+                )
+            )
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        returned = "".join(event["token"] for event in events if event["type"] == "token")
+        self.assertEqual(returned, clarification)
+        self.assertEqual(chat.await_count, 2)
+        generate_model.assert_not_awaited()
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        self.assertEqual(
+            metadata["debug"]["generation"]["response_contract"]["language"],
+            "Vietnamese",
+        )
+        self.assertEqual(metadata["debug"]["generation"]["retry_endpoint"], "chat")
+
+    async def test_failed_direct_contract_retry_keeps_the_primary_answer(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct plan prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+        malformed = """| Tuần | Hoạt động |
+| --- | --- |
+| 1 | Luyện nghe
+- Luyện nói |"""
+        attempts = 0
+
+        async def chat_model(messages, *, temperature, response_debug, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                response_debug.update(
+                    {
+                        "response_role": "assistant",
+                        "detected_role_prefix": None,
+                        "done_reason": "stop",
+                    }
+                )
+                return malformed
+            raise main.OllamaRequestError(
+                "role_continuation",
+                "Correction continued with a user turn.",
+            )
+
+        generate_model = AsyncMock(return_value="Không được gọi.")
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "query_ollama_chat", side_effect=chat_model) as chat,
+            patch.object(main, "query_ollama", generate_model),
+        ):
+            response = await main.chat_stream(
+                main.ChatRequest(message="Lập kế hoạch học IELTS trong 3 tháng.")
+            )
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        returned = "".join(event["token"] for event in events if event["type"] == "token")
+        self.assertEqual(returned, malformed)
+        self.assertEqual(chat.await_count, 2)
+        generate_model.assert_not_awaited()
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        direct_debug = metadata["debug"]["direct_generation"]
+        self.assertEqual(direct_debug["contract_retry_status"], "failed")
+        self.assertEqual(direct_debug["contract_retry_error"], "role_continuation")
+        self.assertFalse(metadata["debug"]["generation"]["retry_succeeded"])
+
+    async def test_failed_retry_does_not_return_a_length_stopped_answer(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct speaking prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+        attempts = 0
+
+        async def chat_model(messages, *, temperature, response_debug, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                response_debug.update(
+                    {
+                        "response_role": "assistant",
+                        "detected_role_prefix": None,
+                        "done_reason": "length",
+                    }
+                )
+                return "Câu trả lời đang bị ngắt giữa"
+            raise main.OllamaRequestError("role_continuation", "Invalid correction role.")
+
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "query_ollama_chat", side_effect=chat_model),
+            patch.object(main, "query_ollama", AsyncMock(return_value="Không được gọi.")),
+        ):
+            response = await main.chat_stream(
+                main.ChatRequest(message="Hãy giải thích kỹ hơn cách luyện nói.")
+            )
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        returned = "".join(event["token"] for event in events if event["type"] == "token")
+        self.assertEqual(
+            returned,
+            "Bạn muốn mình hỗ trợ nội dung gì? Hãy mô tả yêu cầu cụ thể hơn nhé.",
+        )
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        self.assertTrue(metadata["debug"]["generation"]["returned_incomplete_fallback"])
 
     async def test_reviewed_direct_retries_chat_once_for_retryable_protocol_errors(self) -> None:
         scenarios = [
