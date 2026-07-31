@@ -1946,10 +1946,14 @@ def allowed_rag_intents(
 def gateway_state_context(req: ChatRequest) -> str:
     if not req.conversation_state:
         return ""
+    previous_answer_source = {
+        "rag": "uploaded_material",
+        "direct": "conversation",
+    }.get(req.conversation_state.last_route, "none")
     return json.dumps(
         {
-            "last_route": req.conversation_state.last_route,
-            "last_intent": req.conversation_state.last_intent,
+            "previous_answer_source": previous_answer_source,
+            "previous_answer_intent": req.conversation_state.last_intent,
         },
         ensure_ascii=False,
     )

@@ -1689,8 +1689,8 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("if the uploaded files were unavailable", prompt)
         self.assertIn("Do not choose DIRECT by guessing", compact_prompt)
         self.assertIn("not an automatic RAG decision", compact_prompt)
-        self.assertIn("Transforming a preceding direct answer remains DIRECT", compact_prompt)
-        self.assertIn("referenced conversation source is absent", compact_prompt)
+        self.assertIn("previous_answer_source is trusted provenance", compact_prompt)
+        self.assertIn("previous_answer_source=none", compact_prompt)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')
@@ -1876,6 +1876,15 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Answer this request from general knowledge", prompt)
         self.assertNotIn("Answer this general IELTS request", prompt)
+
+    def test_direct_answer_prompt_does_not_invent_a_missing_task_source(self) -> None:
+        prompt = llm.direct_answer_prompt(
+            "Write an English paragraph about the topic above."
+        )
+
+        self.assertIn("ask for that missing source briefly", prompt)
+        self.assertIn("Never invent or substitute the missing source", prompt)
+        self.assertIn("never use assumptions to replace missing task content", prompt)
 
     def test_user_fact_candidate_requires_an_explicit_personal_statement(self) -> None:
         self.assertTrue(llm.should_extract_user_facts("Hiện tại tôi đang ở band 5.5."))

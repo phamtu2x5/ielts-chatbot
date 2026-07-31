@@ -1317,8 +1317,13 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         state_context = gateway.await_args.args[2]
         document_context = gateway.await_args.args[3]
-        self.assertIn('"last_route": "rag"', state_context)
-        self.assertIn('"last_intent": "semantic_qa"', state_context)
+        self.assertEqual(
+            json.loads(state_context),
+            {
+                "previous_answer_source": "uploaded_material",
+                "previous_answer_intent": "semantic_qa",
+            },
+        )
         self.assertNotIn("has_rag_affinity", state_context)
         self.assertNotIn("doc-1", state_context)
         self.assertNotIn("14", state_context)

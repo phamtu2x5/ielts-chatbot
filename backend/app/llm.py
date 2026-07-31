@@ -1490,9 +1490,10 @@ def route_classifier_prompt(
             "DIRECT: the answer is independent of uploaded-file content and uses only general knowledge or the preceding direct conversation.",
             "RAG: the answer needs to know or verify any specific content from an uploaded file.",
             "Do not choose DIRECT by guessing, assuming, or reconstructing file content.",
+            "A request about the content of a specific named test, passage, question, section, prompt, table, image, or diagram is RAG when uploaded material is available.",
             "attached_this_turn=true is a relevance signal, not an automatic RAG decision.",
-            "Transforming a preceding direct answer remains DIRECT; continuing a document-grounded answer remains RAG.",
-            "If the referenced conversation source is absent, choose DIRECT so the assistant can ask for it.",
+            "previous_answer_source is trusted provenance: a dependent follow-up inherits uploaded_material as RAG or conversation as DIRECT.",
+            "If previous_answer_source=none and the referenced conversation source is absent, choose DIRECT so the assistant can ask for it.",
             'Return JSON only: {"route":"direct"} or {"route":"rag"}.',
         ]
     else:
@@ -1502,9 +1503,10 @@ def route_classifier_prompt(
             "DIRECT: the answer is independent of uploaded-file content. This includes general knowledge, general IELTS advice, study plans, greetings, ordinary conversation, and transforming or expanding a preceding direct answer.",
             "RAG: the answer needs to know or verify any specific content from an uploaded file. This includes the exact content of a question, passage, section, prompt, table, image, diagram, or flowchart; translating uploaded content; extracting data or evidence; and writing from an uploaded prompt or dataset.",
             "Do not choose DIRECT by guessing, assuming, inventing, or reconstructing what a document might contain. If the requested answer must be checked against the uploaded material, choose RAG.",
+            "When uploaded material is available, a request about what a specific named test, passage, question, section, prompt, table, image, or diagram contains is RAG even if the user does not say file or upload.",
             "Explaining general IELTS strategy is DIRECT. Explaining instructions or strategy for a specific named uploaded test, numbered question range, or uploaded visual is RAG because the exact task must first be checked.",
-            "For follow-ups, use the prior successful route and content: transforming or expanding a preceding direct answer remains DIRECT unless the current request asks to use uploaded material; a follow-up that depends on a preceding document-grounded answer remains RAG.",
-            "If a request refers to conversation content that is absent, choose DIRECT so the assistant can ask for the missing source. Do not infer an uploaded source from document availability alone.",
+            "The previous_answer_source field is trusted provenance, not a routing decision for the new request. If the current request semantically depends on the previous answer, inherit uploaded_material as RAG or conversation as DIRECT. Independent new requests do not inherit it.",
+            "If previous_answer_source=none and a request refers to conversation content that is absent, choose DIRECT so the assistant can ask for the missing source. Do not infer an uploaded source from document availability alone.",
             "The existence of uploaded documents alone does not make an independent request RAG.",
             "The marker attached_this_turn=true means the user attached that file with the current request. It is a relevance signal, not sufficient by itself to choose RAG.",
             "Do not answer the user, classify intent, choose a document, or explain the decision.",
@@ -1622,7 +1624,8 @@ def direct_answer_instructions() -> list[str]:
         "- Explanations and strategies: give a clear sequence, examples, and common mistakes when relevant.",
         "- Follow the user's requested language, count, duration, and format exactly.",
         "Do not refer to uploaded files, ask the user to choose a document, or invent personal details.",
-        "If important personal information is missing, make reasonable assumptions and label them briefly instead of refusing to help.",
+        "If the request depends on a topic, prompt, text, answer, or other task source that is not actually present in the current message or previous conversation, ask for that missing source briefly. Never invent or substitute the missing source.",
+        "Make reasonable assumptions only for secondary personal or planning details, label them briefly, and never use assumptions to replace missing task content.",
     ]
 
 
