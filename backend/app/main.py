@@ -1991,6 +1991,7 @@ async def direct_reviewed_generation_fallback(
             "fallback_endpoint": "chat",
         }
     )
+    fallback_response_debug = generation_debug.setdefault("fallback_response", {})
     try:
         answer = await query_ollama_chat(
             direct_chat_messages(
@@ -2000,11 +2001,13 @@ async def direct_reviewed_generation_fallback(
                 previous_answer_source=direct_conversation_source(req),
             ),
             temperature=generation_temperature(prepared),
+            response_debug=fallback_response_debug,
         )
     except Exception as exc:
         if isinstance(exc, OllamaRequestError) and exc.kind in {
             "empty_response",
             "prompt_echo",
+            "role_continuation",
         }:
             generation_debug.update(
                 {
@@ -2985,6 +2988,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     direct_reviewed and settings.ollama_chat_fallback
                 )
                 if direct_reviewed:
+                    generation_debug = prepared.debug.setdefault("direct_generation", {})
+                    primary_response_debug = generation_debug.setdefault("primary_response", {})
                     try:
                         initial_answer = await query_ollama_chat(
                             direct_chat_messages(
@@ -2994,11 +2999,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                                 previous_answer_source=direct_conversation_source(req),
                             ),
                             temperature=generation_temperature(prepared),
+                            response_debug=primary_response_debug,
                         )
                     except OllamaRequestError as exc:
                         if not direct_fallback_enabled or exc.kind not in {
                             "empty_response",
                             "prompt_echo",
+                            "role_continuation",
                         }:
                             raise
                         initial_answer = await direct_reviewed_generation_fallback(

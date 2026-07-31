@@ -46,6 +46,11 @@ Keep Markdown tables simple: no nested bullet lists, no HTML, and no multi-parag
 Never output raw HTML tags such as <ul>, <li>, <br>, or <table>; use Markdown instead.
 Do not add emojis, generic encouragement, or invitations to ask another question."""
 
+CONVERSATION_ROLE_PREFIX_RE = re.compile(
+    r"(?i)^\s*(?:#{1,6}[ \t]*)?(?:\*{1,2}|_{1,2})?"
+    r"(user|assistant|system)(?:\*{1,2}|_{1,2})?[ \t]*(?::[ \t]*|\r?\n)"
+)
+
 
 @dataclass(frozen=True)
 class RouteGatewayDecision:
@@ -403,6 +408,11 @@ def clean_response(text: str) -> str:
     return re.sub(r"\n\s*\n+", "\n\n", text).strip()
 
 
+def conversation_role_prefix(text: str) -> str | None:
+    match = CONVERSATION_ROLE_PREFIX_RE.match(text or "")
+    return match.group(1).lower() if match else None
+
+
 def writing_output_contract(message: str) -> WritingOutputContract:
     lowered = message.lower()
     requests_vietnamese = bool(EXPLICIT_VIETNAMESE_RE.search(message))
@@ -613,7 +623,7 @@ def response_language_debug(
 
 def response_output_issues(text: str, contract: ResponseOutputContract) -> list[str]:
     issues: list[str] = []
-    if re.match(r"(?i)^\s*(?:user|assistant|system)\s*:", text):
+    if conversation_role_prefix(text):
         issues.append("The response starts with a conversation role prefix.")
     if contract.language == "English" and _language_mismatch_score(
         text,
@@ -1211,6 +1221,7 @@ async def query_ollama_chat(
     messages: list[dict[str, str]],
     temperature: float = 0.7,
     num_predict: Optional[int] = None,
+    response_debug: dict[str, object] | None = None,
 ) -> str:
     payload = _ollama_chat_payload(messages, temperature, num_predict)
     try:
@@ -1234,19 +1245,39 @@ async def query_ollama_chat(
             response_body=response.text[:500] or None,
         ) from exc
 
-    raw_text = data.get("message", {}).get("content") or ""
+    response_message = data.get("message")
+    if not isinstance(response_message, dict):
+        response_message = {}
+    response_role = str(response_message.get("role") or "").strip().lower()
+    raw_text = response_message.get("content") or ""
+    role_prefix = conversation_role_prefix(raw_text)
+    response_metadata = {
+        "response_role": response_role or None,
+        "detected_role_prefix": role_prefix,
+        "raw_output_preview": raw_text[:300],
+        "response_length": len(raw_text),
+        "done": data.get("done"),
+        "done_reason": data.get("done_reason"),
+    }
+    if response_debug is not None:
+        response_debug.update(response_metadata)
+
+    if raw_text.strip() and (response_role != "assistant" or role_prefix):
+        raise OllamaRequestError(
+            "role_continuation",
+            "Ollama chat returned a conversation turn instead of an assistant answer.",
+            metadata=response_metadata,
+        )
     visible_text = clean_response(raw_text)
     if not visible_text:
         raise OllamaRequestError(
             "empty_response",
             "Ollama chat returned an empty visible response.",
             metadata={
+                **response_metadata,
                 "response_keys": sorted(data.keys()),
-                "done": data.get("done"),
-                "done_reason": data.get("done_reason"),
                 "prompt_eval_count": data.get("prompt_eval_count"),
                 "eval_count": data.get("eval_count"),
-                "response_length": len(raw_text),
             },
         )
     return visible_text

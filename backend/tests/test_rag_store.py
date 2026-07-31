@@ -2088,13 +2088,57 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             )
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        response_debug = {}
         with patch.object(llm.httpx, "AsyncClient", return_value=client):
             answer = await llm.query_ollama_chat(
                 [{"role": "user", "content": "xin chào"}],
                 temperature=0.0,
+                response_debug=response_debug,
             )
 
         self.assertEqual(answer, "Xin chào bạn.")
+        self.assertEqual(response_debug["response_role"], "assistant")
+        self.assertIsNone(response_debug["detected_role_prefix"])
+
+    async def test_chat_request_rejects_conversation_role_continuation(self) -> None:
+        scenarios = [
+            ({"role": "user", "content": "Xin chào bạn."}, None),
+            (
+                {
+                    "role": "assistant",
+                    "content": "user\ntôi đang học tiếng Anh để thi IELTS.",
+                },
+                "user",
+            ),
+        ]
+        for response_message, expected_prefix in scenarios:
+            with self.subTest(response_message=response_message):
+                def handler(request: httpx.Request) -> httpx.Response:
+                    return httpx.Response(
+                        200,
+                        json={"message": response_message},
+                        request=request,
+                    )
+
+                response_debug = {}
+                client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+                with patch.object(llm.httpx, "AsyncClient", return_value=client):
+                    with self.assertRaises(llm.OllamaRequestError) as raised:
+                        await llm.query_ollama_chat(
+                            [{"role": "user", "content": "chào bạn nha"}],
+                            temperature=0.0,
+                            response_debug=response_debug,
+                        )
+
+                self.assertEqual(raised.exception.kind, "role_continuation")
+                self.assertEqual(
+                    response_debug["response_role"],
+                    response_message["role"],
+                )
+                self.assertEqual(
+                    response_debug["detected_role_prefix"],
+                    expected_prefix,
+                )
 
     def test_direct_chat_messages_preserve_roles_and_current_request(self) -> None:
         messages = llm.direct_chat_messages(

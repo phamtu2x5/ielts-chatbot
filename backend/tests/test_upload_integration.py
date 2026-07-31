@@ -2619,13 +2619,24 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         generation_debug = metadata["debug"]["direct_generation"]
         self.assertEqual(generation_debug["primary_endpoint"], "chat")
         self.assertFalse(generation_debug["fallback_used"])
+        self.assertIn("response_debug", chat_model.await_args.kwargs)
+        self.assertIn("primary_response", generation_debug)
 
-    async def test_reviewed_direct_retries_chat_once_for_empty_or_prompt_echo(self) -> None:
+    async def test_reviewed_direct_retries_chat_once_for_retryable_protocol_errors(self) -> None:
         scenarios = [
             ("prompt_echo", "Chào bạn.", "Chào bạn.", "succeeded"),
             (
                 "empty_response",
                 main.OllamaRequestError("empty_response", "Fallback chat was also empty."),
+                None,
+                "exhausted",
+            ),
+            (
+                "role_continuation",
+                main.OllamaRequestError(
+                    "role_continuation",
+                    "Fallback chat also continued with a user turn.",
+                ),
                 None,
                 "exhausted",
             ),
@@ -2670,6 +2681,25 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(generation_debug["fallback_reason"], failure_kind)
                 self.assertEqual(generation_debug["fallback_endpoint"], "chat")
                 self.assertEqual(generation_debug["fallback_status"], expected_status)
+                self.assertIn(
+                    "response_debug",
+                    chat_model.await_args_list[1].kwargs,
+                )
+                self.assertIn("fallback_response", generation_debug)
+
+    def test_direct_output_contract_rejects_newline_role_continuation(self) -> None:
+        contract = main.response_output_contract(
+            "chào bạn nha",
+            "direct",
+            allow_solution=False,
+        )
+
+        issues = main.response_output_issues(
+            "user\ntôi đang học tiếng Anh để thi IELTS.",
+            contract,
+        )
+
+        self.assertIn("The response starts with a conversation role prefix.", issues)
 
     async def test_reviewed_direct_non_retryable_error_is_not_hidden(self) -> None:
         prepared = main.ChatPreparation(
