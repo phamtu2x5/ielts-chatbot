@@ -344,6 +344,17 @@ class LocalVectorStore:
         )
 
     @synchronized
+    def document_chunks(
+        self,
+        top_k: int = 8,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
+        return self.structured_store.document_chunks(
+            top_k=top_k,
+            document_ids=document_ids,
+        )
+
+    @synchronized
     def document_catalog(self, document_ids: List[str] | None = None) -> List[Dict]:
         if self._catalog_cache is None:
             self._catalog_cache = self.structured_store.document_catalog()

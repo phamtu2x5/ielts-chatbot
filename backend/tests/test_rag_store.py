@@ -1134,6 +1134,46 @@ class LocalVectorStoreTests(unittest.TestCase):
         with self.assertRaises(llm.OllamaRequestError):
             llm.parse_direct_source_response('{"source":"unknown"}')
 
+    def test_explicit_document_chunks_are_bounded_and_scoped(self) -> None:
+        documents = [
+            {
+                "chunk_id": "image-1-c1",
+                "document_id": "image-1",
+                "chunk_index": 0,
+                "text": "first image chunk",
+                "metadata": {},
+            },
+            {
+                "chunk_id": "image-1-c2",
+                "document_id": "image-1",
+                "chunk_index": 1,
+                "text": "second image chunk",
+                "metadata": {},
+            },
+            {
+                "chunk_id": "other-c1",
+                "document_id": "other",
+                "chunk_index": 0,
+                "text": "unrelated chunk",
+                "metadata": {},
+            },
+        ]
+        store = StructuredDocumentStore(lambda: documents)
+
+        hits = store.document_chunks(top_k=1, document_ids=["image-1"])
+
+        self.assertEqual([item["chunk_id"] for item in hits], ["image-1-c1"])
+        self.assertEqual(hits[0]["retrieval_method"], "explicit_scope")
+
+    def test_document_intent_prompt_separates_translation_from_diagram_display(self) -> None:
+        prompt = llm.intent_classifier_prompt(
+            "Dịch nội dung trong ảnh sang tiếng Việt.",
+            allowed_intents=("translate_content", "show_diagram", "semantic_qa"),
+        )
+
+        self.assertIn("translate uploaded content", prompt)
+        self.assertIn("Do not use it merely because the user says image", prompt)
+
     def test_translation_contract_requires_vietnamese_and_all_question_numbers(self) -> None:
         contract = response_output_contract(
             "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",

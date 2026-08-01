@@ -151,6 +151,7 @@ class _FakeChatStore:
         self.routing_document_ids: list[list[str] | None] = []
         self.routing_queries: list[str] = []
         self.routing_candidates: list[dict] = []
+        self.explicit_chunks: list[dict] = []
 
     def stats(self) -> dict:
         return {"documents": len(self.catalog), "chunks": len(self.catalog), "embedding_model": "test"}
@@ -184,6 +185,14 @@ class _FakeChatStore:
     def structured_lookup(self, query, intent, top_k, document_ids=None):
         return []
 
+    def document_chunks(self, top_k, document_ids=None):
+        allowed = set(document_ids or [])
+        return [
+            item
+            for item in self.explicit_chunks
+            if not allowed or item.get("document_id") in allowed
+        ][:top_k]
+
     def hybrid_search(
         self,
         query,
@@ -201,6 +210,56 @@ class _FakeChatStore:
 
 
 class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_attachment_translation_uses_its_generic_ocr_chunk(self) -> None:
+        catalog = [
+            {
+                "source_file": "clipboard.png",
+                "document_ids": ["image-1"],
+                "mime_types": ["image/png"],
+                "unit_types": [],
+            }
+        ]
+        store = _FakeChatStore(catalog)
+        store.explicit_chunks = [
+            {
+                "chunk_id": "image-1-c1",
+                "document_id": "image-1",
+                "source_file": "clipboard.png",
+                "pages": [1],
+                "text": "Some people think that governments waste money on the arts.",
+                "metadata": {"sources": ["image_ocr"]},
+            }
+        ]
+        intent = IntentClassifierDecision(
+            intent="translate_content",
+            attempts=1,
+            duration_seconds=0.01,
+            raw_output_preview='{"intent":"translate_content"}',
+        )
+        with (
+            patch.object(main, "get_store", return_value=store),
+            patch.object(
+                main,
+                "classify_chat_route",
+                AsyncMock(return_value=_gateway_decision("rag", "translate_content")),
+            ),
+            patch.object(main, "classify_rag_intent", AsyncMock(return_value=intent)),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Dịch đề bài topic trong ảnh tôi vừa gửi.",
+                    document_ids=["image-1"],
+                    document_scope="explicit",
+                )
+            )
+
+        self.assertEqual(prepared.route_used, "vector_rag")
+        self.assertEqual(prepared.query_intent, "translate_content")
+        self.assertEqual([source["document_id"] for source in prepared.sources], ["image-1"])
+        self.assertEqual(prepared.debug["retrieval"]["method"], "explicit_scope")
+        self.assertIn("governments waste money on the arts", prepared.prompt)
+        self.assertIn("Translate only the uploaded source content", prepared.prompt)
+
     def test_intent_candidates_exclude_question_actions_without_question_target(self) -> None:
         candidates = main.allowed_rag_intents(
             "Why does the author reject this idea?",

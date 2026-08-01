@@ -19,6 +19,7 @@ ROUTING_INTENTS = (
     "document_overview",
     "show_questions",
     "translate_questions",
+    "translate_content",
     "explain_questions",
     "solve_questions",
     "semantic_qa",
@@ -529,7 +530,7 @@ def response_output_contract(
     writing_context: bool = False,
     explicit_no_solution: bool = False,
 ) -> ResponseOutputContract:
-    if query_intent == "translate_questions":
+    if query_intent in {"translate_questions", "translate_content"}:
         language = "English" if EXPLICIT_ENGLISH_RE.search(message) else "Vietnamese"
     elif writing_context:
         language = writing_output_contract(message).language
@@ -857,6 +858,10 @@ def response_retry_prompt(
         "translate_questions": (
             "Translate every requested numbered instruction and question statement into the "
             "required language. Preserve the question numbers and do not answer them."
+        ),
+        "translate_content": (
+            "Translate the requested uploaded source content completely into the required "
+            "language without answering, summarizing, or adding information."
         ),
         "explain_questions": (
             "Explain the requested task instructions, vocabulary, and method in the required "
@@ -1918,6 +1923,10 @@ def intent_classifier_prompt(
         parts.append(
             "Use show_questions only when the requested output is the wording, instructions, options, translation, or explanation of specific numbered Reading questions or a specified question group. Do not use it for a document inventory or for a Writing task."
         )
+    if "translate_content" in allowed:
+        parts.append(
+            "Use translate_content when the user asks to translate uploaded content that is not a specific numbered Reading question group, including a passage, prompt, image text, paragraph, or document section."
+        )
     if "show_writing_prompt" in allowed:
         parts.append(
             "Use show_writing_prompt when the user asks for the topic, requirements, instructions, or discussion directions of a Writing task without composing any part of the response."
@@ -1945,6 +1954,10 @@ def intent_classifier_prompt(
         parts.append(
             "Use table_cell, table_calculation, or table_comparison only when the requested operation explicitly targets a table, its cells, rows, columns, or values."
         )
+    if "show_diagram" in allowed:
+        parts.append(
+            "Use show_diagram only when the requested target is an actual labeled diagram or diagram-completion visual. Do not use it merely because the user says image, screenshot, or photo when asking about text or general content."
+        )
     parts.append(
         "Apply negative constraints only to the action they forbid. 'Do not solve' prevents solve_questions, but 'write an overview without an introduction or body' is still writing_generation."
     )
@@ -1955,6 +1968,9 @@ def intent_classifier_prompt(
         ],
         "show_questions": [
             '- "Show Questions 11-13 with their options; do not answer" -> show_questions.'
+        ],
+        "translate_content": [
+            '- "Translate the Writing topic in the attached image into Vietnamese" -> translate_content.'
         ],
         "solve_questions": ['- "Answer Question 11 and cite evidence" -> solve_questions.'],
         "show_writing_prompt": [
@@ -2159,7 +2175,7 @@ def rag_prompt(
     user_profile: str = "",
 ) -> str:
     history_text = format_history(history)
-    if query_intent in {"show_questions", "translate_questions"}:
+    if query_intent in {"show_questions", "translate_questions", "translate_content"}:
         history_text = ""
     if query_intent == "writing_generation":
         output_contract: WritingOutputContract | ResponseOutputContract = (
@@ -2233,6 +2249,16 @@ def rag_prompt(
                 "- Preserve proper names, question numbers, option labels, and mandatory IELTS answer-limit phrases when translating them would change the task.",
                 "- Do not mention passage evidence, do not evaluate the statements, and do not solve.",
                 "- Do not provide TRUE/FALSE/NOT GIVEN labels or answer choices.",
+            ]
+        )
+    elif query_intent == "translate_content":
+        parts.extend(
+            [
+                "Generation policy:",
+                "- Translate only the uploaded source content requested by the user.",
+                "- Preserve proper names, numbers, labels, and task requirements accurately.",
+                "- Do not answer, solve, summarize, expand, or substitute the source content.",
+                "- Return the translation directly without a generic preface.",
             ]
         )
     elif query_intent == "explain_questions":

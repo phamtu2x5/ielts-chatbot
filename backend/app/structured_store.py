@@ -150,6 +150,20 @@ class StructuredDocumentStore:
             return self._question_lookup(ranges, top_k=top_k, document_ids=document_ids)
         return []
 
+    def document_chunks(
+        self,
+        top_k: int = 8,
+        document_ids: List[str] | None = None,
+    ) -> List[Dict]:
+        top_k = max(1, min(top_k, 50))
+        return [
+            self._mark_retrieval(doc, "explicit_scope", 1.0)
+            for doc in sorted(
+                self._docs_in_scope(document_ids),
+                key=lambda item: item.get("chunk_index", 0),
+            )[:top_k]
+        ]
+
     def document_catalog(self, document_ids: List[str] | None = None) -> List[Dict]:
         catalog: dict[str, Dict] = {}
         for position, doc in enumerate(self._docs_in_scope(document_ids)):

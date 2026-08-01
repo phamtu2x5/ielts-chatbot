@@ -803,7 +803,7 @@ def hard_validation_failure(
     )
     if not language_issue and not missing_translation_items:
         return None
-    if query_intent == "translate_questions":
+    if query_intent in {"translate_questions", "translate_content"}:
         return (
             TRANSLATION_VALIDATION_FAILURE_EN
             if language == "English"
@@ -1445,6 +1445,7 @@ def requires_reviewed_generation(prepared: "ChatPreparation", message: str) -> b
         or is_writing_response(prepared)
         or prepared.query_intent == "solve_questions"
         or prepared.query_intent == "translate_questions"
+        or prepared.query_intent == "translate_content"
         or prepared.query_intent == "document_overview"
         or (
             has_explicit_no_solution_constraint(message)
@@ -2647,6 +2648,18 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             for source in sources:
                 source["probe_overview_score"] = 1.0
             retrieval_method = "overview"
+        elif (
+            scope.request_mode == "explicit"
+            and scope_ids
+            and set(scope_ids).issubset(set(attached_document_ids))
+            and query_intent in {"translate_content", "semantic_qa"}
+        ):
+            sources = await run_in_threadpool(
+                store.document_chunks,
+                settings.rag_top_k,
+                scope_ids,
+            )
+            retrieval_method = "explicit_scope"
         elif probe.get("has_strong_hits"):
             sources = (probe.get("results") or [])[: settings.rag_top_k]
             retrieval_method = "probe"
