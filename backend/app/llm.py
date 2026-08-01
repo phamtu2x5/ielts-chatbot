@@ -438,10 +438,70 @@ def format_route_history(history: Optional[List[ChatMessage]]) -> str:
     return "\n".join(lines)
 
 
+def repair_multiline_markdown_tables(text: str) -> str:
+    lines = text.splitlines()
+    repaired: list[str] = []
+    index = 0
+    while index < len(lines):
+        header = lines[index].strip()
+        separator = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        header_cells = _markdown_row_cells(header) if header.startswith("|") else []
+        separator_cells = _markdown_row_cells(separator) if separator.startswith("|") else []
+        is_table_header = bool(
+            header.startswith("|")
+            and header.endswith("|")
+            and len(header_cells) >= 2
+            and len(separator_cells) == len(header_cells)
+            and all(re.fullmatch(r"\s*:?-{3,}:?\s*", cell) for cell in separator_cells)
+        )
+        if not is_table_header:
+            repaired.append(lines[index])
+            index += 1
+            continue
+
+        expected_pipes = header.count("|")
+        repaired.extend([lines[index], lines[index + 1]])
+        index += 2
+        while index < len(lines) and lines[index].strip():
+            row = lines[index].strip()
+            if not row.startswith("|"):
+                break
+            while (
+                (not row.endswith("|") or row.count("|") != expected_pipes)
+                and index + 1 < len(lines)
+                and lines[index + 1].strip()
+                and not lines[index + 1].lstrip().startswith("|")
+            ):
+                index += 1
+                continuation = re.sub(r"^[-*•]\s*", "", lines[index].strip())
+                row = f"{row}; {continuation}"
+            repaired.append(row)
+            index += 1
+    return "\n".join(repaired)
+
+
+def normalize_html_breaks(text: str) -> str:
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            lines.append(
+                re.sub(
+                    r"<br\s*/?>\s*[-*•]?\s*",
+                    "; ",
+                    line,
+                    flags=re.IGNORECASE,
+                )
+            )
+        else:
+            lines.append(re.sub(r"<br\s*/?>", "\n", line, flags=re.IGNORECASE))
+    return "\n".join(lines)
+
+
 def clean_response(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<thinking>.*?</thinking>", "", text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = repair_multiline_markdown_tables(normalize_html_breaks(text))
     text = DECORATIVE_ICON_RE.sub(
         lambda match: "" if match.start() == 0 or text[match.start() - 1] == "\n" else " ",
         text,

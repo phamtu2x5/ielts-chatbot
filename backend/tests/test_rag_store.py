@@ -1031,6 +1031,44 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual(clean_response("User: haha"), "haha")
         self.assertEqual(clean_response("**Assistant:** Chào bạn."), "Chào bạn.")
 
+    def test_response_cleanup_repairs_html_and_multiline_table_cells(self) -> None:
+        html_table = clean_response(
+            "| Tuần | Hoạt động | Kết quả |\n"
+            "| --- | --- | --- |\n"
+            "| 1 | Nghe<br>- Đọc | Hoàn thành<br>Đúng hạn |"
+        )
+        multiline_table = clean_response(
+            "| Tuần | Hoạt động | Kết quả |\n"
+            "| --- | --- | --- |\n"
+            "| 1 | Nghe\n- Đọc | Hoàn thành\n- Đúng hạn |"
+        )
+
+        for repaired in (html_table, multiline_table):
+            self.assertFalse(has_malformed_markdown_table(repaired))
+            self.assertIn("Nghe; Đọc", repaired)
+            self.assertIn("Hoàn thành; Đúng hạn", repaired)
+
+    def test_repaired_plan_table_exposes_an_excess_timeline(self) -> None:
+        answer = clean_response(
+            "| Tuần | Hoạt động |\n"
+            "| --- | --- |\n"
+            "| 1-4 | Nền tảng<br>Luyện tập |\n"
+            "| 13-15 | Ôn tập<br>Thi thử |"
+        )
+        contract = response_output_contract(
+            "Lập kế hoạch tự học IELTS trong 3 tháng.",
+            "direct",
+            allow_solution=False,
+        )
+
+        issues = response_output_issues(answer, contract)
+
+        self.assertNotIn(
+            "The response contains a malformed Markdown table: use one header row, one separator row, and the same number of cells on every physical line.",
+            issues,
+        )
+        self.assertIn("The response exceeds the requested plan timeline.", issues)
+
     def test_writing_output_contract_and_validation(self) -> None:
         contract = writing_output_contract(
             "Viết bài IELTS Writing Task 1 dài 170-190 từ dựa trên bảng."

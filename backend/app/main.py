@@ -1271,6 +1271,9 @@ async def generate_answer(
             "forbid_solution": contract.forbid_solution,
             "allow_source_language_fields": contract.allow_source_language_fields,
             "required_question_numbers": list(contract.required_question_numbers),
+            "plan_duration_value": contract.plan_duration_value,
+            "plan_duration_unit": contract.plan_duration_unit,
+            "max_daily_minutes": contract.max_daily_minutes,
             "first_draft_issues": issues,
             "first_draft_language": response_language_debug(
                 answer,
