@@ -2134,6 +2134,7 @@ async def direct_reviewed_generation_fallback(
     prepared: ChatPreparation,
     req: ChatRequest,
     reason: str,
+    previous_answer_source: str,
 ) -> str:
     generation_debug = prepared.debug.setdefault("direct_generation", {})
     output_contract: list[str] | None = None
@@ -2155,7 +2156,7 @@ async def direct_reviewed_generation_fallback(
                 req.message,
                 req.conversation_history,
                 user_profile_context(req),
-                previous_answer_source=direct_conversation_source(req),
+                previous_answer_source=previous_answer_source,
                 output_contract=output_contract,
             ),
             temperature=generation_temperature(prepared),
@@ -3161,16 +3162,23 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     previous_answer_source = direct_conversation_source(req)
                     generation_debug = prepared.debug.setdefault("direct_generation", {})
                     direct_writing = is_direct_writing_request(req.message)
-                    direct_source_available = previous_answer_source == "conversation"
-                    if direct_writing and not direct_source_available:
-                        source_decision = await classify_direct_source(req.message)
-                        generation_debug["source_sufficiency"] = source_decision.to_debug()
+                    direct_source_available = True
+                    if direct_writing:
+                        source_decision = await classify_direct_source(
+                            req.message,
+                            req.conversation_history,
+                        )
+                        source_debug = source_decision.to_debug()
+                        source_debug["method"] = "semantic_current_and_history"
+                        source_debug["history_included"] = bool(req.conversation_history)
+                        generation_debug["source_sufficiency"] = source_debug
                         direct_source_available = source_decision.source == "available"
-                    elif direct_writing:
-                        generation_debug["source_sufficiency"] = {
-                            "source": "available",
-                            "method": "trusted_conversation",
-                        }
+                        if direct_source_available and req.conversation_history and any(
+                            message.role == "assistant"
+                            for message in req.conversation_history
+                        ):
+                            previous_answer_source = "conversation"
+                        generation_debug["previous_answer_source"] = previous_answer_source
 
                     if direct_writing and not direct_source_available:
                         generation_debug["generation_skipped"] = "missing_task_source"
@@ -3211,6 +3219,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             prepared,
                             req,
                             exc.kind,
+                            previous_answer_source,
                         )
                     active_response_debug = (
                         generation_debug.get("fallback_response", {})

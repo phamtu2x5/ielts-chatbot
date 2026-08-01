@@ -1156,10 +1156,16 @@ class LocalVectorStoreTests(unittest.TestCase):
 
     def test_direct_source_classifier_is_semantic_and_fails_closed(self) -> None:
         prompt = llm.direct_source_classifier_prompt(
-            "Hãy viết đoạn văn trả lời đề bài vừa gửi."
+            "Hãy viết đoạn văn trả lời đề bài vừa gửi.",
+            [
+                ChatMessage(role="user", content="Dịch đề bài này."),
+                ChatMessage(role="assistant", content="Đây là bản dịch đầy đủ của đề bài."),
+            ],
         )
 
-        self.assertIn("CURRENT REQUEST itself", prompt)
+        self.assertIn("CURRENT REQUEST or PREVIOUS CONVERSATION", prompt)
+        self.assertIn("Đây là bản dịch đầy đủ của đề bài.", prompt)
+        self.assertIn("greeting, error message, refusal, or clarification", prompt)
         self.assertIn("Do not infer, guess, reconstruct", prompt)
         self.assertEqual(
             llm.parse_direct_source_response('{"source":"available"}'),
@@ -1572,6 +1578,41 @@ Mô tả cấu trúc tài liệu bằng tiếng Việt."""
 
         self.assertEqual(response_output_issues(valid, contract), [])
 
+    def test_direct_plan_contract_rejects_incomplete_or_gapped_horizon(self) -> None:
+        contract = response_output_contract(
+            "Lập kế hoạch học trong 3 tháng.",
+            "direct",
+            allow_solution=False,
+        )
+        incomplete = """| Tuần | Mục tiêu |
+| --- | --- |
+| 1-4 | Nền tảng |
+| 5-8 | Luyện tập |"""
+        gapped = """| Tuần | Mục tiêu |
+| --- | --- |
+| 1-4 | Nền tảng |
+| 9-12 | Tổng ôn |"""
+
+        for answer in (incomplete, gapped):
+            self.assertIn(
+                "The response does not cover the full requested plan timeline.",
+                response_output_issues(answer, contract),
+            )
+
+    def test_direct_plan_contract_accepts_complete_month_rows(self) -> None:
+        contract = response_output_contract(
+            "Lập kế hoạch học trong 3 tháng.",
+            "direct",
+            allow_solution=False,
+        )
+        answer = """| Tháng | Mục tiêu |
+| --- | --- |
+| 1 | Nền tảng |
+| 2 | Luyện tập |
+| 3 | Tổng ôn |"""
+
+        self.assertEqual(response_output_issues(answer, contract), [])
+
     def test_rag_prompt_localizes_the_no_match_contract(self) -> None:
         vietnamese = rag_prompt(
             "Tài liệu có nhắc đến chủ đề này không?",
@@ -1854,13 +1895,16 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             compact=True,
         )
 
-        self.assertIn("DIRECT: the answer is independent of uploaded-file content", prompt)
+        self.assertIn("DIRECT: the answer is independent of reopening uploaded-file content", prompt)
         self.assertIn("RAG: the answer needs to know or verify any specific content", prompt)
         self.assertNotIn("if the uploaded files were unavailable", prompt)
         self.assertIn("Do not choose DIRECT by guessing", compact_prompt)
         self.assertIn("not an automatic RAG decision", compact_prompt)
-        self.assertIn("previous_answer_source is trusted provenance", compact_prompt)
+        self.assertIn("previous_answer_source is provenance", compact_prompt)
+        self.assertIn("complete content already visible", prompt)
         self.assertIn("previous_answer_source=none", compact_prompt)
+        self.assertIn("requested output format", prompt)
+        self.assertIn("Creating new content from general knowledge is DIRECT", compact_prompt)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')
@@ -2056,7 +2100,7 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ask for that missing source briefly", prompt)
         self.assertIn("Never invent or substitute the missing source", prompt)
         self.assertIn("never use assumptions to replace missing task content", prompt)
-        self.assertIn("Trusted direct-conversation source: unavailable", prompt)
+        self.assertIn("Trusted conversation source: unavailable", prompt)
 
     def test_direct_answer_prompt_marks_a_trusted_conversation_source(self) -> None:
         prompt = llm.direct_answer_prompt(
@@ -2068,7 +2112,7 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             previous_answer_source="conversation",
         )
 
-        self.assertIn("Trusted direct-conversation source: available", prompt)
+        self.assertIn("Trusted conversation source: available", prompt)
         self.assertIn("Previous conversation:", prompt)
 
     def test_user_fact_candidate_requires_an_explicit_personal_statement(self) -> None:

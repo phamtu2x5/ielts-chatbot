@@ -1074,7 +1074,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.route_used, "base_model")
         self.assertIsNone(prepared.static_response)
         self.assertIn("three IELTS Speaking tips", prepared.prompt)
-        self.assertIn("Trusted direct-conversation source: unavailable", prepared.prompt)
+        self.assertIn("Trusted conversation source: unavailable", prepared.prompt)
         self.assertEqual(store.probe_queries, [])
 
     def test_direct_conversation_source_requires_trusted_direct_history(self) -> None:
@@ -2786,11 +2786,21 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "user", "content": "Dịch đề bài về government spending."},
                 {"role": "assistant", "content": "Bản dịch đề bài."},
             ],
-            conversation_state={"last_route": "direct", "last_intent": "direct"},
+            conversation_state={
+                "last_route": "rag",
+                "last_intent": "translate_content",
+                "rag_affinity": {"document_ids": ["image-topic"]},
+            },
         )
+        source_decision = types.SimpleNamespace(
+            source="available",
+            to_debug=lambda: {"source": "available", "attempts": 1},
+        )
+        source_classifier = AsyncMock(return_value=source_decision)
         generate_model = AsyncMock(return_value="Không được gọi.")
         with (
             patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "classify_direct_source", source_classifier),
             patch.object(main, "query_ollama_chat", side_effect=chat_model) as chat,
             patch.object(main, "query_ollama", generate_model),
         ):
@@ -2801,10 +2811,18 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(returned, valid_draft)
         self.assertEqual(chat.await_count, 2)
         generate_model.assert_not_awaited()
+        source_classifier.assert_awaited_once_with(
+            request.message,
+            request.conversation_history,
+        )
         metadata = [event for event in events if event["type"] == "metadata"][-1]
         writing_debug = metadata["debug"]["generation"]["writing_contract"]
         self.assertEqual((writing_debug["min_words"], writing_debug["max_words"]), (128, 172))
         self.assertEqual(metadata["debug"]["generation"]["retry_endpoint"], "chat")
+        self.assertEqual(
+            metadata["debug"]["direct_generation"]["previous_answer_source"],
+            "conversation",
+        )
 
     async def test_missing_direct_writing_source_clarifies_in_conversation_language(self) -> None:
         prepared = main.ChatPreparation(
@@ -3299,6 +3317,39 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer, valid)
         self.assertEqual(model.await_count, 2)
         self.assertTrue(prepared.debug["generation"]["retry_used"])
+
+    async def test_direct_plan_retries_when_timeline_is_incomplete(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct plan prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={},
+            query_intent="direct",
+        )
+        incomplete = """| Tuần | Mục tiêu |
+| --- | --- |
+| 1-4 | Nền tảng |
+| 5-8 | Luyện tập |"""
+        complete = """| Tuần | Mục tiêu |
+| --- | --- |
+| 1-4 | Nền tảng |
+| 5-8 | Luyện tập |
+| 9-12 | Tổng ôn |"""
+        model = AsyncMock(side_effect=[incomplete, complete])
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(
+                prepared,
+                "Lập kế hoạch học trong 3 tháng.",
+            )
+
+        self.assertEqual(answer, complete)
+        self.assertEqual(model.await_count, 2)
+        self.assertIn(
+            "The response does not cover the full requested plan timeline.",
+            prepared.debug["generation"]["response_contract"]["first_draft_issues"],
+        )
 
     async def test_writing_semantic_answer_does_not_force_essay_language(self) -> None:
         prepared = main.ChatPreparation(
