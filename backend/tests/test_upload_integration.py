@@ -2756,34 +2756,20 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={"direct_generation": {"fallback_used": False}},
             query_intent="direct",
         )
-        english_clarification = "Please provide the Writing topic you want me to answer."
-        clarification = "Bạn vui lòng gửi lại đề bài cần viết để mình trả lời đúng nội dung."
-        attempts = 0
-
-        async def chat_model(messages, *, temperature, response_debug, **kwargs):
-            nonlocal attempts
-            attempts += 1
-            response_debug.update(
-                {
-                    "response_role": "assistant",
-                    "detected_role_prefix": None,
-                    "done_reason": "stop",
-                }
-            )
-            self.assertIn("Clarification language: Vietnamese", messages[0]["content"])
-            if attempts == 1:
-                self.assertIn(
-                    "only when the requested task source is available",
-                    messages[0]["content"],
-                )
-                return english_clarification
-            self.assertIn("Output language: Vietnamese", messages[0]["content"])
-            return clarification
-
+        source_decision = types.SimpleNamespace(
+            source="missing",
+            to_debug=lambda: {"source": "missing", "attempts": 1},
+        )
+        chat_model = AsyncMock(return_value=" ".join(["invented"] * 150))
         generate_model = AsyncMock(return_value="Không được gọi.")
         with (
             patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
-            patch.object(main, "query_ollama_chat", side_effect=chat_model) as chat,
+            patch.object(
+                main,
+                "classify_direct_source",
+                AsyncMock(return_value=source_decision),
+            ),
+            patch.object(main, "query_ollama_chat", chat_model),
             patch.object(main, "query_ollama", generate_model),
         ):
             response = await main.chat_stream(
@@ -2794,15 +2780,79 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
         returned = "".join(event["token"] for event in events if event["type"] == "token")
-        self.assertEqual(returned, clarification)
-        self.assertEqual(chat.await_count, 2)
+        self.assertEqual(
+            returned,
+            "Bạn vui lòng gửi hoặc dán lại đề bài, văn bản hay dữ liệu cần dùng để mình trả lời đúng nội dung.",
+        )
+        chat_model.assert_not_awaited()
         generate_model.assert_not_awaited()
         metadata = [event for event in events if event["type"] == "metadata"][-1]
         self.assertEqual(
-            metadata["debug"]["generation"]["response_contract"]["language"],
-            "Vietnamese",
+            metadata["debug"]["direct_generation"]["source_sufficiency"]["source"],
+            "missing",
         )
-        self.assertEqual(metadata["debug"]["generation"]["retry_endpoint"], "chat")
+        self.assertEqual(
+            metadata["debug"]["direct_generation"]["generation_skipped"],
+            "missing_task_source",
+        )
+
+    async def test_inline_direct_writing_source_uses_writing_contract(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt="direct inline writing prompt",
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug={"direct_generation": {"fallback_used": False}},
+            query_intent="direct",
+        )
+        source_decision = types.SimpleNamespace(
+            source="available",
+            to_debug=lambda: {"source": "available", "attempts": 1},
+        )
+        draft = " ".join(["word"] * 145)
+
+        async def chat_model(messages, *, response_debug, **kwargs):
+            response_debug.update(
+                {
+                    "response_role": "assistant",
+                    "detected_role_prefix": None,
+                    "done_reason": "stop",
+                }
+            )
+            self.assertIn("The requested task source is available", messages[0]["content"])
+            return draft
+
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(
+                main,
+                "classify_direct_source",
+                AsyncMock(return_value=source_decision),
+            ),
+            patch.object(main, "query_ollama_chat", side_effect=chat_model),
+            patch.object(main, "query_ollama", AsyncMock(return_value="Không được gọi.")),
+        ):
+            response = await main.chat_stream(
+                main.ChatRequest(
+                    message=(
+                        "Write a paragraph of about 150 words answering this topic: "
+                        "Governments should invest more in public transport than roads."
+                    )
+                )
+            )
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        returned = "".join(event["token"] for event in events if event["type"] == "token")
+        self.assertEqual(returned, draft)
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        self.assertEqual(
+            metadata["debug"]["direct_generation"]["source_sufficiency"]["source"],
+            "available",
+        )
+        self.assertEqual(
+            metadata["debug"]["generation"]["writing_contract"]["min_words"],
+            128,
+        )
 
     async def test_failed_direct_contract_retry_keeps_the_primary_answer(self) -> None:
         prepared = main.ChatPreparation(

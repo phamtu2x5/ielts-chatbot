@@ -89,6 +89,24 @@ class IntentClassifierDecision:
 
 
 @dataclass(frozen=True)
+class DirectSourceDecision:
+    source: str
+    attempts: int
+    duration_seconds: float
+    raw_output_preview: str
+    fallback_reason: str | None = None
+
+    def to_debug(self) -> dict:
+        return {
+            "source": self.source,
+            "attempts": self.attempts,
+            "duration_seconds": self.duration_seconds,
+            "raw_output_preview": self.raw_output_preview,
+            "fallback_reason": self.fallback_reason,
+        }
+
+
+@dataclass(frozen=True)
 class TargetResolverDecision:
     document_refs: tuple[str, ...]
     action: str
@@ -1406,6 +1424,12 @@ ROUTE_RESPONSE_SCHEMA = {
     "required": ["route"],
     "additionalProperties": False,
 }
+DIRECT_SOURCE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {"source": {"type": "string", "enum": ["available", "missing"]}},
+    "required": ["source"],
+    "additionalProperties": False,
+}
 USER_FACT_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1697,6 +1721,78 @@ async def classify_chat_route(
         duration_seconds=round(time.perf_counter() - started, 3),
         raw_output_preview=_visible_raw_output(last_raw)[:500],
         fallback_reason=last_error or "invalid_gateway_output",
+    )
+
+
+def direct_source_classifier_prompt(message: str, compact: bool = False) -> str:
+    if compact:
+        instructions = [
+            "Decide whether the CURRENT REQUEST itself contains enough task source to produce the requested Writing content.",
+            "AVAILABLE: the request includes a complete topic, question, text, data, or self-contained subject.",
+            "MISSING: it depends on absent earlier, above, attached, shown, or previously sent content.",
+            "Do not invent the missing source. When uncertain, choose missing.",
+        ]
+    else:
+        instructions = [
+            "You are the source-sufficiency classifier for a direct IELTS Writing request.",
+            "Classify only whether the CURRENT REQUEST itself contains the task source needed to write the requested content.",
+            "AVAILABLE means the current request states a complete topic, question, source text, dataset description, or otherwise self-contained subject that can be answered without recovering omitted content.",
+            "MISSING means the request depends on content that is merely referenced as earlier, above, attached, shown, or previously sent, but that content is not present in the current request.",
+            "Writing length, output language, and requested format do not count as task source.",
+            "Do not infer, guess, reconstruct, or substitute absent task content. When uncertain, choose missing.",
+        ]
+    instructions.extend(
+        [
+            "Do not answer the request or classify its topic.",
+            'Return one JSON object only: {"source":"available"} or {"source":"missing"}.',
+            "=== CURRENT REQUEST ===",
+            message,
+            "=== END CURRENT REQUEST ===",
+        ]
+    )
+    return "\n".join(instructions)
+
+
+def parse_direct_source_response(response: str) -> str:
+    payload = _parse_json_object(response, "invalid_direct_source_output")
+    source = payload.get("source")
+    if source not in {"available", "missing"}:
+        raise OllamaRequestError(
+            "invalid_direct_source_output",
+            "Direct source classifier returned an invalid source state.",
+        )
+    return source
+
+
+async def classify_direct_source(message: str) -> DirectSourceDecision:
+    started = time.perf_counter()
+    last_raw = ""
+    last_error: str | None = None
+    for attempt in range(1, 3):
+        try:
+            last_raw = await query_ollama(
+                direct_source_classifier_prompt(message, compact=attempt == 2),
+                temperature=0.0,
+                num_predict=32,
+                response_format=DIRECT_SOURCE_RESPONSE_SCHEMA,
+                clean_output=False,
+                max_attempts=1,
+                seed=settings.ollama_classifier_seed,
+            )
+            return DirectSourceDecision(
+                source=parse_direct_source_response(last_raw),
+                attempts=attempt,
+                duration_seconds=round(time.perf_counter() - started, 3),
+                raw_output_preview=_visible_raw_output(last_raw)[:500],
+            )
+        except OllamaRequestError as exc:
+            last_error = exc.kind
+    return DirectSourceDecision(
+        source="missing",
+        attempts=2,
+        duration_seconds=round(time.perf_counter() - started, 3),
+        raw_output_preview=_visible_raw_output(last_raw)[:500],
+        fallback_reason=last_error or "invalid_direct_source_output",
     )
 
 

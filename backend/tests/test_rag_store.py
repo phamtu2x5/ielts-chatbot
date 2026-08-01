@@ -1116,6 +1116,24 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertEqual(conversation_language("Write an English paragraph."), "English")
         self.assertEqual(conversation_language("hmm"), "Vietnamese")
 
+    def test_direct_source_classifier_is_semantic_and_fails_closed(self) -> None:
+        prompt = llm.direct_source_classifier_prompt(
+            "Hãy viết đoạn văn trả lời đề bài vừa gửi."
+        )
+
+        self.assertIn("CURRENT REQUEST itself", prompt)
+        self.assertIn("Do not infer, guess, reconstruct", prompt)
+        self.assertEqual(
+            llm.parse_direct_source_response('{"source":"available"}'),
+            "available",
+        )
+        self.assertEqual(
+            llm.parse_direct_source_response('{"source":"missing"}'),
+            "missing",
+        )
+        with self.assertRaises(llm.OllamaRequestError):
+            llm.parse_direct_source_response('{"source":"unknown"}')
+
     def test_translation_contract_requires_vietnamese_and_all_question_numbers(self) -> None:
         contract = response_output_contract(
             "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",
@@ -1675,6 +1693,32 @@ Mô tả cấu trúc tài liệu bằng tiếng Việt."""
 
 
 class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_source_classifier_retries_and_fails_safe(self) -> None:
+        with patch.object(
+            llm,
+            "query_ollama",
+            AsyncMock(
+                side_effect=[
+                    llm.OllamaRequestError("invalid_direct_source_output", "bad"),
+                    '{"source":"available"}',
+                ]
+            ),
+        ):
+            available = await llm.classify_direct_source(
+                "Write an essay about whether university education should be free."
+            )
+        self.assertEqual(available.source, "available")
+        self.assertEqual(available.attempts, 2)
+
+        with patch.object(
+            llm,
+            "query_ollama",
+            AsyncMock(side_effect=llm.OllamaRequestError("transport", "offline")),
+        ):
+            missing = await llm.classify_direct_source("Write the essay mentioned above.")
+        self.assertEqual(missing.source, "missing")
+        self.assertEqual(missing.fallback_reason, "transport")
+
     def test_route_classifier_prompt_keeps_only_latest_exchange(self) -> None:
         history = [
             ChatMessage(role="user", content="Old document question"),

@@ -36,6 +36,7 @@ from .llm import (
     ROUTING_INTENTS,
     OllamaRequestError,
     RouteGatewayDecision,
+    classify_direct_source,
     classify_rag_intent,
     conversation_language,
     direct_chat_messages,
@@ -850,6 +851,12 @@ def generation_fallback(prepared: "ChatPreparation", message: str = "") -> str:
     return "Bạn muốn mình hỗ trợ nội dung gì? Hãy mô tả yêu cầu cụ thể hơn nhé."
 
 
+def missing_direct_source_response(message: str) -> str:
+    if conversation_language(message) == "English":
+        return "Please provide or paste the topic, question, text, or data you want me to use."
+    return "Bạn vui lòng gửi hoặc dán lại đề bài, văn bản hay dữ liệu cần dùng để mình trả lời đúng nội dung."
+
+
 def no_rag_match_response(message: str) -> str:
     contract = response_output_contract(
         message,
@@ -1116,12 +1123,6 @@ INCOMPLETE_GENERATION_ISSUE = (
 )
 
 
-def _writing_candidate_has_substance(text: str, minimum_words: int | None) -> bool:
-    word_count = len(re.findall(r"\b[\w'-]+\b", text, flags=re.UNICODE))
-    threshold = max(40, (minimum_words or 80) // 2)
-    return word_count >= threshold
-
-
 def _select_complete_candidate(
     first: str,
     retry: str,
@@ -1158,11 +1159,7 @@ async def generate_answer(
     )
     direct_writing_contract = writing_output_contract(message) if direct_writing else None
     apply_writing_contract = prepared.query_intent == "writing_generation" or bool(
-        direct_writing_contract
-        and (
-            direct_source_available
-            or _writing_candidate_has_substance(answer, direct_writing_contract.min_words)
-        )
+        direct_writing_contract and direct_source_available
     )
 
     if apply_writing_contract:
@@ -2138,7 +2135,7 @@ async def direct_reviewed_generation_fallback(
     output_contract: list[str] | None = None
     if is_direct_writing_request(req.message):
         output_contract = [
-            "- Apply the Writing constraints below only when the requested task source is available; otherwise ask briefly for the missing source."
+            "- The requested task source is available. Apply the Writing constraints below."
         ] + writing_output_contract(req.message).prompt_lines()
     generation_debug.update(
         {
@@ -3147,11 +3144,33 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 if direct_reviewed:
                     previous_answer_source = direct_conversation_source(req)
                     generation_debug = prepared.debug.setdefault("direct_generation", {})
+                    direct_writing = is_direct_writing_request(req.message)
+                    direct_source_available = previous_answer_source == "conversation"
+                    if direct_writing and not direct_source_available:
+                        source_decision = await classify_direct_source(req.message)
+                        generation_debug["source_sufficiency"] = source_decision.to_debug()
+                        direct_source_available = source_decision.source == "available"
+                    elif direct_writing:
+                        generation_debug["source_sufficiency"] = {
+                            "source": "available",
+                            "method": "trusted_conversation",
+                        }
+
+                    if direct_writing and not direct_source_available:
+                        generation_debug["generation_skipped"] = "missing_task_source"
+                        answer = missing_direct_source_response(req.message)
+                        for token in response_chunks(answer):
+                            yield stream_event("token", token=token)
+                        finish_resource_debug()
+                        yield metadata_event()
+                        yield stream_event("done")
+                        return
+
                     primary_response_debug = generation_debug.setdefault("primary_response", {})
                     primary_output_contract: list[str] | None = None
-                    if is_direct_writing_request(req.message):
+                    if direct_writing:
                         primary_output_contract = [
-                            "- Apply the Writing constraints below only when the requested task source is available; otherwise ask briefly for the missing source."
+                            "- The requested task source is available. Apply the Writing constraints below."
                         ] + writing_output_contract(req.message).prompt_lines()
                     try:
                         initial_answer = await query_ollama_chat(
@@ -3220,7 +3239,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             req.message,
                             initial_answer=initial_answer,
                             initial_done_reason=active_response_debug.get("done_reason"),
-                            direct_source_available=previous_answer_source == "conversation",
+                            direct_source_available=direct_source_available,
                             direct_retry=retry_direct_generation,
                         )
                         if initial_answer.strip()
