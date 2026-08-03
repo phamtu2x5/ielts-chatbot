@@ -1653,7 +1653,7 @@ Mô tả cấu trúc tài liệu bằng tiếng Việt."""
         )
 
         self.assertIn("use exactly three fields", prompt)
-        self.assertIn("Evidence must directly address the question", prompt)
+        self.assertIn("Evidence must be copied from PASSAGE EVIDENCE", prompt)
         self.assertIn("supports -> TRUE; contradicts -> FALSE; absent -> NOT GIVEN", prompt)
 
     def test_semantic_qa_prompt_requires_the_requested_relationship_and_evidence(self) -> None:

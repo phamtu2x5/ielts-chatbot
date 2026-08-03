@@ -1023,9 +1023,10 @@ def response_retry_prompt(
             "Preserve each question number. For multiple-choice questions, put one supplied "
             "option label immediately after the question number. For TRUE/FALSE/NOT GIVEN "
             "questions, put the corresponding label immediately after the question number. "
-            "Respect any word limit in the supplied instructions. Then give one concise Evidence "
-            "quote that directly supports that answer and one Relationship field using supports, "
-            "contradicts, or absent; do not invent missing options or evidence."
+            "Respect any word limit in the supplied instructions. Then copy one concise Evidence "
+            "quote from PASSAGE EVIDENCE, never from the question or answer options, and give one "
+            "Relationship field using supports, contradicts, or absent; do not invent missing "
+            "options or evidence."
         ),
     }.get(
         query_intent,
@@ -2469,7 +2470,7 @@ def rag_prompt(
                 "- If the context only contains question text and lacks passage evidence, say that there is not enough passage evidence to solve reliably.",
                 "- Solve each requested question independently. Do not reuse one evidence statement as support for a different question unless it directly addresses both.",
                 "- For every answer, use exactly three fields in this order: Question <number>: <answer>; Evidence: <one short passage quote>; Relationship: supports, contradicts, or absent.",
-                "- Evidence must directly address the question and support the selected option or answer phrase. A quote about a different subject, actor, situation, or comparison is invalid even when it comes from the same passage.",
+                "- Evidence must be copied from PASSAGE EVIDENCE, never from the question or answer options, and must directly support the selected answer. A quote about a different paragraph, subject, actor, situation, or comparison is invalid.",
                 "- Do not use a second conclusion or unsupported elimination. Keep the evidence check concise.",
             ]
         )

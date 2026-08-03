@@ -944,20 +944,82 @@ def _solve_evidence(segment: str) -> str:
     return match.group(1).strip().strip('"“”') if match else ""
 
 
-def _solve_content_tokens(text: str) -> set[str]:
-    ignored = {
-        "about", "after", "again", "answer", "because", "before", "could",
-        "does", "from", "have", "into", "question", "should", "their", "there",
-        "these", "they", "this", "those", "what", "when", "where", "which",
-        "with", "would",
-    }
-    tokens: set[str] = set()
-    for raw in re.findall(r"[^\W\d_]+", text.casefold(), flags=re.UNICODE):
-        if len(raw) < 4 or raw in ignored:
-            continue
-        token = raw[:-1] if len(raw) > 4 and raw.endswith("s") and not raw.endswith("ss") else raw
-        tokens.add(token)
-    return tokens
+def _normalized_evidence_text(text: str) -> str:
+    return " ".join(re.findall(r"[^\W_]+", text.casefold(), flags=re.UNICODE))
+
+
+def _paragraph_evidence_scope(text: str, label: str) -> str | None:
+    start = re.search(
+        rf"(?<![\w]){re.escape(label)}\s+(?=[A-Z][a-z])",
+        text,
+    )
+    if not start:
+        return None
+    next_label = chr(ord(label) + 1) if label < "Z" else None
+    end = (
+        re.search(
+            rf"(?<![\w]){re.escape(next_label)}\s+(?=[A-Z][a-z])",
+            text[start.end() :],
+        )
+        if next_label
+        else None
+    )
+    end_index = start.end() + end.start() if end else len(text)
+    return text[start.end() : end_index]
+
+
+def _evidence_source_texts(
+    packet: dict[str, Any],
+    report: dict[str, Any],
+    sources: list[dict[str, Any]],
+) -> list[str]:
+    number = packet.get("question_number")
+    selection = next(
+        (
+            item
+            for item in report.get("evidence_by_question") or []
+            if item.get("question_number") == number
+        ),
+        None,
+    )
+    selected_ids = set(
+        (selection or {}).get("selected_chunk_ids")
+        or packet.get("evidence_chunk_ids")
+        or []
+    )
+    texts = [
+        _source_text(source)
+        for source in sources
+        if source.get("chunk_id") in selected_ids
+        and source.get("metadata", {}).get("unit_type") == "passage"
+    ]
+    paragraph_match = re.search(
+        r"\bparagraph\s+([A-Z])\b",
+        str(packet.get("question_stem") or packet.get("question_text") or ""),
+        flags=re.IGNORECASE,
+    )
+    if not paragraph_match:
+        return texts
+    label = paragraph_match.group(1).upper()
+    paragraph_texts = [
+        scoped
+        for text in texts
+        if (scoped := _paragraph_evidence_scope(text, label))
+    ]
+    return paragraph_texts or texts
+
+
+def _evidence_appears_in_sources(evidence: str, source_texts: list[str]) -> bool:
+    normalized_sources = [_normalized_evidence_text(text) for text in source_texts]
+    evidence_parts = [
+        _normalized_evidence_text(part)
+        for part in re.split(r"(?:\.{3,}|…)", evidence)
+    ]
+    evidence_parts = [part for part in evidence_parts if len(part.split()) >= 3]
+    return bool(evidence_parts) and all(
+        any(part in source for source in normalized_sources)
+        for part in evidence_parts
+    )
 
 
 def _normalized_option_text(text: str) -> str:
@@ -1082,7 +1144,11 @@ def _effective_solve_contract(packet: dict[str, Any]) -> dict[str, Any]:
     return contract
 
 
-def solve_output_issues(text: str, report: dict[str, Any]) -> list[str]:
+def solve_output_issues(
+    text: str,
+    report: dict[str, Any],
+    sources: list[dict[str, Any]] | None = None,
+) -> list[str]:
     """Validate solve response shape without judging semantic correctness."""
     issues: list[str] = []
     requested = list(report.get("requested_question_numbers") or [])
@@ -1143,26 +1209,12 @@ def solve_output_issues(text: str, report: dict[str, Any]) -> list[str]:
         if not evidence:
             continue
 
-        evidence_tokens = _solve_content_tokens(evidence)
-        anchor_text = ""
-        if question_type in {"multiple_choice", "matching"} and len(selected) == 1:
-            anchor_text = next(
-                (
-                    str(option.get("text") or "")
-                    for option in packet.get("answer_options") or []
-                    if isinstance(option, dict)
-                    and str(option.get("label") or "").casefold() == selected[0].casefold()
-                ),
-                "",
-            )
-        elif question_type == "short_answer":
-            anchor_text = answer_head
-        elif question_type in {"true_false_not_given", "yes_no_not_given"}:
-            anchor_text = str(packet.get("question_stem") or packet.get("question_text") or "")
-        anchor_tokens = _solve_content_tokens(anchor_text)
-        if anchor_tokens and evidence_tokens.isdisjoint(anchor_tokens):
+        if sources and relationship != "absent" and not _evidence_appears_in_sources(
+            evidence,
+            _evidence_source_texts(packet, report, sources),
+        ):
             issues.append(
-                f"Question {number} Evidence does not directly anchor the selected answer."
+                f"Question {number} Evidence is not quoted from its selected passage evidence."
             )
     return issues
 
@@ -1172,11 +1224,12 @@ def select_best_solve_output(
     retry: str,
     contract: Any,
     report: dict[str, Any],
+    sources: list[dict[str, Any]],
 ) -> str:
     return min(
         (first, retry),
         key=lambda text: (
-            len(solve_output_issues(text, report)),
+            len(solve_output_issues(text, report, sources)),
             response_output_penalty(text, contract),
         ),
     )
@@ -1338,7 +1391,11 @@ async def generate_answer(
         first_adjustments: list[dict[str, Any]] = []
         if solve_report:
             answer, first_adjustments = normalize_solve_output(answer, solve_report)
-        first_solve_issues = solve_output_issues(answer, solve_report) if solve_report else []
+        first_solve_issues = (
+            solve_output_issues(answer, solve_report, prepared.sources)
+            if solve_report
+            else []
+        )
         issues = response_output_issues(answer, contract) + first_solve_issues
         if first_incomplete:
             issues.append(INCOMPLETE_GENERATION_ISSUE)
@@ -1428,6 +1485,7 @@ async def generate_answer(
                     second,
                     contract,
                     solve_report,
+                    prepared.sources,
                 )
             else:
                 selector = lambda first, second: select_best_response_output(
@@ -1478,7 +1536,11 @@ async def generate_answer(
             answer, final_adjustments = normalize_solve_output(answer, solve_report)
             solve_debug["final_adjustments"] = final_adjustments
             solve_debug["final_normalized_output"] = generation_candidate_debug(answer)
-        final_solve_issues = solve_output_issues(answer, solve_report) if solve_report else []
+        final_solve_issues = (
+            solve_output_issues(answer, solve_report, prepared.sources)
+            if solve_report
+            else []
+        )
         final_issues = response_output_issues(answer, contract) + final_solve_issues
         if selected_done_reason == "length":
             final_issues.append(INCOMPLETE_GENERATION_ISSUE)

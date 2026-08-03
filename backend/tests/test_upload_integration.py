@@ -2427,7 +2427,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ["Question 24 is missing a valid answer option label."],
         )
 
-    def test_solve_output_validator_rejects_unanchored_option_evidence(self) -> None:
+    def test_solve_output_validator_rejects_option_text_as_passage_evidence(self) -> None:
         report = {
             "requested_question_numbers": [24],
             "question_targets": [
@@ -2450,17 +2450,37 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     },
                 }
             ],
+            "evidence_by_question": [
+                {"question_number": 24, "selected_chunk_ids": ["passage-2"]}
+            ],
         }
         output = (
-            "Question 24: D\n"
-            "Evidence: A standing human looks unusually large from the front.\n"
+            "Question 24: C\n"
+            "Evidence: They do not think people in cars are living creatures.\n"
             "Relationship: supports"
         )
+        sources = [
+            {
+                "chunk_id": "passage-2",
+                "text": (
+                    "If you think like a tiger, a human in a car might appear just to be "
+                    "a part of the car, and because tigers do not eat cars the human is safe."
+                ),
+                "metadata": {"unit_type": "passage"},
+            }
+        ]
 
         self.assertEqual(
-            main.solve_output_issues(output, report),
-            ["Question 24 Evidence does not directly anchor the selected answer."],
+            main.solve_output_issues(output, report, sources),
+            ["Question 24 Evidence is not quoted from its selected passage evidence."],
         )
+
+        grounded = (
+            "Question 24: C\n"
+            "Evidence: a human in a car might appear just to be a part of the car\n"
+            "Relationship: supports"
+        )
+        self.assertEqual(main.solve_output_issues(grounded, report, sources), [])
 
     def test_format_solve_context_keeps_evidence_with_its_question(self) -> None:
         sources = [
@@ -2619,6 +2639,72 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             prepared.debug["generation"]["solve_contract"]["first_draft_adjustments"][0]["reason"],
             "option_text_mapping",
         )
+
+    async def test_solve_generation_prefers_evidence_from_requested_paragraph(self) -> None:
+        report = {
+            "requested_question_numbers": [38],
+            "question_targets": [
+                {
+                    "question_number": 38,
+                    "question_type": "multiple_choice",
+                    "question_stem": (
+                        "In Paragraph G, the writer suggests that an important feature "
+                        "of Aboriginal art is"
+                    ),
+                    "answer_options": [
+                        {"label": "B", "text": "its significance to the group."},
+                        {"label": "C", "text": "its religious content."},
+                    ],
+                    "answer_contract": {
+                        "kind": "multiple_choice",
+                        "allowed_labels": ["B", "C"],
+                        "requires_single_label": True,
+                        "requires_options": True,
+                    },
+                    "evidence_chunk_ids": ["passage-3"],
+                }
+            ],
+            "evidence_by_question": [
+                {"question_number": 38, "selected_chunk_ids": ["passage-3"]}
+            ],
+        }
+        prepared = main.ChatPreparation(
+            prompt="grounded solve prompt",
+            static_response=None,
+            route_used="vector_rag",
+            sources=[
+                {
+                    "chunk_id": "passage-3",
+                    "text": (
+                        "F The central function of Aboriginal painting is to guarantee "
+                        "the survival of this world. G Each work is created within and on "
+                        "behalf of a community who must approve it. H Nowadays each community "
+                        "is organised as a cooperative."
+                    ),
+                    "metadata": {"unit_type": "passage"},
+                }
+            ],
+            debug={
+                "intent_decision": {"allow_solution": True},
+                "retrieval": {"solve_context_report": report},
+            },
+            query_intent="solve_questions",
+        )
+        model = AsyncMock(
+            side_effect=[
+                "Question 38: C\nEvidence: The central function of Aboriginal painting "
+                "is to guarantee the survival of this world.\nRelationship: supports",
+                "Question 38: B\nEvidence: Each work is created within and on behalf of "
+                "a community who must approve it.\nRelationship: supports",
+            ]
+        )
+
+        with patch.object(main, "query_ollama", model):
+            answer = await main.generate_answer(prepared, "Trả lời Question 38 từ Paragraph G.")
+
+        self.assertIn("Question 38: B", answer)
+        self.assertEqual(model.await_count, 2)
+        self.assertEqual(prepared.debug["generation"]["solve_contract"]["final_issues"], [])
 
     async def test_solve_generation_maps_absent_relationship_in_returned_output(self) -> None:
         report = {
