@@ -1634,6 +1634,50 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.solve_context_issue(incomplete), "missing_answer_options")
         self.assertIsNone(main.solve_context_issue(complete))
 
+    def test_solve_packet_marks_list_question_without_options_incomplete(self) -> None:
+        sources = [
+            {
+                "chunk_id": "questions-40-40",
+                "document_id": "doc-1",
+                "text": (
+                    "Question 40 40. From the list below choose the most suitable title "
+                    "for the whole of Reading Passage 3."
+                ),
+                "metadata": {
+                    "unit_type": "question_group",
+                    "question_range": [40, 40],
+                    "passage_number": 3,
+                    "instructions": "Question 40",
+                },
+            },
+            {
+                "chunk_id": "question-40",
+                "document_id": "doc-1",
+                "text": (
+                    "40. From the list below choose the most suitable title "
+                    "for the whole of Reading Passage 3."
+                ),
+                "metadata": {
+                    "unit_type": "question",
+                    "question_range": [40, 40],
+                    "passage_number": 3,
+                    "parent_id": "questions-40-40",
+                },
+            },
+            {
+                "chunk_id": "passage-3",
+                "document_id": "doc-1",
+                "text": "Passage evidence.",
+                "metadata": {"unit_type": "passage", "passage_number": 3},
+            },
+        ]
+
+        report = main.solve_context_report("Trả lời Question 40", sources)
+
+        self.assertEqual(report["missing_option_question_numbers"], [40])
+        self.assertIn("missing_answer_options", report["issues"])
+        self.assertFalse(report["question_targets"][0]["context_ready"])
+
     def test_solve_context_requires_every_requested_question(self) -> None:
         sources = [
             {

@@ -439,11 +439,24 @@ def _normalize_solve_question_type(
         )
     ):
         return "matching"
-    if raw_type == "multiple_choice" or answer_options:
+    if raw_type == "multiple_choice" or answer_options or _question_requires_options(contract_text):
         return "multiple_choice"
     if raw_type in {"short_answer", "short_answer_examples"} or word_limit:
         return "short_answer"
     return raw_type or "unknown"
+
+
+def _question_requires_options(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?:from\s+the\s+list\s+below|"
+            r"choose\s+(?:the\s+)?(?:correct\s+|appropriate\s+)?letters?|"
+            r"which\s+(?:(?:two|three|four|\d+)\s+)?of\s+the\s+following|"
+            r"list\s+of\s+headings)",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _solve_answer_contract(
@@ -1881,14 +1894,7 @@ def solve_context_issue(
         report = solve_context_report(message, sources)
         if report["issues"]:
             return report["issues"][0]
-    requires_options = bool(
-        re.search(
-            r"(?:from\s+the\s+list\s+below|choose\s+(?:the\s+)?(?:correct\s+)?letter|"
-            r"which\s+of\s+the\s+following)",
-            question_text,
-            flags=re.IGNORECASE,
-        )
-    )
+    requires_options = _question_requires_options(question_text)
     if requires_options and len(_answer_option_labels(question_text)) < 2:
         return "missing_answer_options"
     return None

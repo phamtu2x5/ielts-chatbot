@@ -13,10 +13,14 @@ QUESTION_HEADER_RE = re.compile(
     r"Questions?\s+(\d{1,2})(?:\s*(?:-|–|to)\s*(\d{1,2}))?",
     re.IGNORECASE,
 )
+EMBEDDED_WRITING_TASK_RE = re.compile(
+    r"(?im)^[ \t]*(?:writing\s+)?task\s*([12])\b\s*[-–:]?"
+)
 NUMBERED_QUESTION_RE = re.compile(
     r"(?<!\d)(\d{1,2})\.\s*(.*?)(?=(?<!\d)\d{1,2}\.\s|Questions?\s+\d{1,2}(?:\s*(?:-|–|to)\s*\d{1,2})?|$)",
     re.IGNORECASE | re.DOTALL,
 )
+QUESTION_NUMBER_MARKER_RE = re.compile(r"(?<!\d)(\d{1,2})\.\s*")
 PAGE_MARKER_RE = re.compile(r"\n{1,3}\[Page\s+\d+\]", re.IGNORECASE)
 FOOTER_RE = re.compile(r"https?://\S+|Page\s+\d+", re.IGNORECASE)
 TITLE_WORD_RE = re.compile(r"[A-Z][A-Za-z'’.-]+")
@@ -220,19 +224,99 @@ class IELTSStructureParser:
         full_text, spans = self._linearize(document)
         parsed_groups = self._dedupe_groups(self._parse_question_groups(document, full_text, spans))
         passages = self._assign_passages(document, full_text, spans, parsed_groups)
+        embedded_writing = self._embedded_writing_sections(full_text, spans, parsed_groups)
         outline = self._build_outline(document, passages)
+        if embedded_writing:
+            outline["writing_tasks"] = [
+                {
+                    "task_index": section.task_index,
+                    "task_number": section.writing_task_number,
+                    "pages": section.pages,
+                }
+                for section in embedded_writing
+            ]
         diagnostics = self._diagnostics(passages)
+        diagnostics["writing_tasks_found"] = len(embedded_writing)
         structured = IELTSDocument(
             document_id=document.document_id,
             filename=document.filename,
             passages=passages,
             outline=outline,
             diagnostics=diagnostics,
+            sections=embedded_writing,
         )
         if passages:
             document.metadata["document_type"] = "ielts_reading"
+        if embedded_writing:
+            document.metadata["sections"] = [section.to_dict() for section in embedded_writing]
         document.metadata["ielts_structure"] = structured.to_dict()
         return structured
+
+    def _embedded_writing_sections(
+        self,
+        full_text: str,
+        spans: list[_Span],
+        parsed_groups: list[_ParsedGroup],
+    ) -> list[WritingSection]:
+        if not parsed_groups:
+            return []
+
+        search_start = max(group.end_offset for group in parsed_groups)
+        tail = full_text[search_start:]
+        anchors = list(EMBEDDED_WRITING_TASK_RE.finditer(tail))
+        sections: list[WritingSection] = []
+        for anchor_index, anchor in enumerate(anchors):
+            start = search_start + anchor.start()
+            end = (
+                search_start + anchors[anchor_index + 1].start()
+                if anchor_index + 1 < len(anchors)
+                else len(full_text)
+            )
+            task_number = int(anchor.group(1))
+            content_start = search_start + anchor.end()
+            content = PAGE_MARKER_RE.sub(" ", full_text[content_start:end])
+            content = FOOTER_RE.sub(" ", content)
+            content = self._clean_section_text(content)
+            if len(re.findall(r"\b[\w'-]+\b", content, flags=re.UNICODE)) < 6:
+                continue
+
+            element_ids, pages = self._span_metadata(spans, start, end)
+            confidences = [
+                span.element.confidence
+                for span in spans
+                if span.end > start and span.start < end
+            ]
+            sections.append(
+                WritingSection(
+                    section_id=f"embedded-writing-{len(sections) + 1}-task",
+                    type=f"writing_task_{task_number}",
+                    task_index=len(sections) + 1,
+                    title=None,
+                    visual_type=self._embedded_writing_visual_type(content),
+                    text=f"Task {task_number}\n{content}",
+                    pages=pages,
+                    element_ids=element_ids,
+                    confidence=min(confidences) if confidences else 1.0,
+                    writing_task_number=task_number,
+                )
+            )
+        return sections
+
+    def _embedded_writing_visual_type(self, text: str) -> str | None:
+        lowered = text.casefold()
+        for marker, visual_type in (
+            ("pie chart", "pie_chart"),
+            ("line chart", "line_chart"),
+            ("bar chart", "bar_chart"),
+            ("table", "table"),
+            ("map", "map"),
+            ("diagram", "diagram"),
+            ("chart", "chart"),
+            ("graph", "graph"),
+        ):
+            if marker in lowered:
+                return visual_type
+        return None
 
     def _linearize(self, document: ProcessedDocument) -> tuple[str, list[_Span]]:
         parts: list[str] = []
@@ -481,11 +565,18 @@ class IELTSStructureParser:
         pages: list[int],
     ) -> list[IELTSQuestion]:
         questions: list[IELTSQuestion] = []
-        for match in NUMBERED_QUESTION_RE.finditer(text):
+        matches = [
+            match
+            for match in QUESTION_NUMBER_MARKER_RE.finditer(text)
+            if start <= int(match.group(1)) <= end
+        ]
+        for index, match in enumerate(matches):
             number = int(match.group(1))
-            if not start <= number <= end:
-                continue
-            body = self._trim_question_body(self._clean_section_text(match.group(2)), question_type)
+            body_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            body = self._trim_question_body(
+                self._clean_section_text(text[match.end() : body_end]),
+                question_type,
+            )
             options = re.findall(r"\b([A-D])\s+([^A-D]+?)(?=\s+[A-D]\s+|$)", body)
             questions.append(
                 IELTSQuestion(
@@ -701,6 +792,8 @@ class IELTSStructureParser:
 
     def _infer_question_type(self, text: str) -> str | None:
         lowered = text.lower()
+        if "yes" in lowered and "no" in lowered and "not given" in lowered:
+            return "yes_no_not_given"
         if "true" in lowered and "false" in lowered and "not given" in lowered:
             return "true_false_not_given"
         if "complete the table" in lowered:
@@ -709,13 +802,27 @@ class IELTSStructureParser:
             return "flowchart_completion"
         if "label the diagram" in lowered or "label the figure" in lowered:
             return "diagram_labeling"
-        if "choose the correct letter" in lowered:
+        if "list of headings" in lowered and "paragraph" in lowered:
+            return "matching_headings"
+        if "match" in lowered or "with one of" in lowered:
+            return "matching"
+        if (
+            "choose the correct letter" in lowered
+            or "choose the appropriate letter" in lowered
+            or re.search(r"\bwhich\s+(?:two|three|four|\d+)\s+of\s+the\s+following\b", lowered)
+            or re.search(r"\bfrom\s+the\s+list\s+below\s+choose\b", lowered)
+        ):
             return "multiple_choice"
         if "give two examples" in lowered:
             return "short_answer_examples"
-        if "choose no more than" in lowered:
+        if "choose no more than" in lowered or re.search(
+            r"\bchoose\s+(?:one|two|three|four|\d+)(?:\s+or\s+(?:one|two|three|four|\d+))?\s+words?\b",
+            lowered,
+        ):
             return "short_answer"
-        if "match" in lowered:
+        first_question = NUMBERED_QUESTION_RE.search(text)
+        shared_option_text = text[: first_question.start()] if first_question else text
+        if len(re.findall(r"(?:^|\s)[A-H](?=\s+\S)", shared_option_text)) >= 3:
             return "matching"
         return None
 
@@ -1045,7 +1152,7 @@ class StructuredChunker:
         if not structured.has_structure():
             return chunks
 
-        if structured.sections:
+        if structured.sections and not structured.passages:
             return self._writing_chunks(document, structured.sections)
 
         chunks.append(self._outline_chunk(document, structured, len(chunks)))
@@ -1059,28 +1166,37 @@ class StructuredChunker:
                 for question in group.questions:
                     chunks.append(self._question_chunk(document, passage, group, question, len(chunks)))
 
+        if structured.sections:
+            chunks.extend(self._writing_chunks(document, structured.sections, len(chunks)))
+
         return chunks
 
     def _writing_chunks(
         self,
         document: ProcessedDocument,
         sections: list[WritingSection],
+        start_index: int = 0,
     ) -> list[DocumentChunk]:
         chunks: list[DocumentChunk] = []
         for section in sections:
             parts = self._split_text(section.text, self.config.chunk_max_tokens)
             for part_index, part in enumerate(parts, 1):
-                unit_type = "writing_task" if section.type == "writing_task_1" else "sample_answer"
-                title = section.title or f"Writing Task {section.task_index}"
+                is_writing_task = section.type.startswith("writing_task_")
+                unit_type = "writing_task" if is_writing_task else "sample_answer"
+                if section.writing_task_number is None:
+                    title = section.title or f"Writing Task {section.task_index}"
+                    retrieval_prefix = f"IELTS Writing Task 1. Task {section.task_index}."
+                else:
+                    title = section.title or f"Writing Task {section.writing_task_number}"
+                    retrieval_prefix = f"IELTS Writing Task {section.writing_task_number}."
                 retrieval = (
-                    f"IELTS Writing Task 1. Task {section.task_index}. "
-                    f"Section: {unit_type}. Visual type: {section.visual_type or 'unknown'}. "
-                    f"Title: {title}.\n\n{part}"
+                    f"{retrieval_prefix} Section: {unit_type}. "
+                    f"Visual type: {section.visual_type or 'unknown'}. Title: {title}.\n\n{part}"
                 )
                 chunks.append(
                     self._make_chunk(
                         document=document,
-                        index=len(chunks),
+                        index=start_index + len(chunks),
                         chunk_id=(
                             f"{document.document_id}-writing-{section.task_index}-{unit_type}-{part_index}"
                         ),
@@ -1095,6 +1211,7 @@ class StructuredChunker:
                             "chunk_reason": unit_type,
                             "parent_id": f"writing-task-{section.task_index}",
                             "task_index": section.task_index,
+                            "writing_task_number": section.writing_task_number,
                             "task_title": section.title,
                             "visual_type": section.visual_type,
                             "section_id": section.section_id,

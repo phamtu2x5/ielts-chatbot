@@ -30,6 +30,7 @@ class WritingSection:
     pages: list[int]
     element_ids: list[str]
     confidence: float
+    writing_task_number: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -42,6 +43,7 @@ class WritingSection:
             "pages": self.pages,
             "element_ids": self.element_ids,
             "confidence": self.confidence,
+            "writing_task_number": self.writing_task_number,
         }
 
 
