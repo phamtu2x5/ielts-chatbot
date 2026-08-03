@@ -1023,8 +1023,9 @@ def response_retry_prompt(
             "Preserve each question number. For multiple-choice questions, put one supplied "
             "option label immediately after the question number. For TRUE/FALSE/NOT GIVEN "
             "questions, put the corresponding label immediately after the question number. "
-            "Respect any word limit in the supplied instructions. Then give one concise evidence "
-            "statement; do not invent missing options or evidence."
+            "Respect any word limit in the supplied instructions. Then give one concise Evidence "
+            "quote that directly supports that answer and one Relationship field using supports, "
+            "contradicts, or absent; do not invent missing options or evidence."
         ),
     }.get(
         query_intent,
@@ -1276,6 +1277,11 @@ def likely_contains_solution(text: str) -> bool:
         return True
     return bool(
         re.search(
+            r"(?im)^\s*(?:câu(?:\s+hỏi)?\s*)?\d{1,3}\s*[.)]\s*"
+            r"(?:[a-h]|true|false|not\s+given|yes|no)\s*[.!]?\s*$",
+            text,
+        )
+        or re.search(
             r"(?im)^\s*(?:câu\s*)?\d{1,2}\s*[:=-]\s*(?:[a-h]\b|true\b|false\b|not\s+given\b|\S.{0,40}$)",
             text,
         )
@@ -2462,7 +2468,8 @@ def rag_prompt(
                 "- Do not mark FALSE just because the passage lacks a reason, cause, date, comparison, or detail. If the required detail is absent, the answer is NOT GIVEN.",
                 "- If the context only contains question text and lacks passage evidence, say that there is not enough passage evidence to solve reliably.",
                 "- Solve each requested question independently. Do not reuse one evidence statement as support for a different question unless it directly addresses both.",
-                "- For each answer, give one short evidence quote and its relationship in this concise order: Question number and answer; Evidence; Relationship: supports, contradicts, or absent when the task is True/False/Not Given.",
+                "- For every answer, use exactly three fields in this order: Question <number>: <answer>; Evidence: <one short passage quote>; Relationship: supports, contradicts, or absent.",
+                "- Evidence must directly address the question and support the selected option or answer phrase. A quote about a different subject, actor, situation, or comparison is invalid even when it comes from the same passage.",
                 "- Do not use a second conclusion or unsupported elimination. Keep the evidence check concise.",
             ]
         )

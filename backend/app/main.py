@@ -651,21 +651,13 @@ def solve_question_packets(
 
 
 def evidence_query_for_solve_packet(packet: dict[str, Any], fallback: str) -> str:
-    parts = [str(packet.get("question_stem") or "").strip()]
-    parts.extend(
-        str(option.get("text") or "").strip()
-        for option in packet.get("answer_options") or []
-        if isinstance(option, dict)
-    )
-    query_parts: list[str] = []
-    for part in parts:
-        normalized = re.sub(r"\s+", " ", part).strip()
-        if normalized and normalized.casefold() not in {
-            existing.casefold() for existing in query_parts
-        }:
-            query_parts.append(normalized)
-    if query_parts:
-        return " ".join(query_parts)
+    question_stem = re.sub(
+        r"\s+",
+        " ",
+        str(packet.get("question_stem") or ""),
+    ).strip()
+    if question_stem:
+        return question_stem
 
     question_text = re.sub(
         r"^\s*\d{1,3}\s*[.)]\s*",
@@ -935,10 +927,37 @@ def _solve_answer_head(segment: str, question_number: int) -> str:
 
 def _solve_relationship(segment: str) -> str | None:
     match = re.search(
-        r"(?i)\brelationship\s*:\s*(supports|contradicts|absent)\b",
+        r"(?im)^\s*(?:[-*]\s*)?(?:\*{0,2})relationship\s*:\s*"
+        r"(?:\*{0,2})(supports|contradicts|absent)\b",
         segment,
     )
     return match.group(1).lower() if match else None
+
+
+def _solve_evidence(segment: str) -> str:
+    match = re.search(
+        r"(?is)(?:^|\n)\s*(?:[-*]\s*)?(?:\*{0,2})"
+        r"(?:evidence|bằng\s+chứng)\s*:\s*(?:\*{0,2})(.*?)"
+        r"(?=\n\s*(?:[-*]\s*)?(?:\*{0,2})relationship\s*:|\Z)",
+        segment,
+    )
+    return match.group(1).strip().strip('"“”') if match else ""
+
+
+def _solve_content_tokens(text: str) -> set[str]:
+    ignored = {
+        "about", "after", "again", "answer", "because", "before", "could",
+        "does", "from", "have", "into", "question", "should", "their", "there",
+        "these", "they", "this", "those", "what", "when", "where", "which",
+        "with", "would",
+    }
+    tokens: set[str] = set()
+    for raw in re.findall(r"[^\W\d_]+", text.casefold(), flags=re.UNICODE):
+        if len(raw) < 4 or raw in ignored:
+            continue
+        token = raw[:-1] if len(raw) > 4 and raw.endswith("s") and not raw.endswith("ss") else raw
+        tokens.add(token)
+    return tokens
 
 
 def _normalized_option_text(text: str) -> str:
@@ -997,15 +1016,18 @@ def normalize_solve_output(
             continue
         contract = packet.get("answer_contract") or {}
         answer: str | None = None
+        adjustment_reason: str | None = None
         relationship = _solve_relationship(segment)
         relationship_map = contract.get("relationship_map") or {}
         if relationship and relationship in relationship_map:
             answer = relationship_map[relationship]
+            adjustment_reason = "relationship_mapping"
         elif contract.get("kind") in {"multiple_choice", "matching"}:
             answer = _option_label_from_answer(
                 _solve_answer_head(segment, number),
                 packet.get("answer_options") or [],
             )
+            adjustment_reason = "option_text_mapping"
         if not answer:
             continue
         normalized, changed = _replace_solve_answer(
@@ -1019,7 +1041,7 @@ def normalize_solve_output(
                 {
                     "question_number": number,
                     "answer": answer,
-                    "reason": "relationship_mapping" if relationship else "option_text_mapping",
+                    "reason": adjustment_reason,
                 }
             )
     return normalized, adjustments
@@ -1075,6 +1097,7 @@ def solve_output_issues(text: str, report: dict[str, Any]) -> list[str]:
         question_type = answer_contract["kind"]
         answer_head = _solve_answer_head(segment, number)
         allowed_labels = answer_contract["allowed_labels"]
+        selected: list[str] = []
         if answer_contract.get("requires_options") and len(allowed_labels) < 2:
             issues.append(f"Question {number} is missing its answer option contract.")
         elif answer_contract.get("requires_single_label") or question_type in {
@@ -1103,6 +1126,44 @@ def solve_output_issues(text: str, report: dict[str, Any]) -> list[str]:
                 issues.append(
                     f"Question {number} exceeds its {packet['word_limit']}-word answer limit."
                 )
+        if not has_explicit_contract:
+            continue
+
+        evidence = _solve_evidence(segment)
+        relationship = _solve_relationship(segment)
+        if not evidence:
+            issues.append(f"Question {number} is missing an Evidence field.")
+        if not relationship:
+            issues.append(f"Question {number} is missing a valid Relationship field.")
+        elif (
+            question_type in {"multiple_choice", "matching", "short_answer"}
+            and relationship != "supports"
+        ):
+            issues.append(f"Question {number} must use Relationship: supports for the selected answer.")
+        if not evidence:
+            continue
+
+        evidence_tokens = _solve_content_tokens(evidence)
+        anchor_text = ""
+        if question_type in {"multiple_choice", "matching"} and len(selected) == 1:
+            anchor_text = next(
+                (
+                    str(option.get("text") or "")
+                    for option in packet.get("answer_options") or []
+                    if isinstance(option, dict)
+                    and str(option.get("label") or "").casefold() == selected[0].casefold()
+                ),
+                "",
+            )
+        elif question_type == "short_answer":
+            anchor_text = answer_head
+        elif question_type in {"true_false_not_given", "yes_no_not_given"}:
+            anchor_text = str(packet.get("question_stem") or packet.get("question_text") or "")
+        anchor_tokens = _solve_content_tokens(anchor_text)
+        if anchor_tokens and evidence_tokens.isdisjoint(anchor_tokens):
+            issues.append(
+                f"Question {number} Evidence does not directly anchor the selected answer."
+            )
     return issues
 
 
@@ -2937,10 +2998,28 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         if query_intent == "solve_questions":
             context = format_solve_context(sources, solve_report)
         else:
+            prompt_sources = sources
+            if (
+                query_intent == "explain_questions"
+                and has_explicit_no_solution_constraint(message)
+            ):
+                prompt_sources = [
+                    source
+                    for source in sources
+                    if source.get("metadata", {}).get("unit_type")
+                    in {"question_group", "question"}
+                ]
+                debug["retrieval"]["no_solution_context"] = {
+                    "source_count": len(prompt_sources),
+                    "excluded_passage_evidence": len(sources) - len(prompt_sources),
+                }
             context = (
-                format_context(sources, max_chars_per_source=settings.rag_overview_source_chars)
+                format_context(
+                    prompt_sources,
+                    max_chars_per_source=settings.rag_overview_source_chars,
+                )
                 if probe.get("is_overview")
-                else format_context(sources)
+                else format_context(prompt_sources)
             )
         if query_intent == "writing_generation":
             facts = writing_table_facts(sources)

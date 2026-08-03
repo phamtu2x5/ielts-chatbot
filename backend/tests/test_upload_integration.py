@@ -287,6 +287,82 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("explain_questions", follow_up)
         self.assertIn("solve_questions", explicit)
 
+    async def test_no_solution_follow_up_excludes_passage_from_model_context(self) -> None:
+        class QuestionStore(_FakeChatStore):
+            def structured_lookup(self, query, intent, top_k, document_ids=None):
+                return self.explicit_chunks[:top_k]
+
+        catalog = [
+            {
+                "source_file": "reading.pdf",
+                "document_ids": ["doc-1"],
+                "mime_types": ["application/pdf"],
+                "unit_types": ["question_group", "question", "passage"],
+            }
+        ]
+        store = QuestionStore(catalog)
+        store.explicit_chunks = [
+            {
+                "chunk_id": "group-36-40",
+                "document_id": "doc-1",
+                "source_file": "reading.pdf",
+                "text": "Questions 36-40 Match each opinion with a scientist.",
+                "metadata": {"unit_type": "question_group", "question_range": [36, 40]},
+            },
+            {
+                "chunk_id": "question-36",
+                "document_id": "doc-1",
+                "source_file": "reading.pdf",
+                "text": "36. Music develops from social interaction.",
+                "metadata": {"unit_type": "question", "question_range": [36, 36]},
+            },
+            {
+                "chunk_id": "passage-3",
+                "document_id": "doc-1",
+                "source_file": "reading.pdf",
+                "text": "Passage evidence that would allow the question to be solved.",
+                "metadata": {"unit_type": "passage", "passage_number": 3},
+            },
+        ]
+        intent = IntentClassifierDecision(
+            intent="explain_questions",
+            attempts=1,
+            duration_seconds=0.01,
+            raw_output_preview='{"intent":"explain_questions"}',
+        )
+
+        with (
+            patch.object(main, "get_store", return_value=store),
+            patch.object(
+                main,
+                "classify_chat_route",
+                AsyncMock(return_value=_gateway_decision("rag", "explain_questions")),
+            ),
+            patch.object(main, "classify_rag_intent", AsyncMock(return_value=intent)),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="Giải thích cách làm các câu đó nhưng không giải.",
+                    document_ids=["doc-1"],
+                    document_scope="explicit",
+                    conversation_state={
+                        "last_route": "rag",
+                        "last_intent": "explain_questions",
+                        "rag_affinity": {
+                            "document_ids": ["doc-1"],
+                            "question_ranges": [[36, 40]],
+                        },
+                    },
+                )
+            )
+
+        self.assertIn("Match each opinion with a scientist", prepared.prompt)
+        self.assertNotIn("would allow the question to be solved", prepared.prompt)
+        self.assertEqual(
+            prepared.debug["retrieval"]["no_solution_context"],
+            {"source_count": 2, "excluded_passage_evidence": 1},
+        )
+
     def test_intent_candidates_require_structured_table_for_table_operations(self) -> None:
         without_table = main.allowed_rag_intents(
             "Compare the facts discussed in this sample answer.",
@@ -739,6 +815,19 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         query = main.evidence_query_for_sources(sources, "Trả lời Question 11")
 
         self.assertEqual(query, "Vintage wines are")
+
+    def test_solve_packet_evidence_query_does_not_mix_answer_options(self) -> None:
+        packet = {
+            "question_stem": "Why do tigers rarely attack people in cars?",
+            "answer_options": [
+                {"label": "C", "text": "They do not see them as living creatures."},
+                {"label": "D", "text": "They do not want to risk their cubs."},
+            ],
+        }
+
+        query = main.evidence_query_for_solve_packet(packet, "fallback")
+
+        self.assertEqual(query, "Why do tigers rarely attack people in cars?")
 
     def test_context_assigns_roles_without_source_prompt_tokens(self) -> None:
         context = main.format_context(
@@ -1814,7 +1903,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(packets[0]["evidence_chunk_ids"], ["passage-1"])
         self.assertEqual(
             main.evidence_query_for_solve_packet(packets[0], "fallback"),
-            "Vintage wines are mostly better. often preferred. often discussed. more costly.",
+            "Vintage wines are",
         )
 
     def test_solve_question_packet_infers_contract_from_question_options(self) -> None:
@@ -2303,7 +2392,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         }
         raw = (
             "Question 1: FALSE\nEvidence: no relevant detail\nRelationship: absent\n\n"
-            "Question 36: Marvin\nEvidence: Marvin states it."
+            "Question 36: Marvin\nEvidence: Marvin states it.\nRelationship: supports"
         )
 
         normalized, adjustments = main.normalize_solve_output(raw, report)
@@ -2330,8 +2419,47 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         }
 
         self.assertEqual(
-            main.solve_output_issues("Question 24: B or C", report),
+            main.solve_output_issues(
+                "Question 24: B or C\nEvidence: cars are treated as objects.\n"
+                "Relationship: supports",
+                report,
+            ),
             ["Question 24 is missing a valid answer option label."],
+        )
+
+    def test_solve_output_validator_rejects_unanchored_option_evidence(self) -> None:
+        report = {
+            "requested_question_numbers": [24],
+            "question_targets": [
+                {
+                    "question_number": 24,
+                    "question_type": "multiple_choice",
+                    "question_stem": "Why do tigers rarely attack people in cars?",
+                    "answer_options": [
+                        {
+                            "label": "C",
+                            "text": "They do not think people in cars are living creatures.",
+                        },
+                        {"label": "D", "text": "They do not want to put their cubs at risk."},
+                    ],
+                    "answer_contract": {
+                        "kind": "multiple_choice",
+                        "allowed_labels": ["C", "D"],
+                        "requires_single_label": True,
+                        "requires_options": True,
+                    },
+                }
+            ],
+        }
+        output = (
+            "Question 24: D\n"
+            "Evidence: A standing human looks unusually large from the front.\n"
+            "Relationship: supports"
+        )
+
+        self.assertEqual(
+            main.solve_output_issues(output, report),
+            ["Question 24 Evidence does not directly anchor the selected answer."],
         )
 
     def test_format_solve_context_keeps_evidence_with_its_question(self) -> None:
@@ -2474,7 +2602,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             query_intent="solve_questions",
         )
         model = AsyncMock(
-            return_value="Câu 36: Marvin\nBằng chứng: Marvin nêu nội dung này."
+            return_value=(
+                "Câu 36: Marvin\n"
+                "Bằng chứng: Marvin nêu nội dung này.\n"
+                "Relationship: supports"
+            )
         )
 
         with patch.object(main, "query_ollama", model):
@@ -3478,7 +3610,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={"intent_decision": {"allow_solution": False}},
             query_intent="explain_questions",
         )
-        model = AsyncMock(side_effect=["24: A", "Đối chiếu từng phát biểu với mô tả của hai phương pháp."])
+        model = AsyncMock(side_effect=["24. A", "Đối chiếu từng phát biểu với mô tả của hai phương pháp."])
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(
