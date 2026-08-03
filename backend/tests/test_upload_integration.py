@@ -902,6 +902,43 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("why it helps", advice.prompt)
         self.assertEqual(store.probe_dense_flags, [])
 
+    async def test_exact_catalog_reference_overrides_a_direct_gateway_result(self) -> None:
+        catalog = [
+            {
+                "source_file": "reading-8.pdf",
+                "document_ids": ["doc-8"],
+                "section_titles": ["Snow-makers"],
+            },
+            {
+                "source_file": "reading-11.pdf",
+                "document_ids": ["doc-11"],
+                "section_titles": ["Painters of time"],
+            },
+        ]
+        gateway = AsyncMock(return_value=_gateway_decision("direct", "direct"))
+        with (
+            patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
+            patch.object(main, "classify_chat_route", gateway),
+        ):
+            prepared = await main.prepare_chat(
+                main.ChatRequest(
+                    message="What does Snow-makers explain about artificial snow?"
+                )
+            )
+
+        environment = json.loads(gateway.await_args.args[3])
+        self.assertTrue(environment["catalog_reference_match"])
+        self.assertEqual(prepared.debug["route_gateway"]["classifier_route"], "direct")
+        self.assertEqual(
+            prepared.debug["route_gateway"]["policy_override"],
+            "catalog_reference_match",
+        )
+        self.assertEqual(prepared.debug["route_decision"], "rag")
+        self.assertEqual(
+            prepared.debug["document_resolution"]["resolved_document_ids"],
+            ["doc-8"],
+        )
+
     async def test_generic_ielts_categories_do_not_trigger_document_ambiguity(self) -> None:
         catalog = [
             {
@@ -1182,7 +1219,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state_context, "")
         self.assertEqual(
             json.loads(document_context),
-            {"documents_available": True, "attached_this_turn": True},
+            {
+                "documents_available": True,
+                "attached_this_turn": True,
+                "catalog_reference_match": True,
+            },
         )
         self.assertNotIn("reading.pdf", document_context)
         self.assertNotIn("Urban transport", document_context)
@@ -1254,7 +1295,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             json.loads(context),
-            {"documents_available": True, "attached_this_turn": True},
+            {
+                "documents_available": True,
+                "attached_this_turn": True,
+                "catalog_reference_match": False,
+            },
         )
         self.assertNotIn("reading.pdf", context)
         self.assertNotIn("writing.png", context)
@@ -1336,7 +1381,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("14", state_context)
         self.assertEqual(
             json.loads(document_context),
-            {"documents_available": True, "attached_this_turn": False},
+            {
+                "documents_available": True,
+                "attached_this_turn": False,
+                "catalog_reference_match": False,
+            },
         )
 
     async def test_gateway_can_request_rag_with_an_explicit_document_scope(self) -> None:

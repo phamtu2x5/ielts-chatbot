@@ -1871,7 +1871,11 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
 
     def test_route_classifier_prompt_includes_environment_and_highlights_request(self) -> None:
         document_context = json.dumps(
-            {"documents_available": True, "attached_this_turn": True}
+            {
+                "documents_available": True,
+                "attached_this_turn": True,
+                "catalog_reference_match": True,
+            }
         )
 
         prompt = llm.route_classifier_prompt(
@@ -1885,6 +1889,8 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("translate, or write hide a specific source dependency", prompt)
         self.assertIn("Do not choose DIRECT by guessing", prompt)
         self.assertIn('"attached_this_turn": true', prompt)
+        self.assertIn('"catalog_reference_match": true', prompt)
+        self.assertIn("requires RAG", prompt)
         self.assertIn("not sufficient by itself to choose RAG", prompt)
         self.assertIn("numbered question range", prompt)
 

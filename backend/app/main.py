@@ -297,8 +297,10 @@ def format_document_catalog_context(
 def format_route_environment_context(
     catalog: list[dict[str, Any]],
     attached_document_ids: list[str] | None = None,
+    *,
+    catalog_reference_match: bool = False,
 ) -> str:
-    """Expose document availability to Patch 0 without document identities."""
+    """Expose source-dependency signals to Patch 0 without document identities."""
     attached = set(attached_document_ids or [])
     available_ids = {
         str(document_id)
@@ -309,6 +311,7 @@ def format_route_environment_context(
         {
             "documents_available": bool(available_ids),
             "attached_this_turn": bool(attached.intersection(available_ids)),
+            "catalog_reference_match": catalog_reference_match,
         },
         ensure_ascii=False,
     )
@@ -2266,9 +2269,13 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         if req.document_scope == "explicit" and req.document_ids
         else []
     )
+    catalog_reference_match = bool(
+        scope.document_grounded and scope.resolved_document_ids
+    )
     route_environment_context = format_route_environment_context(
         full_catalog,
         attached_document_ids,
+        catalog_reference_match=catalog_reference_match,
     )
     gateway_decision = await classify_chat_route(
         message,
@@ -2281,13 +2288,19 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         "used": True,
         **gateway_decision.to_debug(),
         "catalog_context": {
-            "mode": "environment_only",
+            "mode": "environment_with_reference_signal",
             "available_documents": len(full_catalog),
             "included_documents": 0,
             "omitted_documents": len(full_catalog),
             "attached_document_ids": attached_document_ids,
+            "catalog_reference_match": catalog_reference_match,
         },
     }
+    if catalog_reference_match and route != "rag":
+        gateway_debug["classifier_route"] = route
+        gateway_debug["route"] = "rag"
+        gateway_debug["policy_override"] = "catalog_reference_match"
+        route = "rag"
 
     if route == "direct":
         previous_answer_source = direct_conversation_source(req)
