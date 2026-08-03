@@ -1882,7 +1882,7 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Routing environment (availability only", prompt)
         self.assertNotIn("reading.pdf", prompt)
         self.assertIn("=== CURRENT REQUEST TO CLASSIFY ===\nTranslate Questions 1-4.", prompt)
-        self.assertIn("translating uploaded content", prompt)
+        self.assertIn("translate, or write hide a specific source dependency", prompt)
         self.assertIn("Do not choose DIRECT by guessing", prompt)
         self.assertIn('"attached_this_turn": true', prompt)
         self.assertIn("not sufficient by itself to choose RAG", prompt)
@@ -1895,16 +1895,35 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             compact=True,
         )
 
-        self.assertIn("DIRECT: the answer is independent of reopening uploaded-file content", prompt)
-        self.assertIn("RAG: the answer needs to know or verify any specific content", prompt)
+        self.assertIn("visible complete content, specific source dependency", prompt)
+        self.assertIn("choose RAG when the request points to a specific uploaded material", prompt)
         self.assertNotIn("if the uploaded files were unavailable", prompt)
         self.assertIn("Do not choose DIRECT by guessing", compact_prompt)
         self.assertIn("not an automatic RAG decision", compact_prompt)
         self.assertIn("previous_answer_source is provenance", compact_prompt)
-        self.assertIn("complete content already visible", prompt)
+        self.assertIn("complete source content already visible", prompt)
         self.assertIn("previous_answer_source=none", compact_prompt)
-        self.assertIn("requested output format", prompt)
-        self.assertIn("Creating new content from general knowledge is DIRECT", compact_prompt)
+        self.assertIn("requested format", prompt)
+        self.assertIn("Creating new content from general knowledge is DIRECT only", compact_prompt)
+
+    def test_route_classifier_prompt_gives_specific_source_precedence(self) -> None:
+        prompt = llm.route_classifier_prompt(
+            "Summarize a named test and explain its numbered question range."
+        )
+
+        source_rule = prompt.index(
+            "Otherwise, choose RAG when the request points to a specific uploaded material"
+        )
+        general_rule = prompt.index(
+            "Only when neither condition applies, choose DIRECT for general knowledge"
+        )
+        compact_prompt = llm.route_classifier_prompt(
+            "Create a general study-plan table.",
+            compact=True,
+        )
+        self.assertLess(source_rule, general_rule)
+        self.assertIn("never cancel an explicit source dependency", compact_prompt)
+        self.assertIn("missing-conversation exception", prompt)
 
     async def test_route_classifier_returns_direct_without_generating_answer(self) -> None:
         model = AsyncMock(return_value='{"route":"direct"}')
