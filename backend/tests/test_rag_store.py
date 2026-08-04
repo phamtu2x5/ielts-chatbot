@@ -1271,6 +1271,33 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertIn("Preserve the question numbers", retry_prompt)
         self.assertNotIn("Which body", retry_prompt)
 
+    def test_solve_retry_prompt_repairs_the_candidate_from_validation_findings(self) -> None:
+        contract = response_output_contract(
+            "Trả lời Question 24 và dẫn bằng chứng.",
+            "solve_questions",
+            allow_solution=True,
+        )
+
+        retry_prompt = response_retry_prompt(
+            "grounded solve context",
+            contract,
+            "solve_questions",
+            previous_candidate=(
+                "Question 24: C\n"
+                "Evidence: They do not think people in cars are living creatures.\n"
+                "Relationship: supports"
+            ),
+            validation_issues=[
+                "Question 24 Evidence is not quoted from its selected passage evidence."
+            ],
+        )
+
+        self.assertIn("Previous candidate to repair", retry_prompt)
+        self.assertIn("Question 24: C", retry_prompt)
+        self.assertIn("Evidence is not quoted", retry_prompt)
+        self.assertIn("Keep the previous answer label only when", retry_prompt)
+        self.assertIn("Do not fix a mismatch by changing only Relationship", retry_prompt)
+
     def test_no_solution_validation_requires_an_explicit_user_constraint(self) -> None:
         normal = response_output_contract(
             "Giải thích Questions 24-27.",

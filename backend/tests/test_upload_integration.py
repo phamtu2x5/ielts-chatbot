@@ -2755,7 +2755,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(solve_debug["returned_output"]["text"], answer)
         self.assertEqual(solve_debug["final_issues"], [])
 
-    async def test_solve_generation_returns_best_candidate_after_invalid_retry(self) -> None:
+    async def test_solve_generation_fails_safely_after_invalid_retry(self) -> None:
         report = {
             "requested_question_numbers": [11],
             "question_targets": [
@@ -2782,12 +2782,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(prepared, "Trả lời Question 11.")
 
-        self.assertEqual(answer, "The answer is unclear.")
+        self.assertEqual(answer, main.SOLVE_VALIDATION_FAILURE_VI)
         self.assertEqual(model.await_count, 2)
         self.assertTrue(prepared.debug["generation"]["validation_degraded"])
-        self.assertFalse(
-            prepared.debug["generation"].get("validation_failed_closed", False)
-        )
+        self.assertTrue(prepared.debug["generation"]["solve_validation_failed_closed"])
+
+        retry_prompt = model.await_args_list[1].args[0]
+        self.assertIn("The answer is unclear.", retry_prompt)
+        self.assertIn("missing a valid answer option label", retry_prompt)
 
     async def test_solve_generation_uses_one_grounded_model_call(self) -> None:
         prepared = main.ChatPreparation(

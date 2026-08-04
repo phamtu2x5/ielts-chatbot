@@ -798,6 +798,16 @@ LANGUAGE_VALIDATION_FAILURE_EN = (
     "I could not produce the response in the language you requested. Please try again."
 )
 
+SOLVE_VALIDATION_FAILURE_VI = (
+    "Mình chưa xác định được đáp án đáng tin cậy từ bằng chứng trong tài liệu. "
+    "Vui lòng thử lại hoặc nêu rõ câu hỏi cần kiểm tra."
+)
+
+SOLVE_VALIDATION_FAILURE_EN = (
+    "I could not determine a reliable answer from the available passage evidence. "
+    "Please try again or specify the question you want checked."
+)
+
 
 def hard_validation_failure(
     query_intent: str,
@@ -818,6 +828,15 @@ def hard_validation_failure(
             else TRANSLATION_VALIDATION_FAILURE_VI
         )
     return LANGUAGE_VALIDATION_FAILURE_EN if language == "English" else LANGUAGE_VALIDATION_FAILURE_VI
+
+
+def solve_validation_failure(message: str) -> str:
+    return (
+        SOLVE_VALIDATION_FAILURE_EN
+        if conversation_language(message) == "English"
+        else SOLVE_VALIDATION_FAILURE_VI
+    )
+
 
 def document_extraction_failure_detail(document: Any) -> str:
     metadata = document.metadata or {}
@@ -1447,7 +1466,13 @@ async def generate_answer(
             retry_prompt = (
                 translation_retry_prompt(prompt, contract)
                 if prepared.query_intent == "translate_questions"
-                else response_retry_prompt(prompt, contract, prepared.query_intent)
+                else response_retry_prompt(
+                    prompt,
+                    contract,
+                    prepared.query_intent,
+                    previous_candidate=answer if solve_report else "",
+                    validation_issues=issues if solve_report else None,
+                )
             )
             retry_contract = contract.prompt_lines()
             if first_incomplete:
@@ -1566,6 +1591,14 @@ async def generate_answer(
         if failure:
             generation_debug["validation_failed_closed"] = True
             generation_debug["returned_validation_fallback"] = failure
+            return failure
+        if solve_report and final_solve_issues:
+            failure = solve_validation_failure(message)
+            generation_debug["solve_validation_failed_closed"] = True
+            generation_debug["returned_validation_fallback"] = failure
+            generation_debug["solve_contract"]["returned_output"] = generation_candidate_debug(
+                failure
+            )
             return failure
         if solve_report:
             generation_debug["solve_contract"]["returned_output"] = generation_candidate_debug(
