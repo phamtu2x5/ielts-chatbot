@@ -476,8 +476,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             chunks = [chunk async for chunk in main.buffered_response_chunks(answer)]
 
         self.assertEqual("".join(chunks), answer)
-        self.assertEqual([len(chunk) for chunk in chunks], [72, 72, 72, 34])
-        self.assertEqual(sleep.await_count, 3)
+        self.assertEqual([len(chunk) for chunk in chunks], [60, 60, 60, 60, 10])
+        self.assertEqual(sleep.await_count, 4)
 
     async def test_empty_rag_stream_keeps_generate_fallback(self) -> None:
         prepared = main.ChatPreparation(

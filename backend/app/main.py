@@ -1707,7 +1707,7 @@ def response_buffer_reason(prepared: "ChatPreparation", message: str) -> str:
     return "response_contract"
 
 
-def response_chunks(text: str, size: int = 72) -> list[str]:
+def response_chunks(text: str, size: int = 60) -> list[str]:
     return [text[index : index + size] for index in range(0, len(text), size)] or [""]
 
 
@@ -1716,7 +1716,7 @@ async def buffered_response_chunks(text: str) -> AsyncIterator[str]:
     for index, chunk in enumerate(chunks):
         yield chunk
         if index + 1 < len(chunks):
-            await asyncio.sleep(0.025)
+            await asyncio.sleep(0.04)
 
 
 def user_profile_context(req: ChatRequest, max_chars: int = 1_200) -> str:

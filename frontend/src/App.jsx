@@ -63,7 +63,10 @@ function repairMultilineMarkdownTables(content) {
     }
 
     const expectedPipes = (header.match(/\|/g) || []).length;
-    repaired.push(lines[index], lines[index + 1]);
+    if (repaired.length && repaired[repaired.length - 1].trim()) {
+      repaired.push("");
+    }
+    repaired.push(header, separator);
     index += 2;
     while (index < lines.length && lines[index].trim()) {
       let row = lines[index].trim();
