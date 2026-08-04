@@ -1680,7 +1680,9 @@ Mô tả cấu trúc tài liệu bằng tiếng Việt."""
         )
 
         self.assertIn("use exactly three fields", prompt)
-        self.assertIn("Evidence must be copied from PASSAGE EVIDENCE", prompt)
+        self.assertIn("supports every essential claim", prompt)
+        self.assertIn("Sharing only a subject, location, or keyword is not enough", prompt)
+        self.assertIn("name the missing claim", prompt)
         self.assertIn("supports -> TRUE; contradicts -> FALSE; absent -> NOT GIVEN", prompt)
 
     def test_semantic_qa_prompt_requires_the_requested_relationship_and_evidence(self) -> None:

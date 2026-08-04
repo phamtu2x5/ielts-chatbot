@@ -1025,10 +1025,11 @@ def response_retry_prompt(
             "Preserve each question number. For multiple-choice questions, put one supplied "
             "option label immediately after the question number. For TRUE/FALSE/NOT GIVEN "
             "questions, put the corresponding label immediately after the question number. "
-            "Respect any word limit in the supplied instructions. Then copy one concise Evidence "
-            "quote from PASSAGE EVIDENCE, never from the question or answer options, and give one "
-            "Relationship field using supports, contradicts, or absent; do not invent missing "
-            "options or evidence."
+            "Respect any word limit in the supplied instructions. For supports or contradicts, "
+            "copy one concise Evidence quote from PASSAGE EVIDENCE. For absent, identify the "
+            "essential claim that the passage does not state instead of quoting a nearby fact. "
+            "Never use the question or answer options as evidence, and give one Relationship "
+            "field using supports, contradicts, or absent; do not invent missing options or evidence."
         ),
     }.get(
         query_intent,
@@ -2492,14 +2493,16 @@ def rag_prompt(
                 "- For multiple-choice and matching questions, compare every supplied option with explicit passage evidence, then put exactly one supplied option label after the colon. Do not output only the option text, person, or category name.",
                 "- Do not treat indirect preference, popularity, or possibility as proof of an option.",
                 "- If the question refers to a list or answer choices that are missing from context, do not invent a replacement answer or title.",
-                "- For True/False/Not Given questions, first classify the relationship between the statement and passage evidence as supports, contradicts, or absent.",
+                "- For TRUE/FALSE/NOT GIVEN and YES/NO/NOT GIVEN, first split the statement into every essential claim: subject, action or attribute, and qualifiers such as cause, comparison, time, and place.",
+                "- Use supports only when passage evidence supports every essential claim. Sharing only a subject, location, or keyword is not enough.",
+                "- Use contradicts when passage evidence explicitly conflicts with at least one essential claim.",
+                "- Use absent when no essential claim is contradicted but at least one essential claim is neither stated nor supported. Do not infer a missing attribute from a related fact.",
                 "- Write Relationship using exactly one of: supports, contradicts, absent.",
                 "- Mapping is strict: supports -> TRUE; contradicts -> FALSE; absent -> NOT GIVEN.",
-                "- Do not mark FALSE just because the passage lacks a reason, cause, date, comparison, or detail. If the required detail is absent, the answer is NOT GIVEN.",
                 "- If the context only contains question text and lacks passage evidence, say that there is not enough passage evidence to solve reliably.",
                 "- Solve each requested question independently. Do not reuse one evidence statement as support for a different question unless it directly addresses both.",
-                "- For every answer, use exactly three fields in this order: Question <number>: <answer>; Evidence: <one short passage quote>; Relationship: supports, contradicts, or absent.",
-                "- Evidence must be copied from PASSAGE EVIDENCE, never from the question or answer options, and must directly support the selected answer. A quote about a different paragraph, subject, actor, situation, or comparison is invalid.",
+                "- For every answer, use exactly three fields in this order: Question <number>: <answer>; Evidence: <one short passage quote or a concise missing-claim note>; Relationship: supports, contradicts, or absent.",
+                "- For supports or contradicts, Evidence must be copied from PASSAGE EVIDENCE and directly address the essential claim. For absent, name the missing claim and do not present a nearby unrelated quote as proof of absence. Never use the question or answer options as evidence.",
                 "- Do not use a second conclusion or unsupported elimination. Keep the evidence check concise.",
             ]
         )
