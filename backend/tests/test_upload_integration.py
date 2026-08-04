@@ -3845,7 +3845,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer, "Đối chiếu từng phát biểu với thông tin trong passage.")
         self.assertEqual(model.await_count, 1)
 
-    async def test_semantic_generation_removes_appended_no_match_response(self) -> None:
+    async def test_semantic_stream_removes_appended_no_match_response(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded semantic prompt",
             static_response=None,
@@ -3855,28 +3855,31 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             query_intent="semantic_qa",
         )
         substantive = "Tác giả phản đối vì phương pháp này bỏ qua động lực cá nhân của nhân viên."
-        model = AsyncMock(
-            return_value=(
-                f"{substantive}\n\n"
-                "Mình không tìm thấy thông tin này trong tài liệu đã chọn."
-            )
-        )
 
-        with patch.object(main, "query_ollama", model):
-            answer = await main.generate_answer(
-                prepared,
-                "Vì sao tác giả phản đối phương pháp này?",
-            )
+        async def streamed_answer(*args, **kwargs):
+            yield substantive
+            yield "\n\nMình không tìm thấy thông tin này "
+            yield "trong tài liệu đã chọn.\n"
 
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "collect_user_fact_updates", AsyncMock()),
+            patch.object(main, "stream_ollama", streamed_answer),
+        ):
+            response = await main.chat_stream(
+                main.ChatRequest(message="Vì sao tác giả phản đối phương pháp này?")
+            )
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        answer = "".join(event["token"] for event in events if event["type"] == "token")
+        final_metadata = [event for event in events if event["type"] == "metadata"][-1]
         self.assertEqual(answer, substantive)
-        self.assertEqual(model.await_count, 1)
         self.assertEqual(
-            prepared.debug["generation"]["response_contract"]["first_draft_cleanup"],
+            final_metadata["debug"]["generation"]["stream_cleanup"],
             "Mình không tìm thấy thông tin này trong tài liệu đã chọn.",
         )
 
-    async def test_semantic_generation_retries_option_only_explanation(self) -> None:
-        message = "Theo passage, vì sao hổ thường không tấn công người trong ô tô?"
+    async def test_semantic_stream_keeps_standalone_no_match_response(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded semantic prompt",
             static_response=None,
@@ -3885,39 +3888,25 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={"intent_decision": {"allow_solution": False}},
             query_intent="semantic_qa",
         )
-        explanation = (
-            "Hổ hiếm khi tấn công vì chúng xem người ngồi trong xe như một phần của chiếc xe."
-        )
-        model = AsyncMock(
-            side_effect=[
-                "C They do not think people in cars are living creatures.",
-                explanation,
-            ]
-        )
+        no_match = "Mình không tìm thấy thông tin này trong tài liệu đã chọn."
 
-        contract = main.response_output_contract(
-            message,
-            "semantic_qa",
-            allow_solution=False,
-        )
-        self.assertIn(
-            "The response repeats the user's question before answering it.",
-            main.response_output_issues(
-                f"{message}\n\nHổ xem người trong xe như một phần của chiếc xe.",
-                contract,
-            ),
-        )
+        async def streamed_answer(*args, **kwargs):
+            yield "Mình không tìm thấy thông tin này "
+            yield "trong tài liệu đã chọn."
 
-        with patch.object(main, "query_ollama", model):
-            answer = await main.generate_answer(
-                prepared,
-                message,
+        with (
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "collect_user_fact_updates", AsyncMock()),
+            patch.object(main, "stream_ollama", streamed_answer),
+        ):
+            response = await main.chat_stream(
+                main.ChatRequest(message="Tài liệu có đề cập nội dung này không?")
             )
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
 
-        self.assertEqual(answer, explanation)
-        self.assertEqual(model.await_count, 2)
-        self.assertTrue(prepared.debug["generation"]["retry_used"])
-        self.assertEqual(prepared.debug["generation"]["final_issues"], [])
+        answer = "".join(event["token"] for event in events if event["type"] == "token")
+        self.assertEqual(answer, no_match)
+        self.assertNotIn("generation", prepared.debug)
 
     async def test_translation_retries_with_language_and_range_contract(self) -> None:
         prepared = main.ChatPreparation(
@@ -3954,7 +3943,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             model.await_args_list[1].args[0],
         )
 
-    async def test_translation_retries_missing_answer_limit_from_source(self) -> None:
+    async def test_translation_accepts_translated_answer_limit(self) -> None:
         prepared = main.ChatPreparation(
             prompt=(
                 "Study material context:\n"
@@ -3967,13 +3956,13 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={"intent_decision": {"allow_solution": False}},
             query_intent="translate_questions",
         )
-        questions = (
+        translated = (
+            "Chọn KHÔNG QUÁ BA TỪ từ passage.\n"
             "25. Cơ quan nào công bố số liệu?\n"
             "26. Ai nhận lợi ích tài chính?\n"
             "27. Cuộc họp nào đưa ra nguyên tắc?"
         )
-        corrected = f"Chọn NO MORE THAN THREE WORDS từ passage.\n{questions}"
-        model = AsyncMock(side_effect=[questions, corrected])
+        model = AsyncMock(return_value=translated)
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(
@@ -3981,12 +3970,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "Dịch Questions 25-27 sang tiếng Việt, chưa trả lời.",
             )
 
-        self.assertEqual(answer, corrected)
-        self.assertEqual(model.await_count, 2)
-        self.assertEqual(
-            prepared.debug["generation"]["response_contract"]["required_literal_phrases"],
-            ["NO MORE THAN THREE WORDS"],
-        )
+        self.assertEqual(answer, translated)
+        self.assertEqual(model.await_count, 1)
         self.assertEqual(prepared.debug["generation"]["final_issues"], [])
 
     def test_no_match_response_uses_requested_language(self) -> None:

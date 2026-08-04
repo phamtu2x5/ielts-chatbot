@@ -43,7 +43,6 @@ from .llm import (
     direct_answer_prompt,
     extract_user_facts,
     is_direct_writing_request,
-    mandatory_answer_limit_phrases,
     query_ollama_chat,
     query_ollama,
     rag_prompt,
@@ -766,6 +765,12 @@ LEGACY_NO_RAG_MATCH_RESPONSES = (
     "I cannot find this information in the selected uploaded material.",
 )
 
+SYSTEM_NO_RAG_MATCH_RESPONSES = (
+    NO_RAG_MATCH_RESPONSE,
+    NO_RAG_MATCH_RESPONSE_EN,
+    *LEGACY_NO_RAG_MATCH_RESPONSES,
+)
+
 AMBIGUOUS_DOCUMENT_RESPONSE = (
     "Mình chưa xác định được bạn đang hỏi tài liệu nào vì có nhiều file phù hợp. "
     "Vui lòng nêu tên file hoặc đính kèm lại đúng tài liệu cần hỏi."
@@ -823,9 +828,7 @@ def hard_validation_failure(
     """Return a safe response only for explicit language/translation contracts."""
     language_issue = any("not written in" in issue for issue in issues)
     missing_translation_items = query_intent == "translate_questions" and any(
-        "missing question numbers" in issue
-        or "missing mandatory instruction phrase" in issue
-        for issue in issues
+        "missing question numbers" in issue for issue in issues
     )
     if not language_issue and not missing_translation_items:
         return None
@@ -903,17 +906,29 @@ def no_rag_match_response(message: str) -> str:
 
 def remove_appended_no_match_response(text: str) -> tuple[str, str | None]:
     stripped = text.strip()
-    for response in (
-        NO_RAG_MATCH_RESPONSE,
-        NO_RAG_MATCH_RESPONSE_EN,
-        *LEGACY_NO_RAG_MATCH_RESPONSES,
-    ):
+    for response in SYSTEM_NO_RAG_MATCH_RESPONSES:
         marker = f"\n\n{response}"
         if stripped.endswith(marker):
             substantive = stripped[: -len(marker)].rstrip()
             if substantive:
                 return substantive, response
     return text, None
+
+
+def pending_no_match_suffix_length(text: str) -> int:
+    """Hold only text that may become a system-owned no-match suffix."""
+    best = 0
+    for response in SYSTEM_NO_RAG_MATCH_RESPONSES:
+        marker = f"\n\n{response}"
+        max_prefix = min(len(text), len(marker))
+        for size in range(max_prefix, best, -1):
+            if text.endswith(marker[:size]):
+                best = size
+                break
+        marker_start = text.rfind(marker)
+        if marker_start >= 0 and not text[marker_start + len(marker) :].strip():
+            best = max(best, len(text) - marker_start)
+    return best
 
 
 def generation_temperature(prepared: "ChatPreparation") -> float:
@@ -1422,15 +1437,6 @@ async def generate_answer(
             allow_solution=allow_solution,
             explicit_no_solution=has_explicit_no_solution_constraint(message),
         )
-        if prepared.query_intent == "translate_questions":
-            required_phrases = tuple(
-                dict.fromkeys(
-                    contract.required_literal_phrases
-                    + mandatory_answer_limit_phrases(prompt)
-                )
-            )
-            if required_phrases != contract.required_literal_phrases:
-                contract = replace(contract, required_literal_phrases=required_phrases)
         if direct_writing and not apply_writing_contract:
             contract = replace(contract, language=conversation_language(message))
         solve_report = (
@@ -1459,8 +1465,6 @@ async def generate_answer(
             "forbid_solution": contract.forbid_solution,
             "allow_source_language_fields": contract.allow_source_language_fields,
             "required_question_numbers": list(contract.required_question_numbers),
-            "required_literal_phrases": list(contract.required_literal_phrases),
-            "requires_explanation": contract.requires_explanation,
             "first_draft_cleanup": first_cleanup,
             "plan_duration_value": contract.plan_duration_value,
             "plan_duration_unit": contract.plan_duration_unit,
@@ -1493,9 +1497,6 @@ async def generate_answer(
             or any("plan timeline" in issue for issue in issues)
             or any("plan periods" in issue for issue in issues)
             or any("daily time limit" in issue for issue in issues)
-            or any("mandatory instruction phrase" in issue for issue in issues)
-            or any("requires an evidence-based explanation" in issue for issue in issues)
-            or any("repeats the user's question" in issue for issue in issues)
             or first_incomplete
             or bool(first_solve_issues)
             or (
@@ -3521,6 +3522,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 return
 
             has_token = False
+            streamed_substantive = False
+            pending_suffix = ""
             stream_failure: OllamaRequestError | None = None
             temperature = generation_temperature(prepared)
             try:
@@ -3528,12 +3531,36 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     prepared.prompt or "",
                     temperature=temperature,
                 ):
-                    has_token = True
-                    yield stream_event("token", token=token)
+                    pending_suffix += token
+                    pending_length = pending_no_match_suffix_length(pending_suffix)
+                    if pending_length:
+                        visible = pending_suffix[:-pending_length]
+                        pending_suffix = pending_suffix[-pending_length:]
+                    else:
+                        visible = pending_suffix
+                        pending_suffix = ""
+                    if visible:
+                        has_token = True
+                        streamed_substantive = streamed_substantive or bool(visible.strip())
+                        yield stream_event("token", token=visible)
             except OllamaRequestError as exc:
                 if exc.kind != "prompt_echo" or has_token:
                     raise
                 stream_failure = exc
+            stream_cleanup: str | None = None
+            if streamed_substantive:
+                for response in SYSTEM_NO_RAG_MATCH_RESPONSES:
+                    if pending_suffix.rstrip() == f"\n\n{response}":
+                        stream_cleanup = response
+                        pending_suffix = ""
+                        break
+            if pending_suffix:
+                has_token = True
+                yield stream_event("token", token=pending_suffix)
+            if stream_cleanup:
+                prepared.debug.setdefault("generation", {})[
+                    "stream_cleanup"
+                ] = stream_cleanup
             if not has_token:
                 direct_fallback = (
                     prepared.query_intent == "direct" and settings.ollama_chat_fallback
