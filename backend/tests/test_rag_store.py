@@ -1088,9 +1088,9 @@ class LocalVectorStoreTests(unittest.TestCase):
             contract,
         )
 
-        self.assertTrue(any("not written in English" in issue for issue in issues))
+        self.assertFalse(any("not written in English" in issue for issue in issues))
         self.assertTrue(any("below 170" in issue for issue in issues))
-        self.assertIn(
+        self.assertNotIn(
             "The response is not written in Vietnamese.",
             writing_output_issues("The chart shows a consistent increase.", vietnamese_contract),
         )
@@ -1746,6 +1746,26 @@ Mô tả cấu trúc tài liệu bằng tiếng Việt."""
         )
 
         self.assertIsNone(contract.language)
+
+    def test_language_validation_is_strict_only_for_translation(self) -> None:
+        overview = response_output_contract(
+            "Mô tả tài liệu bằng tiếng Việt.",
+            "document_overview",
+            allow_solution=False,
+        )
+        translation = response_output_contract(
+            "Dịch nội dung sang tiếng Việt.",
+            "translate_content",
+            allow_solution=False,
+        )
+
+        self.assertFalse(overview.enforce_language)
+        self.assertTrue(translation.enforce_language)
+        self.assertEqual(response_output_issues("Vietnamese introduction. English content.", overview), [])
+        self.assertIn(
+            "The response is not written in Vietnamese.",
+            response_output_issues("English content only.", translation),
+        )
 
     def test_overview_prompt_preserves_source_titles_and_covers_all_sections(self) -> None:
         prompt = rag_prompt(

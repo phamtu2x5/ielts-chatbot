@@ -3045,7 +3045,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_reviewed_direct_retries_a_length_stopped_answer_through_chat(self) -> None:
+    async def test_reviewed_direct_does_not_regenerate_only_for_length_stop(self) -> None:
         prepared = main.ChatPreparation(
             prompt="direct speaking prompt",
             static_response=None,
@@ -3066,12 +3066,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "done_reason": "length" if attempts == 1 else "stop",
                 }
             )
-            if attempts == 1:
-                return "Cách thứ nhất là luyện nói mỗi ngày nhưng câu trả lời bị"
-            self.assertIn("do not stop mid-sentence", messages[0]["content"])
-            self.assertEqual(temperature, 0.1)
-            self.assertEqual(kwargs["num_predict"], main.expanded_retry_num_predict())
-            return "Luyện nói mỗi ngày, ghi âm và nghe lại để sửa phát âm và độ trôi chảy."
+            return "Cách thứ nhất là luyện nói mỗi ngày nhưng câu trả lời bị"
 
         generate_model = AsyncMock(return_value="Không được gọi.")
         with (
@@ -3085,13 +3080,12 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
         returned = "".join(event["token"] for event in events if event["type"] == "token")
-        self.assertIn("ghi âm và nghe lại", returned)
-        self.assertEqual(chat.await_count, 2)
+        self.assertIn("câu trả lời bị", returned)
+        self.assertEqual(chat.await_count, 1)
         generate_model.assert_not_awaited()
         metadata = [event for event in events if event["type"] == "metadata"][-1]
-        self.assertEqual(metadata["debug"]["generation"]["retry_endpoint"], "chat")
-        self.assertEqual(metadata["debug"]["generation"]["selected_candidate"], "retry")
-        self.assertEqual(metadata["debug"]["generation"]["final_issues"], [])
+        self.assertFalse(metadata["debug"]["generation"]["retry_used"])
+        self.assertTrue(metadata["debug"]["generation"]["validation_degraded"])
 
     async def test_reviewed_direct_writing_uses_shared_contract_and_chat_retry(self) -> None:
         prepared = main.ChatPreparation(
@@ -3558,7 +3552,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("below 170", retry_prompt.lower())
         self.assertEqual(prepared.debug["generation"]["selected_candidate"], "retry")
 
-    async def test_writing_generation_fails_closed_when_both_drafts_use_wrong_language(self) -> None:
+    async def test_writing_generation_accepts_mixed_language_content(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded writing prompt",
             static_response=None,
@@ -3567,8 +3561,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={"intent_decision": {"allow_solution": True}},
             query_intent="writing_generation",
         )
-        vietnamese = " ".join(["nội dung"] * 175)
-        model = AsyncMock(side_effect=[vietnamese, vietnamese])
+        mixed = "Lời dẫn: " + " ".join(["word"] * 173)
+        model = AsyncMock(return_value=mixed)
 
         with patch.object(main, "query_ollama", model):
             answer = await main.generate_answer(
@@ -3576,9 +3570,9 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "Viết bài IELTS Writing Task 1 dài 170-190 từ.",
             )
 
-        self.assertEqual(answer, main.LANGUAGE_VALIDATION_FAILURE_EN)
-        self.assertEqual(model.await_count, 2)
-        self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
+        self.assertEqual(answer, mixed)
+        self.assertEqual(model.await_count, 1)
+        self.assertFalse(prepared.debug["generation"].get("validation_failed_closed", False))
 
     async def test_writing_generation_returns_best_candidate_when_retry_still_invalid(self) -> None:
         prepared = main.ChatPreparation(
@@ -3799,7 +3793,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(model.await_count, 2)
 
-    async def test_non_translation_language_mismatch_is_retried(self) -> None:
+    async def test_non_translation_language_mismatch_is_not_retried(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded overview prompt",
             static_response=None,
@@ -3821,14 +3815,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "Mô tả cấu trúc tài liệu bằng tiếng Việt.",
             )
 
-        self.assertEqual(
-            answer,
-            "Tài liệu gồm ba đoạn đọc với các nhóm câu hỏi tương ứng.",
-        )
-        self.assertEqual(model.await_count, 2)
+        self.assertEqual(answer, "Passage 1: Travel. Questions 1-13.")
+        self.assertEqual(model.await_count, 1)
         self.assertEqual(prepared.debug["generation"]["final_issues"], [])
 
-    async def test_explicit_language_mismatch_fails_closed_after_retry(self) -> None:
+    async def test_non_translation_language_mismatch_does_not_fail_closed(self) -> None:
         prepared = main.ChatPreparation(
             prompt="grounded overview prompt",
             static_response=None,
@@ -3850,10 +3841,9 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "Mô tả cấu trúc tài liệu bằng tiếng Việt.",
             )
 
-        self.assertEqual(answer, main.LANGUAGE_VALIDATION_FAILURE_VI)
-        self.assertEqual(model.await_count, 2)
-        self.assertTrue(prepared.debug["generation"]["validation_degraded"])
-        self.assertTrue(prepared.debug["generation"]["validation_failed_closed"])
+        self.assertEqual(answer, "Passage 1: Travel. Questions 1-13.")
+        self.assertEqual(model.await_count, 1)
+        self.assertFalse(prepared.debug["generation"].get("validation_failed_closed", False))
 
     async def test_compliant_no_solution_response_is_not_generated_twice(self) -> None:
         prepared = main.ChatPreparation(

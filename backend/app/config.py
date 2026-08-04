@@ -45,7 +45,7 @@ class AppSettings:
     ollama_model: str = field(
         default_factory=lambda: os.getenv("OLLAMA_MODEL", "hf.co/Zkare/Chatbot_Ielts_Assistant_v2:Q4_K_M")
     )
-    ollama_num_predict: int = field(default_factory=lambda: int(os.getenv("OLLAMA_NUM_PREDICT", "1400")))
+    ollama_num_predict: int = field(default_factory=lambda: int(os.getenv("OLLAMA_NUM_PREDICT", "2800")))
     ollama_num_ctx: int = field(default_factory=lambda: int(os.getenv("OLLAMA_NUM_CTX", "4096")))
     ollama_timeout_seconds: float = field(
         default_factory=lambda: float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))

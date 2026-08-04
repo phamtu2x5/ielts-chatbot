@@ -1352,7 +1352,8 @@ async def generate_answer(
 
     if apply_writing_contract:
         contract = direct_writing_contract or writing_output_contract(message)
-        issues = writing_output_issues(answer, contract)
+        retryable_issues = writing_output_issues(answer, contract)
+        issues = list(retryable_issues)
         if first_incomplete:
             issues.append(INCOMPLETE_GENERATION_ISSUE)
         generation_debug = prepared.debug.setdefault("generation", {})
@@ -1366,7 +1367,7 @@ async def generate_answer(
             "first_draft_issues": issues,
             "first_done_reason": initial_done_reason,
         }
-        if issues:
+        if retryable_issues:
             if direct_retry:
                 retry, retry_done_reason = await direct_retry(
                     contract.prompt_lines()
@@ -1463,6 +1464,7 @@ async def generate_answer(
         generation_debug = prepared.debug.setdefault("generation", {})
         generation_debug["response_contract"] = {
             "language": contract.language,
+            "enforce_language": contract.enforce_language,
             "forbid_solution": contract.forbid_solution,
             "allow_source_language_fields": contract.allow_source_language_fields,
             "required_question_numbers": list(contract.required_question_numbers),
@@ -1498,7 +1500,6 @@ async def generate_answer(
             or any("plan timeline" in issue for issue in issues)
             or any("plan periods" in issue for issue in issues)
             or any("daily time limit" in issue for issue in issues)
-            or first_incomplete
             or bool(first_solve_issues)
             or (
                 has_explicit_no_solution_constraint(message)
@@ -1743,10 +1744,6 @@ async def buffered_response_chunks(text: str) -> AsyncIterator[str]:
         yield chunk
         if index + 1 < len(chunks):
             await asyncio.sleep(response_chunk_delay(chunk))
-
-
-def expanded_retry_num_predict() -> int:
-    return min(OLLAMA_NUM_PREDICT * 2, max(OLLAMA_NUM_PREDICT, settings.ollama_num_ctx - 768))
 
 
 def user_profile_context(req: ChatRequest, max_chars: int = 1_200) -> str:
@@ -3553,11 +3550,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             {},
                         )
                         generation_debug["contract_retry_endpoint"] = "chat"
-                        retry_num_predict = (
-                            expanded_retry_num_predict()
-                            if active_response_debug.get("done_reason") == "length"
-                            else None
-                        )
                         try:
                             retry_answer = await query_ollama_chat(
                                 direct_chat_messages(
@@ -3568,7 +3560,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                                     output_contract=output_contract,
                                 ),
                                 temperature=0.1,
-                                num_predict=retry_num_predict,
                                 response_debug=retry_response_debug,
                             )
                         except OllamaRequestError as exc:

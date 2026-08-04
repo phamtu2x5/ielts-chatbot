@@ -324,6 +324,7 @@ class WritingOutputContract:
 class ResponseOutputContract:
     language: str | None
     forbid_solution: bool
+    enforce_language: bool = False
     allow_source_language_fields: bool = False
     required_question_numbers: tuple[int, ...] = ()
     plan_duration_value: int | None = None
@@ -645,6 +646,7 @@ def response_output_contract(
     return ResponseOutputContract(
         language=language,
         forbid_solution=not allow_solution and explicit_no_solution,
+        enforce_language=query_intent in {"translate_questions", "translate_content"},
         allow_source_language_fields=query_intent
         in {"document_overview", "explain_questions", "semantic_qa", "solve_questions"},
         required_question_numbers=required_numbers,
@@ -779,13 +781,13 @@ def response_output_issues(text: str, contract: ResponseOutputContract) -> list[
     issues: list[str] = []
     if conversation_role_prefix(text):
         issues.append("The response starts with a conversation role prefix.")
-    if contract.language == "English" and _language_mismatch_score(
+    if contract.enforce_language and contract.language == "English" and _language_mismatch_score(
         text,
         "English",
         allow_source_language_fields=contract.allow_source_language_fields,
     ) > 0:
         issues.append("The response is not written in English.")
-    if contract.language == "Vietnamese" and _language_mismatch_score(
+    if contract.enforce_language and contract.language == "Vietnamese" and _language_mismatch_score(
         text,
         "Vietnamese",
         allow_source_language_fields=contract.allow_source_language_fields,
@@ -1208,10 +1210,14 @@ def response_output_penalty(text: str, contract: ResponseOutputContract) -> tupl
     issues = response_output_issues(text, contract)
     return (
         int(any("reveals or narrows" in issue for issue in issues)),
-        _language_mismatch_score(
-            text,
-            contract.language,
-            allow_source_language_fields=contract.allow_source_language_fields,
+        (
+            _language_mismatch_score(
+                text,
+                contract.language,
+                allow_source_language_fields=contract.allow_source_language_fields,
+            )
+            if contract.enforce_language
+            else 0
         ),
         int(any("malformed Markdown table" in issue for issue in issues)),
         len(issues),
@@ -1225,9 +1231,9 @@ def select_best_response_output(
 ) -> str:
     def rank(text: str) -> tuple[tuple[int, int, int, int], int, int]:
         language = _language_evidence(text)
-        if contract.language == "Vietnamese":
+        if contract.enforce_language and contract.language == "Vietnamese":
             target_language_score = language[0]
-        elif contract.language == "English":
+        elif contract.enforce_language and contract.language == "English":
             target_language_score = language[1]
         else:
             target_language_score = 0
@@ -1259,10 +1265,6 @@ def _writing_target_range(
 def writing_output_issues(text: str, contract: WritingOutputContract) -> list[str]:
     issues: list[str] = []
     words = re.findall(r"\b[\w'-]+\b", text, flags=re.UNICODE)
-    if contract.language == "English" and _language_mismatch_score(text, "English") > 0:
-        issues.append("The response is not written in English.")
-    if contract.language == "Vietnamese" and _language_mismatch_score(text, "Vietnamese") > 0:
-        issues.append("The response is not written in Vietnamese.")
     if contract.min_words is not None and len(words) < contract.min_words:
         issues.append(f"The response has {len(words)} words, below {contract.min_words}.")
     if contract.max_words is not None and len(words) > contract.max_words:
