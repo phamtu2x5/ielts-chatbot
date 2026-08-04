@@ -1,8 +1,9 @@
+import asyncio
 import json
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -1688,8 +1689,34 @@ def is_writing_response(
     )
 
 
-def response_chunks(text: str, size: int = 180) -> list[str]:
+def response_buffer_reason(prepared: "ChatPreparation", message: str) -> str:
+    if prepared.static_response is not None:
+        return "static_response"
+    if is_writing_response(prepared, message):
+        return "writing_contract"
+    if prepared.query_intent == "solve_questions":
+        return "solve_contract"
+    if prepared.query_intent in {"translate_questions", "translate_content"}:
+        return "translation_contract"
+    if prepared.query_intent == "document_overview":
+        return "overview_contract"
+    if has_explicit_no_solution_constraint(message):
+        return "no_solution_contract"
+    if prepared.route_used == "base_model":
+        return "direct_output_contract"
+    return "response_contract"
+
+
+def response_chunks(text: str, size: int = 96) -> list[str]:
     return [text[index : index + size] for index in range(0, len(text), size)] or [""]
+
+
+async def buffered_response_chunks(text: str) -> AsyncIterator[str]:
+    chunks = response_chunks(text)
+    for index, chunk in enumerate(chunks):
+        yield chunk
+        if index + 1 < len(chunks):
+            await asyncio.sleep(0.01)
 
 
 def user_profile_context(req: ChatRequest, max_chars: int = 1_200) -> str:
@@ -3381,9 +3408,30 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield stream_event("status", message="Đang phân tích câu hỏi...")
             prepared = await prepare_chat(req)
             await collect_user_fact_updates(req, prepared)
+            if prepared.static_response is not None:
+                prepared.debug["delivery"] = {
+                    "endpoint": "static",
+                    "mode": "buffered_then_streamed",
+                    "buffer_reason": "static_response",
+                }
+            elif requires_reviewed_generation(prepared, req.message):
+                prepared.debug["delivery"] = {
+                    "endpoint": (
+                        "chat" if prepared.route_used == "base_model" else "generate"
+                    ),
+                    "mode": "buffered_then_streamed",
+                    "buffer_reason": response_buffer_reason(prepared, req.message),
+                }
+            else:
+                prepared.debug["delivery"] = {
+                    "endpoint": "generate",
+                    "mode": "live_stream",
+                    "buffer_reason": None,
+                }
             yield metadata_event()
             if prepared.static_response is not None:
-                yield stream_event("token", token=prepared.static_response)
+                async for token in buffered_response_chunks(prepared.static_response):
+                    yield stream_event("token", token=token)
                 finish_resource_debug()
                 yield metadata_event()
                 yield stream_event("done")
@@ -3423,7 +3471,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     if direct_writing and not direct_source_available:
                         generation_debug["generation_skipped"] = "missing_task_source"
                         answer = missing_direct_source_response(req.message)
-                        for token in response_chunks(answer):
+                        async for token in buffered_response_chunks(answer):
                             yield stream_event("token", token=token)
                         finish_resource_debug()
                         yield metadata_event()
@@ -3514,7 +3562,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     answer = await generate_answer(prepared, req.message)
                 if not answer.strip():
                     answer = generation_fallback(prepared, req.message)
-                for token in response_chunks(answer):
+                async for token in buffered_response_chunks(answer):
                     yield stream_event("token", token=token)
                 finish_resource_debug()
                 yield metadata_event()
@@ -3613,7 +3661,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     }
                 )
                 yield metadata_event()
-                yield stream_event("token", token=fallback_answer)
+                prepared.debug["delivery"] = {
+                    "endpoint": fallback_endpoint,
+                    "mode": "buffered_then_streamed",
+                    "buffer_reason": "stream_fallback",
+                }
+                async for token in buffered_response_chunks(fallback_answer):
+                    yield stream_event("token", token=token)
             finish_resource_debug()
             yield metadata_event()
             yield stream_event("done")
@@ -3630,7 +3684,14 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 detail=failure_detail,
             )
 
-    return StreamingResponse(generate(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/documents/upload", response_model=UploadResponse)

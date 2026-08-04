@@ -444,6 +444,8 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         token_events = [event["token"] for event in events if event["type"] == "token"]
         self.assertEqual(token_events, ["Xin chào"])
+        self.assertEqual(response.headers["cache-control"], "no-cache, no-transform")
+        self.assertEqual(response.headers["x-accel-buffering"], "no")
         self.assertEqual(
             next(event for event in events if event["type"] == "metadata")["route_used"],
             "base_model",
@@ -458,6 +460,24 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "vram.used_mb": 10,
             },
         )
+        self.assertEqual(
+            final_metadata["debug"]["delivery"],
+            {
+                "endpoint": "static",
+                "mode": "buffered_then_streamed",
+                "buffer_reason": "static_response",
+            },
+        )
+
+    async def test_buffered_answer_is_released_as_ordered_stream_chunks(self) -> None:
+        answer = "A" * 250
+
+        with patch.object(main.asyncio, "sleep", AsyncMock()) as sleep:
+            chunks = [chunk async for chunk in main.buffered_response_chunks(answer)]
+
+        self.assertEqual("".join(chunks), answer)
+        self.assertEqual([len(chunk) for chunk in chunks], [96, 96, 58])
+        self.assertEqual(sleep.await_count, 2)
 
     async def test_empty_rag_stream_keeps_generate_fallback(self) -> None:
         prepared = main.ChatPreparation(
@@ -3015,6 +3035,14 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(generation_debug["fallback_used"])
         self.assertIn("response_debug", chat_model.await_args.kwargs)
         self.assertIn("primary_response", generation_debug)
+        self.assertEqual(
+            metadata["debug"]["delivery"],
+            {
+                "endpoint": "chat",
+                "mode": "buffered_then_streamed",
+                "buffer_reason": "direct_output_contract",
+            },
+        )
 
     async def test_reviewed_direct_retries_a_length_stopped_answer_through_chat(self) -> None:
         prepared = main.ChatPreparation(
