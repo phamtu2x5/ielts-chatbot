@@ -52,6 +52,19 @@ CONVERSATION_ROLE_PREFIX_RE = re.compile(
     r"(user|assistant|system)(?:\*{1,2}|_{1,2})?[ \t]*(?::[ \t]*|\r?\n)"
 )
 
+IELTS_ANSWER_LIMIT_RE = re.compile(
+    r"\b(?:NO\s+MORE\s+THAN\s+(?:ONE|TWO|THREE|FOUR|\d+)\s+WORDS?"
+    r"(?:\s+AND/OR\s+A\s+NUMBER)?|"
+    r"(?:ONE|TWO|THREE|FOUR|\d+)\s+WORDS?\s+ONLY)\b",
+    re.IGNORECASE,
+)
+
+EXPLANATION_REQUEST_RE = re.compile(
+    r"(?:\bwhy\b|\bhow\s+(?:do|does|did|is|are|was|were|can|could|has|have|had|"
+    r"will|would)\b|\b(?:vì\s+sao|tại\s+sao|do\s+đâu|như\s+thế\s+nào|ra\s+sao)\b)",
+    re.IGNORECASE,
+)
+
 
 @dataclass(frozen=True)
 class RouteGatewayDecision:
@@ -319,6 +332,9 @@ class ResponseOutputContract:
     plan_duration_value: int | None = None
     plan_duration_unit: str | None = None
     max_daily_minutes: int | None = None
+    required_literal_phrases: tuple[str, ...] = ()
+    requires_explanation: bool = False
+    request_text: str = ""
 
     def prompt_lines(self) -> list[str]:
         lines: list[str] = []
@@ -332,6 +348,13 @@ class ResponseOutputContract:
         if self.required_question_numbers:
             numbers = ", ".join(str(number) for number in self.required_question_numbers)
             lines.append(f"- Preserve and answer every requested question number: {numbers}.")
+        for phrase in self.required_literal_phrases:
+            lines.append(f"- Preserve this mandatory instruction phrase unchanged: {phrase}.")
+        if self.requires_explanation:
+            lines.append(
+                "- Give an evidence-based explanation of the requested cause, mechanism, or "
+                "reasoning. Do not return only an answer-option label or repeat the question."
+            )
         if self.forbid_solution:
             lines.append(
                 "- Do not select, infer, eliminate, or hint at any answer. Explain or translate only."
@@ -582,6 +605,19 @@ def conversation_language(message: str) -> str:
     return "Vietnamese"
 
 
+def mandatory_answer_limit_phrases(text: str) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            " ".join(match.group(0).upper().split())
+            for match in IELTS_ANSWER_LIMIT_RE.finditer(text or "")
+        )
+    )
+
+
+def is_explanation_request(message: str) -> bool:
+    return bool(EXPLANATION_REQUEST_RE.search(message or ""))
+
+
 def response_output_contract(
     message: str,
     query_intent: str,
@@ -636,6 +672,15 @@ def response_output_contract(
         plan_duration_value=plan_duration_value,
         plan_duration_unit=plan_duration_unit,
         max_daily_minutes=max_daily_minutes,
+        required_literal_phrases=(
+            mandatory_answer_limit_phrases(message)
+            if query_intent == "translate_questions"
+            else ()
+        ),
+        requires_explanation=(
+            query_intent == "semantic_qa" and is_explanation_request(message)
+        ),
+        request_text=message if query_intent == "semantic_qa" else "",
     )
 
 
@@ -786,6 +831,23 @@ def response_output_issues(text: str, contract: ResponseOutputContract) -> list[
         missing = [number for number in contract.required_question_numbers if number not in present]
         if missing:
             issues.append(f"The response is missing question numbers: {missing}.")
+    normalized_text = " ".join(text.upper().split())
+    for phrase in contract.required_literal_phrases:
+        if " ".join(phrase.upper().split()) not in normalized_text:
+            issues.append(f"The response is missing mandatory instruction phrase: {phrase}.")
+    if contract.requires_explanation:
+        normalized_request = " ".join(contract.request_text.casefold().split())
+        normalized_response = " ".join(text.casefold().split())
+        if (
+            len(normalized_request) >= 20
+            and normalized_response.startswith(normalized_request)
+        ):
+            issues.append("The response repeats the user's question before answering it.")
+        first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        if re.match(r"^(?:[A-H][.)]|[B-H]\s+(?=[A-Z]))", first_line):
+            issues.append(
+                "The response requires an evidence-based explanation, not only an answer option."
+            )
     if has_malformed_markdown_table(text):
         issues.append(
             "The response contains a malformed Markdown table: use one header row, "

@@ -43,6 +43,7 @@ from .llm import (
     direct_answer_prompt,
     extract_user_facts,
     is_direct_writing_request,
+    mandatory_answer_limit_phrases,
     query_ollama_chat,
     query_ollama,
     rag_prompt,
@@ -760,6 +761,11 @@ NO_RAG_MATCH_RESPONSE_EN = (
     "Please specify the document, section, or page, or upload the material again if the content is in a table or image that was not extracted correctly."
 )
 
+LEGACY_NO_RAG_MATCH_RESPONSES = (
+    "Mình không tìm thấy thông tin này trong tài liệu đã chọn.",
+    "I cannot find this information in the selected uploaded material.",
+)
+
 AMBIGUOUS_DOCUMENT_RESPONSE = (
     "Mình chưa xác định được bạn đang hỏi tài liệu nào vì có nhiều file phù hợp. "
     "Vui lòng nêu tên file hoặc đính kèm lại đúng tài liệu cần hỏi."
@@ -817,7 +823,9 @@ def hard_validation_failure(
     """Return a safe response only for explicit language/translation contracts."""
     language_issue = any("not written in" in issue for issue in issues)
     missing_translation_items = query_intent == "translate_questions" and any(
-        "missing question numbers" in issue for issue in issues
+        "missing question numbers" in issue
+        or "missing mandatory instruction phrase" in issue
+        for issue in issues
     )
     if not language_issue and not missing_translation_items:
         return None
@@ -891,6 +899,21 @@ def no_rag_match_response(message: str) -> str:
         allow_solution=False,
     )
     return NO_RAG_MATCH_RESPONSE_EN if contract.language == "English" else NO_RAG_MATCH_RESPONSE
+
+
+def remove_appended_no_match_response(text: str) -> tuple[str, str | None]:
+    stripped = text.strip()
+    for response in (
+        NO_RAG_MATCH_RESPONSE,
+        NO_RAG_MATCH_RESPONSE_EN,
+        *LEGACY_NO_RAG_MATCH_RESPONSES,
+    ):
+        marker = f"\n\n{response}"
+        if stripped.endswith(marker):
+            substantive = stripped[: -len(marker)].rstrip()
+            if substantive:
+                return substantive, response
+    return text, None
 
 
 def generation_temperature(prepared: "ChatPreparation") -> float:
@@ -1399,6 +1422,15 @@ async def generate_answer(
             allow_solution=allow_solution,
             explicit_no_solution=has_explicit_no_solution_constraint(message),
         )
+        if prepared.query_intent == "translate_questions":
+            required_phrases = tuple(
+                dict.fromkeys(
+                    contract.required_literal_phrases
+                    + mandatory_answer_limit_phrases(prompt)
+                )
+            )
+            if required_phrases != contract.required_literal_phrases:
+                contract = replace(contract, required_literal_phrases=required_phrases)
         if direct_writing and not apply_writing_contract:
             contract = replace(contract, language=conversation_language(message))
         solve_report = (
@@ -1407,6 +1439,9 @@ async def generate_answer(
             else {}
         )
         first_raw_answer = answer
+        first_cleanup: str | None = None
+        if prepared.query_intent in {"semantic_qa", "explain_questions"}:
+            answer, first_cleanup = remove_appended_no_match_response(answer)
         first_adjustments: list[dict[str, Any]] = []
         if solve_report:
             answer, first_adjustments = normalize_solve_output(answer, solve_report)
@@ -1424,6 +1459,9 @@ async def generate_answer(
             "forbid_solution": contract.forbid_solution,
             "allow_source_language_fields": contract.allow_source_language_fields,
             "required_question_numbers": list(contract.required_question_numbers),
+            "required_literal_phrases": list(contract.required_literal_phrases),
+            "requires_explanation": contract.requires_explanation,
+            "first_draft_cleanup": first_cleanup,
             "plan_duration_value": contract.plan_duration_value,
             "plan_duration_unit": contract.plan_duration_unit,
             "max_daily_minutes": contract.max_daily_minutes,
@@ -1455,6 +1493,9 @@ async def generate_answer(
             or any("plan timeline" in issue for issue in issues)
             or any("plan periods" in issue for issue in issues)
             or any("daily time limit" in issue for issue in issues)
+            or any("mandatory instruction phrase" in issue for issue in issues)
+            or any("requires an evidence-based explanation" in issue for issue in issues)
+            or any("repeats the user's question" in issue for issue in issues)
             or first_incomplete
             or bool(first_solve_issues)
             or (
@@ -1494,6 +1535,11 @@ async def generate_answer(
                 retry_available = True
             retry_incomplete = retry_done_reason == "length"
             retry_raw = retry
+            retry_cleanup: str | None = None
+            if prepared.query_intent in {"semantic_qa", "explain_questions"}:
+                retry, retry_cleanup = remove_appended_no_match_response(retry)
+                if retry_cleanup:
+                    generation_debug["retry_cleanup"] = retry_cleanup
             retry_adjustments: list[dict[str, Any]] = []
             if solve_report:
                 retry, retry_adjustments = normalize_solve_output(retry, solve_report)
