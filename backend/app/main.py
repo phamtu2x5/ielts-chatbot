@@ -1716,7 +1716,7 @@ async def buffered_response_chunks(text: str) -> AsyncIterator[str]:
     for index, chunk in enumerate(chunks):
         yield chunk
         if index + 1 < len(chunks):
-            await asyncio.sleep(0.06)
+            await asyncio.sleep(0.075)
 
 
 def user_profile_context(req: ChatRequest, max_chars: int = 1_200) -> str:

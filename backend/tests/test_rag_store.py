@@ -1842,6 +1842,14 @@ Mô tả cấu trúc tài liệu bằng tiếng Việt."""
 
 
 class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
+    def test_direct_source_prompt_accepts_an_explicit_broad_subject(self) -> None:
+        prompt = llm.direct_source_classifier_prompt(
+            "Write a long essay about environmental pollution."
+        )
+
+        self.assertIn("broad subject explicitly named", prompt)
+        self.assertIn("do not require a formal IELTS question", prompt)
+
     async def test_direct_source_classifier_retries_and_fails_safe(self) -> None:
         with patch.object(
             llm,
@@ -1867,6 +1875,23 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
             missing = await llm.classify_direct_source("Write the essay mentioned above.")
         self.assertEqual(missing.source, "missing")
         self.assertEqual(missing.fallback_reason, "transport")
+
+    def test_writing_contract_allows_a_requested_translation_addon(self) -> None:
+        contract = llm.writing_output_contract(
+            "Write an English essay about pollution and include a translation afterwards."
+        )
+
+        self.assertEqual(
+            contract.language,
+            "Primary requested language followed by the requested translation",
+        )
+        self.assertNotIn(
+            "The response is not written in English.",
+            llm.writing_output_issues(
+                "Pollution harms public health.\n\nÔ nhiễm gây hại cho sức khỏe cộng đồng.",
+                contract,
+            ),
+        )
 
     def test_route_classifier_prompt_keeps_only_latest_exchange(self) -> None:
         history = [

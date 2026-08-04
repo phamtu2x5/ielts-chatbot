@@ -222,6 +222,11 @@ DIRECT_WRITING_PRODUCT_RE = re.compile(
     r"doan\s+van|bai\s+luan|bai\s+viet|mo\s+bai|than\s+bai|doan\s+overview)\b",
     re.IGNORECASE,
 )
+WRITING_TRANSLATION_ADDON_RE = re.compile(
+    r"\btranslation\b|bản\s+dịch|ban\s+dich|kèm\s+(?:theo\s+)?(?:bản\s+)?dịch|"
+    r"kem\s+(?:theo\s+)?(?:ban\s+)?dich",
+    re.IGNORECASE,
+)
 WRITING_META_RE = re.compile(
     r"^\s*(?:here(?:'s|\s+is)\s+(?:the|a)\s+(?:revised\s+)?(?:answer|essay|report)|"
     r"below\s+is\s+(?:the|a)\s+(?:revised\s+)?(?:answer|essay|report)|"
@@ -524,6 +529,7 @@ def conversation_role_prefix(text: str) -> str | None:
 def writing_output_contract(message: str) -> WritingOutputContract:
     lowered = message.lower()
     requests_vietnamese = bool(EXPLICIT_VIETNAMESE_RE.search(message))
+    requests_translation = bool(WRITING_TRANSLATION_ADDON_RE.search(message))
     range_match = WORD_RANGE_RE.search(message)
     approximate_match = APPROX_WORD_COUNT_RE.search(message)
     minimum_match = MIN_WORD_COUNT_RE.search(message)
@@ -554,7 +560,11 @@ def writing_output_contract(message: str) -> WritingOutputContract:
         min_words, max_words = 40, 80
     target_words = _writing_target_range(min_words, max_words)
     return WritingOutputContract(
-        language="Vietnamese" if requests_vietnamese else "English",
+        language=(
+            "Primary requested language followed by the requested translation"
+            if requests_translation
+            else "Vietnamese" if requests_vietnamese else "English"
+        ),
         min_words=min_words,
         max_words=max_words,
         target_words=target_words,
@@ -1929,7 +1939,8 @@ def direct_source_classifier_prompt(
         instructions = [
             "Decide whether the CURRENT REQUEST and PREVIOUS CONVERSATION contain enough task source to produce the requested Writing content.",
             "AVAILABLE: a complete topic, question, text, data, or self-contained subject is present in either section.",
-            "MISSING: the source is absent; a greeting, error, or request to provide the source is not task content.",
+            "A directly named broad subject is sufficient for an open-ended Writing request; it does not need to be a formal exam prompt or quoted text.",
+            "MISSING: the request depends on referenced content that is absent; a greeting, error, or request to provide the source is not task content.",
             "Do not invent the missing source. When uncertain, choose missing.",
         ]
     else:
@@ -1937,7 +1948,8 @@ def direct_source_classifier_prompt(
             "You are the source-sufficiency classifier for a direct IELTS Writing request.",
             "Classify only whether the CURRENT REQUEST or PREVIOUS CONVERSATION contains the task source needed to write the requested content.",
             "AVAILABLE means either section contains a complete topic, question, source text, dataset description, or otherwise self-contained subject.",
-            "MISSING means the request depends on referenced content that is absent from both sections.",
+            "For an open-ended Writing request, a broad subject explicitly named in the current request is self-contained and AVAILABLE; do not require a formal IELTS question or quoted source text.",
+            "MISSING means the request depends on referenced content that is absent from both sections. Choose MISSING only when that absent content is necessary to know what to write about.",
             "A greeting, error message, refusal, or clarification asking the user to provide a source is not itself a task source.",
             "Writing length, output language, and requested format do not count as task source.",
             "Do not infer, guess, reconstruct, or substitute absent task content. When uncertain, choose missing.",
