@@ -1738,6 +1738,15 @@ Mô tả cấu trúc tài liệu bằng tiếng Việt."""
 
         self.assertEqual(contract.language, "English")
 
+    def test_direct_contract_does_not_promote_an_english_example_field(self) -> None:
+        contract = response_output_contract(
+            "Hãy dạy tôi 10 từ về công nghệ, có câu ví dụ bằng tiếng Anh và nghĩa của câu.",
+            "direct",
+            allow_solution=False,
+        )
+
+        self.assertIsNone(contract.language)
+
     def test_overview_prompt_preserves_source_titles_and_covers_all_sections(self) -> None:
         prompt = rag_prompt(
             "Tóm tắt toàn bộ tài liệu.",

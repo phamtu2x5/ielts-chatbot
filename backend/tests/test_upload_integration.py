@@ -470,14 +470,15 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_buffered_answer_is_released_as_ordered_stream_chunks(self) -> None:
-        answer = "A" * 250
+        answer = "One short phrase, followed by a sentence.\n\nThen another line."
 
         with patch.object(main.asyncio, "sleep", AsyncMock()) as sleep:
             chunks = [chunk async for chunk in main.buffered_response_chunks(answer)]
 
         self.assertEqual("".join(chunks), answer)
-        self.assertEqual([len(chunk) for chunk in chunks], [24] * 10 + [10])
-        self.assertEqual(sleep.await_count, 10)
+        self.assertGreater(len(set(map(len, chunks))), 1)
+        self.assertEqual(sleep.await_count, len(chunks) - 1)
+        self.assertGreater(len(set(call.args[0] for call in sleep.await_args_list)), 1)
 
     async def test_empty_rag_stream_keeps_generate_fallback(self) -> None:
         prepared = main.ChatPreparation(
@@ -3067,8 +3068,9 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             )
             if attempts == 1:
                 return "Cách thứ nhất là luyện nói mỗi ngày nhưng câu trả lời bị"
-            self.assertIn("finish every sentence", messages[0]["content"])
+            self.assertIn("do not stop mid-sentence", messages[0]["content"])
             self.assertEqual(temperature, 0.1)
+            self.assertEqual(kwargs["num_predict"], main.expanded_retry_num_predict())
             return "Luyện nói mỗi ngày, ghi âm và nghe lại để sửa phát âm và độ trôi chảy."
 
         generate_model = AsyncMock(return_value="Không được gọi.")

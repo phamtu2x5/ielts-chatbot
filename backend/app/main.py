@@ -1370,7 +1370,7 @@ async def generate_answer(
             if direct_retry:
                 retry, retry_done_reason = await direct_retry(
                     contract.prompt_lines()
-                    + ["- Keep the response concise enough to finish within the output limit."]
+                    + ["- Finish every requested section and do not stop mid-sentence."]
                 )
                 retry_available = retry is not None
                 if retry is None:
@@ -1520,7 +1520,7 @@ async def generate_answer(
             retry_contract = contract.prompt_lines()
             if first_incomplete:
                 retry_contract.append(
-                    "- Keep the response concise enough to finish every sentence and structure within the output limit."
+                    "- Finish every requested section and structure; do not stop mid-sentence."
                 )
             if direct_retry:
                 retry, retry_done_reason = await direct_retry(retry_contract)
@@ -1707,8 +1707,34 @@ def response_buffer_reason(prepared: "ChatPreparation", message: str) -> str:
     return "response_contract"
 
 
-def response_chunks(text: str, size: int = 24) -> list[str]:
-    return [text[index : index + size] for index in range(0, len(text), size)] or [""]
+def response_chunks(text: str, size: int = 16) -> list[str]:
+    if not text:
+        return [""]
+    chunks: list[str] = []
+    current = ""
+    for part in re.findall(r"\S+\s*|\s+", text):
+        current += part
+        visible = current.rstrip()
+        if (
+            len(current) >= size
+            or "\n\n" in current
+            or visible.endswith((".", "!", "?", ":", ";"))
+        ):
+            chunks.append(current)
+            current = ""
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def response_chunk_delay(chunk: str) -> float:
+    delay = min(0.12, max(0.035, len(chunk) / 190))
+    visible = chunk.rstrip()
+    if visible.endswith((".", "!", "?")):
+        delay += 0.035
+    elif visible.endswith((":", ";")) or "\n\n" in chunk:
+        delay += 0.02
+    return delay
 
 
 async def buffered_response_chunks(text: str) -> AsyncIterator[str]:
@@ -1716,7 +1742,11 @@ async def buffered_response_chunks(text: str) -> AsyncIterator[str]:
     for index, chunk in enumerate(chunks):
         yield chunk
         if index + 1 < len(chunks):
-            await asyncio.sleep(0.075)
+            await asyncio.sleep(response_chunk_delay(chunk))
+
+
+def expanded_retry_num_predict() -> int:
+    return min(OLLAMA_NUM_PREDICT * 2, max(OLLAMA_NUM_PREDICT, settings.ollama_num_ctx - 768))
 
 
 def user_profile_context(req: ChatRequest, max_chars: int = 1_200) -> str:
@@ -3523,6 +3553,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             {},
                         )
                         generation_debug["contract_retry_endpoint"] = "chat"
+                        retry_num_predict = (
+                            expanded_retry_num_predict()
+                            if active_response_debug.get("done_reason") == "length"
+                            else None
+                        )
                         try:
                             retry_answer = await query_ollama_chat(
                                 direct_chat_messages(
@@ -3533,6 +3568,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                                     output_contract=output_contract,
                                 ),
                                 temperature=0.1,
+                                num_predict=retry_num_predict,
                                 response_debug=retry_response_debug,
                             )
                         except OllamaRequestError as exc:

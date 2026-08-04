@@ -235,11 +235,17 @@ WRITING_META_RE = re.compile(
     re.IGNORECASE,
 )
 EXPLICIT_ENGLISH_RE = re.compile(
-    r"(?:bằng|sang|ra|dịch)\s+(?:ra\s+)?tiếng\s+anh|"
-    r"(?:viết|trả\s+lời|phản\s+hồi)(?:\s+(?:bài|đoạn|câu\s+trả\s+lời))?\s+"
+    r"dịch\s+(?:(?:sang|ra)\s+)?tiếng\s+anh|"
+    r"(?:sang|ra)\s+tiếng\s+anh|"
+    r"(?:trả\s+lời|phản\s+hồi)\b[^\n]{0,80}?\b"
     r"(?:bằng|sang|ra)\s+tiếng\s+anh|"
-    r"(?:bang|sang|ra|dich)\s+(?:ra\s+)?tieng\s+anh|"
-    r"(?:viet|tra\s+loi|phan\s+hoi)(?:\s+(?:bai|doan|cau\s+tra\s+loi))?\s+"
+    r"(?:viết|soạn)\b[^\n]{0,60}?\b(?:bài|đoạn|overview)\b[^\n]{0,30}?\b"
+    r"(?:bằng|sang|ra)\s+tiếng\s+anh|"
+    r"dich\s+(?:(?:sang|ra)\s+)?tieng\s+anh|"
+    r"(?:sang|ra)\s+tieng\s+anh|"
+    r"(?:tra\s+loi|phan\s+hoi)\b[^\n]{0,80}?\b"
+    r"(?:bang|sang|ra)\s+tieng\s+anh|"
+    r"(?:viet|soan)\b[^\n]{0,60}?\b(?:bai|doan|overview)\b[^\n]{0,30}?\b"
     r"(?:bang|sang|ra)\s+tieng\s+anh|"
     r"in\s+english|translate\s+(?:it\s+)?(?:into|to)\s+english",
     re.IGNORECASE,
@@ -1533,6 +1539,7 @@ async def query_ollama_chat(
         "response_length": len(raw_text),
         "done": data.get("done"),
         "done_reason": data.get("done_reason"),
+        "num_predict": payload["options"]["num_predict"],
     }
     if response_debug is not None:
         response_debug.update(response_metadata)
