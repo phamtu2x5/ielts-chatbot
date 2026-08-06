@@ -2423,6 +2423,40 @@ class OllamaClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response_debug["response_role"], "assistant")
         self.assertIsNone(response_debug["detected_role_prefix"])
 
+    async def test_chat_empty_response_keeps_runtime_diagnostics(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "thinking": "private reasoning",
+                    },
+                    "done": True,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 42,
+                    "eval_count": 0,
+                },
+                request=request,
+            )
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        response_debug = {}
+        with patch.object(llm.httpx, "AsyncClient", return_value=client):
+            with self.assertRaises(llm.OllamaRequestError) as raised:
+                await llm.query_ollama_chat(
+                    [{"role": "user", "content": "xin chào"}],
+                    temperature=0.0,
+                    response_debug=response_debug,
+                )
+
+        self.assertEqual(raised.exception.kind, "empty_response")
+        self.assertEqual(response_debug["thinking_length"], len("private reasoning"))
+        self.assertEqual(response_debug["prompt_eval_count"], 42)
+        self.assertEqual(response_debug["eval_count"], 0)
+        self.assertIn("thinking", response_debug["message_keys"])
+
     async def test_chat_request_rejects_conversation_role_continuation(self) -> None:
         scenarios = [
             ({"role": "user", "content": "Xin chào bạn."}, None),

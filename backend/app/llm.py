@@ -1533,12 +1533,18 @@ async def query_ollama_chat(
         response_message = {}
     response_role = str(response_message.get("role") or "").strip().lower()
     raw_text = response_message.get("content") or ""
+    thinking = response_message.get("thinking") or data.get("thinking") or ""
     role_prefix = conversation_role_prefix(raw_text)
     response_metadata = {
         "response_role": response_role or None,
         "detected_role_prefix": role_prefix,
         "raw_output_preview": raw_text[:300],
         "response_length": len(raw_text),
+        "thinking_length": len(thinking),
+        "response_keys": sorted(data.keys()),
+        "message_keys": sorted(response_message.keys()),
+        "prompt_eval_count": data.get("prompt_eval_count"),
+        "eval_count": data.get("eval_count"),
         "done": data.get("done"),
         "done_reason": data.get("done_reason"),
         "num_predict": payload["options"]["num_predict"],
@@ -1557,12 +1563,7 @@ async def query_ollama_chat(
         raise OllamaRequestError(
             "empty_response",
             "Ollama chat returned an empty visible response.",
-            metadata={
-                **response_metadata,
-                "response_keys": sorted(data.keys()),
-                "prompt_eval_count": data.get("prompt_eval_count"),
-                "eval_count": data.get("eval_count"),
-            },
+            metadata=response_metadata,
         )
     return visible_text
 

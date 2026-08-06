@@ -890,12 +890,6 @@ def generation_fallback(prepared: "ChatPreparation", message: str = "") -> str:
     return "Bạn muốn mình hỗ trợ nội dung gì? Hãy mô tả yêu cầu cụ thể hơn nhé."
 
 
-def missing_direct_source_response(message: str) -> str:
-    if conversation_language(message) == "English":
-        return "Please provide or paste the topic, question, text, or data you want me to use."
-    return "Bạn vui lòng gửi hoặc dán lại đề bài, văn bản hay dữ liệu cần dùng để mình trả lời đúng nội dung."
-
-
 def no_rag_match_response(message: str) -> str:
     contract = response_output_contract(
         message,
@@ -1378,12 +1372,24 @@ async def generate_answer(
                     retry = answer
                     retry_done_reason = initial_done_reason
             else:
-                retry = await query_ollama(
-                    writing_retry_prompt(prompt, contract),
-                    temperature=0.1,
-                )
-                retry_done_reason = None
-                retry_available = True
+                try:
+                    retry = await query_ollama(
+                        writing_retry_prompt(prompt, contract),
+                        temperature=0.1,
+                        max_attempts=1,
+                    )
+                    retry_done_reason = None
+                    retry_available = True
+                except OllamaRequestError as exc:
+                    retry = answer
+                    retry_done_reason = initial_done_reason
+                    retry_available = False
+                    generation_debug.update(
+                        {
+                            "contract_retry_status": "failed",
+                            "contract_retry_error": exc.kind,
+                        }
+                    )
             retry_incomplete = retry_done_reason == "length"
             selected = _select_complete_candidate(
                 answer,
@@ -1509,7 +1515,7 @@ async def generate_answer(
         if should_retry:
             retry_prompt = (
                 translation_retry_prompt(prompt, contract)
-                if prepared.query_intent == "translate_questions"
+                if prepared.query_intent in {"translate_questions", "translate_content"}
                 else response_retry_prompt(
                     prompt,
                     contract,
@@ -1530,12 +1536,24 @@ async def generate_answer(
                     retry = answer
                     retry_done_reason = initial_done_reason
             else:
-                retry = await query_ollama(
-                    retry_prompt,
-                    temperature=0.1,
-                )
-                retry_done_reason = None
-                retry_available = True
+                try:
+                    retry = await query_ollama(
+                        retry_prompt,
+                        temperature=0.1,
+                        max_attempts=1,
+                    )
+                    retry_done_reason = None
+                    retry_available = True
+                except OllamaRequestError as exc:
+                    retry = answer
+                    retry_done_reason = initial_done_reason
+                    retry_available = False
+                    generation_debug.update(
+                        {
+                            "contract_retry_status": "failed",
+                            "contract_retry_error": exc.kind,
+                        }
+                    )
             retry_incomplete = retry_done_reason == "length"
             retry_raw = retry
             retry_cleanup: str | None = None
@@ -2401,10 +2419,11 @@ async def direct_reviewed_generation_fallback(
     req: ChatRequest,
     reason: str,
     previous_answer_source: str,
+    direct_source_available: bool = True,
 ) -> str:
     generation_debug = prepared.debug.setdefault("direct_generation", {})
     output_contract: list[str] | None = None
-    if is_direct_writing_request(req.message):
+    if is_direct_writing_request(req.message) and direct_source_available:
         output_contract = [
             "- The requested task source is available. Apply the Writing constraints below."
         ] + writing_output_contract(req.message).prompt_lines()
@@ -2412,13 +2431,13 @@ async def direct_reviewed_generation_fallback(
         {
             "fallback_used": True,
             "fallback_reason": reason,
-            "fallback_endpoint": "chat",
+            "fallback_endpoint": "generate",
         }
     )
     fallback_response_debug = generation_debug.setdefault("fallback_response", {})
     try:
-        answer = await query_ollama_chat(
-            direct_chat_messages(
+        answer = await query_ollama(
+            direct_answer_prompt(
                 req.message,
                 req.conversation_history,
                 user_profile_context(req),
@@ -2426,7 +2445,7 @@ async def direct_reviewed_generation_fallback(
                 output_contract=output_contract,
             ),
             temperature=generation_temperature(prepared),
-            response_debug=fallback_response_debug,
+            max_attempts=1,
         )
     except Exception as exc:
         if isinstance(exc, OllamaRequestError) and exc.kind in {
@@ -2450,6 +2469,12 @@ async def direct_reviewed_generation_fallback(
             }
         )
         raise
+    fallback_response_debug.update(
+        {
+            "response_length": len(answer),
+            "num_predict": OLLAMA_NUM_PREDICT,
+        }
+    )
     generation_debug["fallback_status"] = "succeeded" if answer.strip() else "empty"
     return answer
 
@@ -2587,7 +2612,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                     "used": True,
                     "response_contract": "adaptive_direct_answer",
                     "primary_endpoint": "chat",
-                    "fallback_endpoint": "chat",
+                    "fallback_endpoint": "generate",
                     "fallback_used": False,
                     "previous_answer_source": previous_answer_source,
                     "temperature": settings.ollama_direct_temperature,
@@ -3486,6 +3511,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         source_debug = source_decision.to_debug()
                         source_debug["method"] = "semantic_current_and_history"
                         source_debug["history_included"] = bool(req.conversation_history)
+                        source_debug["blocking"] = False
                         generation_debug["source_sufficiency"] = source_debug
                         direct_source_available = source_decision.source == "available"
                         if direct_source_available and req.conversation_history and any(
@@ -3493,21 +3519,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             for message in req.conversation_history
                         ):
                             previous_answer_source = "conversation"
+                        elif not direct_source_available:
+                            previous_answer_source = "none"
                         generation_debug["previous_answer_source"] = previous_answer_source
-
-                    if direct_writing and not direct_source_available:
-                        generation_debug["generation_skipped"] = "missing_task_source"
-                        answer = missing_direct_source_response(req.message)
-                        async for token in buffered_response_chunks(answer):
-                            yield stream_event("token", token=token)
-                        finish_resource_debug()
-                        yield metadata_event()
-                        yield stream_event("done")
-                        return
 
                     primary_response_debug = generation_debug.setdefault("primary_response", {})
                     primary_output_contract: list[str] | None = None
-                    if direct_writing:
+                    if direct_writing and direct_source_available:
                         primary_output_contract = [
                             "- The requested task source is available. Apply the Writing constraints below."
                         ] + writing_output_contract(req.message).prompt_lines()
@@ -3535,6 +3553,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             req,
                             exc.kind,
                             previous_answer_source,
+                            direct_source_available,
                         )
                     active_response_debug = (
                         generation_debug.get("fallback_response", {})
