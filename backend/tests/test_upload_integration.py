@@ -56,6 +56,13 @@ from app.document_pipeline.models import DocumentChunk, ProcessedDocument, Proce
 from app.llm import IntentClassifierDecision, RouteGatewayDecision, TargetResolverDecision
 
 
+TEST_SESSION_ID = "00000000-0000-4000-8000-000000000001"
+
+
+def _chat_request(**kwargs):
+    return main.ChatRequest(session_id=TEST_SESSION_ID, **kwargs)
+
+
 def _gateway_decision(
     route: str,
     intent: str,
@@ -246,7 +253,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_rag_intent", AsyncMock(return_value=intent)),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Dịch đề bài topic trong ảnh tôi vừa gửi.",
                     document_ids=["image-1"],
                     document_scope="explicit",
@@ -341,7 +348,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_rag_intent", AsyncMock(return_value=intent)),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Giải thích cách làm các câu đó nhưng không giải.",
                     document_ids=["doc-1"],
                     document_scope="explicit",
@@ -439,7 +446,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "prepare_chat", prepare),
             patch.object(main, "resource_snapshot", side_effect=snapshots),
         ):
-            response = await main.chat_stream(main.ChatRequest(message="xin chào"))
+            response = await main.chat_stream(_chat_request(message="xin chào"))
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
         token_events = [event["token"] for event in events if event["type"] == "token"]
@@ -502,7 +509,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "query_ollama_chat", chat_fallback),
             patch.object(main, "query_ollama", generate_fallback),
         ):
-            response = await main.chat_stream(main.ChatRequest(message="Passage nói gì?"))
+            response = await main.chat_stream(_chat_request(message="Passage nói gì?"))
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
         self.assertEqual(
@@ -521,7 +528,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={},
             query_intent="direct",
         )
-        request = main.ChatRequest(
+        request = _chat_request(
             message="Give me three IELTS tips.",
             conversation_state={
                 "last_route": "rag",
@@ -565,7 +572,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             debug={},
             query_intent="solve_questions",
         )
-        request = main.ChatRequest(
+        request = _chat_request(
             message="Answer Questions 27-30.",
             conversation_state={
                 "last_route": "direct",
@@ -611,7 +618,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ],
         )
-        request = main.ChatRequest(
+        request = _chat_request(
             message="Hiện tại tôi band 6.0, mục tiêu band 7.0.",
             conversation_state={
                 "last_route": "direct",
@@ -646,7 +653,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             facts=(fact,),
             to_debug=lambda: {"attempted": True, "facts": [fact.model_dump()]},
         )
-        request = main.ChatRequest(message="Tôi band 5.5.")
+        request = _chat_request(message="Tôi band 5.5.")
         trusted = main.ChatPreparation(
             prompt="direct prompt",
             static_response=None,
@@ -696,7 +703,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "question_ranges": [[14, 17]],
             },
         }
-        request = main.ChatRequest(
+        request = _chat_request(
             message="Which document?",
             conversation_state=previous_state,
         )
@@ -746,7 +753,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "get_store", return_value=_FakeChatStore(catalog)),
             patch.object(main, "classify_chat_route", AsyncMock(return_value=gateway)),
         ):
-            response = await main.chat_stream(main.ChatRequest(message="Tell me something useful."))
+            response = await main.chat_stream(_chat_request(message="Tell me something useful."))
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
         metadata = next(event for event in events if event["type"] == "metadata")
@@ -768,7 +775,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "resolve_rag_target", target),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Summarize this document.",
                     document_ids=["doc-1"],
                     document_scope="explicit",
@@ -801,7 +808,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_rag_intent", AsyncMock(return_value=failed_intent)),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Tóm tắt tài liệu này.",
                     document_ids=["doc-1"],
                     document_scope="explicit",
@@ -815,7 +822,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_chat_stream_reports_gateway_failure(self) -> None:
         failure = main.OllamaRequestError("empty_response", "router returned no content")
         with patch.object(main, "prepare_chat", AsyncMock(side_effect=failure)):
-            response = await main.chat_stream(main.ChatRequest(message="xin chào"))
+            response = await main.chat_stream(_chat_request(message="xin chào"))
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
         error = next(event for event in events if event["type"] == "error")
@@ -909,7 +916,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main, "DOCUMENT_PROCESSOR", _FakeProcessor()),
                 patch.object(main, "get_store", return_value=store),
             ):
-                response = await main.upload_document(upload)
+                response = await main.upload_document(TEST_SESSION_ID, upload)
 
             self.assertEqual(response.document_id, "doc-1")
             self.assertEqual(response.document_type, "ielts_reading")
@@ -934,7 +941,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Nội dung Questions 1-4 trong sample.pdf là gì?",
                     document_ids=["doc-1"],
                 )
@@ -960,7 +967,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Trong tài liệu có nói gì về Mars?",
                     document_ids=["doc-1"],
                 )
@@ -993,10 +1000,10 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             greeting = await main.prepare_chat(
-                main.ChatRequest(message="xin chào", document_ids=["doc-1"])
+                _chat_request(message="xin chào", document_ids=["doc-1"])
             )
             advice = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Give me 3 IELTS Speaking Part 2 tips.",
                     document_ids=["doc-1"],
                 )
@@ -1031,7 +1038,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="What does Snow-makers explain about artificial snow?"
                 )
             )
@@ -1081,7 +1088,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "Give me an IELTS Writing Task 2 discussion essay structure.",
             ]:
                 prepared = await main.prepare_chat(
-                    main.ChatRequest(
+                    _chat_request(
                         message=message,
                         document_ids=["doc-reading", "doc-writing"],
                     )
@@ -1118,7 +1125,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="What is Snow-makers about?",
                     document_ids=["doc-a", "doc-b"],
                 )
@@ -1160,7 +1167,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Tại sao?",
                     conversation_history=[
                         {"role": "user", "content": "Trả lời Question 4 trong Reading Test 2"}
@@ -1204,7 +1211,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Give me three IELTS Speaking tips.",
                     conversation_history=[
                         {"role": "user", "content": "Trả lời Question 4 trong Reading Test 2"}
@@ -1225,11 +1232,11 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.probe_queries, [])
 
     def test_direct_conversation_source_requires_trusted_direct_history(self) -> None:
-        no_history = main.ChatRequest(
+        no_history = _chat_request(
             message="Write about the topic above.",
             conversation_state={"last_route": "direct"},
         )
-        direct_history = main.ChatRequest(
+        direct_history = _chat_request(
             message="Write about the topic above.",
             conversation_history=[
                 {"role": "user", "content": "Translate this topic."},
@@ -1237,7 +1244,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
             conversation_state={"last_route": "direct"},
         )
-        rag_history = main.ChatRequest(
+        rag_history = _chat_request(
             message="Give me three general IELTS tips.",
             conversation_history=[
                 {"role": "user", "content": "What does Passage 1 say?"},
@@ -1271,7 +1278,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(message="Give me three IELTS Speaking tips.", document_ids=["doc-1"])
+                _chat_request(message="Give me three IELTS Speaking tips.", document_ids=["doc-1"])
             )
 
         gateway.assert_awaited_once()
@@ -1317,7 +1324,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_chat_route", gateway),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Why did urban transport change?",
                     document_ids=["doc-1"],
                     document_scope="explicit",
@@ -1462,7 +1469,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "classify_chat_route", gateway),
         ):
             await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="Give me three IELTS tips.",
                     document_ids=["doc-1"],
                     conversation_state={
@@ -1523,7 +1530,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="How did the fence affect kangaroos?",
                     document_ids=["doc-1"],
                 )
@@ -1553,7 +1560,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         ):
-            prepared = await main.prepare_chat(main.ChatRequest(message="Liệt kê Questions 1-4"))
+            prepared = await main.prepare_chat(_chat_request(message="Liệt kê Questions 1-4"))
 
         self.assertEqual(prepared.route_used, "vector_rag_ambiguous_document")
         self.assertIn("Vui lòng nêu tên file", prepared.static_response)
@@ -1574,7 +1581,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "resolve_rag_target", target_resolver),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(message="Nội dung cụ thể là gì?")
+                _chat_request(message="Nội dung cụ thể là gì?")
             )
 
         target_resolver.assert_not_awaited()
@@ -1612,7 +1619,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "resolve_rag_target", target_resolver),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(
+                _chat_request(
                     message="What does the sample answer say about crime rates in cities?"
                 )
             )
@@ -1674,7 +1681,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ),
         ):
             prepared = await main.prepare_chat(
-                main.ChatRequest(message="Which climate trends report is this?")
+                _chat_request(message="Which climate trends report is this?")
             )
 
         resolution = prepared.debug["document_resolution"]
@@ -2924,7 +2931,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "resource_snapshot", side_effect=snapshots),
         ):
             response = await main.chat_stream(
-                main.ChatRequest(message="Trả lời Question 1.")
+                _chat_request(message="Trả lời Question 1.")
             )
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
@@ -2994,7 +3001,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         chat_model = AsyncMock(return_value="I enjoy learning English every day.")
         generate_model = AsyncMock(return_value="Không được gọi.")
-        request = main.ChatRequest(
+        request = _chat_request(
             message="Viết lại câu trả lời vừa rồi.",
             conversation_history=[
                 {"role": "user", "content": "Viết một câu giới thiệu."},
@@ -3075,7 +3082,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "query_ollama", generate_model),
         ):
             response = await main.chat_stream(
-                main.ChatRequest(message="Hãy nói rõ hơn cách luyện kỹ năng nói.")
+                _chat_request(message="Hãy nói rõ hơn cách luyện kỹ năng nói.")
             )
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
@@ -3117,7 +3124,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(temperature, 0.1)
             return valid_draft
 
-        request = main.ChatRequest(
+        request = _chat_request(
             message="Hãy viết một đoạn văn khoảng 150 từ bằng tiếng Anh trả lời đề bài vừa gửi.",
             conversation_history=[
                 {"role": "user", "content": "Dịch đề bài về government spending."},
@@ -3191,7 +3198,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "query_ollama", generate_model),
         ):
             response = await main.chat_stream(
-                main.ChatRequest(
+                _chat_request(
                     message="Hãy viết một đoạn văn khoảng 150 từ bằng tiếng Anh trả lời đề bài vừa gửi."
                 )
             )
@@ -3242,7 +3249,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "query_ollama", generate_model),
         ):
             response = await main.chat_stream(
-                main.ChatRequest(
+                _chat_request(
                     message=(
                         "Write a paragraph of about 150 words answering this topic: "
                         "Governments should invest more in public transport than roads."
@@ -3298,7 +3305,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "query_ollama", AsyncMock(return_value="Không được gọi.")),
         ):
             response = await main.chat_stream(
-                main.ChatRequest(
+                _chat_request(
                     message=(
                         "Write a paragraph of about 150 words answering this topic: "
                         "Governments should invest more in public transport than roads."
@@ -3358,7 +3365,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "query_ollama", generate_model),
         ):
             response = await main.chat_stream(
-                main.ChatRequest(message="Lập kế hoạch học IELTS trong 3 tháng.")
+                _chat_request(message="Lập kế hoạch học IELTS trong 3 tháng.")
             )
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
@@ -3403,7 +3410,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "query_ollama", AsyncMock(return_value="Không được gọi.")),
         ):
             response = await main.chat_stream(
-                main.ChatRequest(message="Hãy giải thích kỹ hơn cách luyện nói.")
+                _chat_request(message="Hãy giải thích kỹ hơn cách luyện nói.")
             )
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
@@ -3457,7 +3464,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(main, "query_ollama", generate_model),
                     patch.object(main, "query_ollama_chat", chat_model),
                 ):
-                    response = await main.chat_stream(main.ChatRequest(message="xin chào"))
+                    response = await main.chat_stream(_chat_request(message="xin chào"))
                     events = [json.loads(chunk) async for chunk in response.body_iterator]
 
                 returned_answer = "".join(
@@ -3514,7 +3521,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "query_ollama", generate_model),
             patch.object(main, "query_ollama_chat", chat_model),
         ):
-            response = await main.chat_stream(main.ChatRequest(message="xin chào"))
+            response = await main.chat_stream(_chat_request(message="xin chào"))
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
         error = next(event for event in events if event["type"] == "error")
@@ -3936,7 +3943,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "stream_ollama", streamed_answer),
         ):
             response = await main.chat_stream(
-                main.ChatRequest(message="Vì sao tác giả phản đối phương pháp này?")
+                _chat_request(message="Vì sao tác giả phản đối phương pháp này?")
             )
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 
@@ -3969,7 +3976,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "stream_ollama", streamed_answer),
         ):
             response = await main.chat_stream(
-                main.ChatRequest(message="Tài liệu có đề cập nội dung này không?")
+                _chat_request(message="Tài liệu có đề cập nội dung này không?")
             )
             events = [json.loads(chunk) async for chunk in response.body_iterator]
 

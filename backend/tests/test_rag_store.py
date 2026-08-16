@@ -4,7 +4,8 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
+from uuid import uuid4
 
 import httpx
 import numpy as np
@@ -73,6 +74,50 @@ class FakeVectorStore(rag.LocalVectorStore):
         if self.fail_embedding:
             raise RuntimeError("embedding failed")
         return np.asarray([[float(len(text)), 1.0] for text in texts], dtype=np.float32)
+
+
+class SessionRagManagerTests(unittest.TestCase):
+    def test_sessions_have_separate_indexes_and_share_one_embedding_model(self) -> None:
+        model = Mock()
+        model.encode.side_effect = lambda texts, normalize_embeddings: np.asarray(
+            [[float(len(text)), 1.0] for text in texts],
+            dtype=np.float32,
+        )
+        first_session = str(uuid4())
+        second_session = str(uuid4())
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            rag,
+            "SentenceTransformer",
+            return_value=model,
+        ) as model_factory:
+            manager = rag.SessionRagManager(Path(temp_dir))
+            first = manager.get_store(first_session)
+            second = manager.get_store(second_session)
+            first.upsert(
+                [
+                    {
+                        "chunk_id": "first-1",
+                        "document_id": "doc-first",
+                        "source_file": "first.pdf",
+                        "text": "first session content",
+                        "chunk_index": 0,
+                        "pages": [1],
+                        "metadata": {},
+                    }
+                ],
+                "first.pdf",
+            )
+
+            self.assertEqual(first.stats()["documents"], 1)
+            self.assertEqual(second.stats()["documents"], 0)
+            self.assertEqual(second.document_catalog(), [])
+            self.assertEqual(second.search("first session content"), [])
+            self.assertIs(manager.get_store(first_session), first)
+            self.assertNotEqual(first.data_dir, second.data_dir)
+            self.assertEqual(first.data_dir.parent, Path(temp_dir) / "sessions")
+            manager.warmup()
+            self.assertEqual(model_factory.call_count, 1)
 
 
 class LocalVectorStoreTests(unittest.TestCase):

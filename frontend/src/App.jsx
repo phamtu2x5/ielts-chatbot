@@ -18,6 +18,15 @@ import remarkGfm from "remark-gfm";
 import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_CHATBOT_API_URL || "/api";
+const SESSION_STORAGE_KEY = "ielts-chatbot-session-id";
+
+function getOrCreateSessionId() {
+  const existing = window.localStorage.getItem(SESSION_STORAGE_KEY);
+  if (existing) return existing;
+  const sessionId = window.crypto.randomUUID();
+  window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+  return sessionId;
+}
 
 const routeLabels = {
   base_model: "Model chính",
@@ -297,6 +306,7 @@ function sourceScoreLabel(source) {
 }
 
 function App() {
+  const [sessionId] = useState(getOrCreateSessionId);
   const [messages, setMessages] = useState([
     {
       role: "assistant",
@@ -338,6 +348,7 @@ function App() {
     const routeDecision = debug.route_decision || message.route_used || null;
     const payload = {
       exported_at: new Date().toISOString(),
+      session_id: sessionId,
       question: previousQuestion?.content || "",
       answer: message.content || "",
       route_used: message.route_used || null,
@@ -431,6 +442,7 @@ function App() {
 
   async function uploadFile(file) {
     const formData = new FormData();
+    formData.append("session_id", sessionId);
     formData.append("file", file);
     const response = await fetch(`${API_BASE}/documents/upload`, {
       method: "POST",
@@ -582,6 +594,7 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          session_id: sessionId,
           message: text,
           conversation_history: history,
           document_ids: uploadedFiles.length

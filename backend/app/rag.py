@@ -5,7 +5,9 @@ import time
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import wraps
+from pathlib import Path
 from typing import Callable, Dict, List, TypeVar
+from uuid import UUID
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -30,11 +32,19 @@ def synchronized(method: Callable[..., T]) -> Callable[..., T]:
 
 
 class LocalVectorStore:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        data_dir: Path | None = None,
+        embedder: Callable[[List[str]], np.ndarray] | None = None,
+    ) -> None:
         self.model_name = settings.embedding_model_name
         self.min_score = settings.rag_min_score
+        self.data_dir = data_dir or DATA_DIR
+        self.index_path = self.data_dir / "embeddings.npy" if data_dir else INDEX_PATH
+        self.docs_path = self.data_dir / "documents.json" if data_dir else DOCS_PATH
+        self._external_embedder = embedder
         self._lock = threading.RLock()
-        self._embedding_lock = threading.Lock()
+        self._embedding_lock = threading.RLock()
         self._model = None
         self._docs: List[Dict] = []
         self._embeddings = np.empty((0, 0), dtype=np.float32)
@@ -50,9 +60,9 @@ class LocalVectorStore:
         return self._model
 
     def _load(self) -> None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        docs_exist = DOCS_PATH.exists()
-        index_exists = INDEX_PATH.exists()
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        docs_exist = self.docs_path.exists()
+        index_exists = self.index_path.exists()
         if docs_exist != index_exists:
             raise RuntimeError(
                 "RAG index is incomplete: documents.json and embeddings.npy must exist together. "
@@ -62,8 +72,8 @@ class LocalVectorStore:
             return
 
         try:
-            docs = json.loads(DOCS_PATH.read_text(encoding="utf-8"))
-            embeddings = np.load(INDEX_PATH, allow_pickle=False)
+            docs = json.loads(self.docs_path.read_text(encoding="utf-8"))
+            embeddings = np.load(self.index_path, allow_pickle=False)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError("RAG index cannot be loaded. Rebuild it by uploading the documents again.") from exc
 
@@ -76,20 +86,22 @@ class LocalVectorStore:
         self._embeddings = np.asarray(embeddings, dtype=np.float32)
 
     def _save_state(self, docs: List[Dict], embeddings: np.ndarray) -> None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        docs_temp = DOCS_PATH.with_suffix(".json.tmp")
-        index_temp = INDEX_PATH.with_suffix(".npy.tmp")
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        docs_temp = self.docs_path.with_suffix(".json.tmp")
+        index_temp = self.index_path.with_suffix(".npy.tmp")
         try:
             docs_temp.write_text(json.dumps(docs, ensure_ascii=False, indent=2), encoding="utf-8")
             with index_temp.open("wb") as handle:
                 np.save(handle, embeddings)
-            index_temp.replace(INDEX_PATH)
-            docs_temp.replace(DOCS_PATH)
+            index_temp.replace(self.index_path)
+            docs_temp.replace(self.docs_path)
         finally:
             docs_temp.unlink(missing_ok=True)
             index_temp.unlink(missing_ok=True)
 
     def _embed(self, texts: List[str]) -> np.ndarray:
+        if self._external_embedder is not None:
+            return self._external_embedder(texts)
         with self._embedding_lock:
             embeddings = self.model.encode(texts, normalize_embeddings=True)
         return np.asarray(embeddings, dtype=np.float32)
@@ -767,14 +779,95 @@ class LocalVectorStore:
         }
 
 
-_store: LocalVectorStore | None = None
-_store_lock = threading.Lock()
+class SessionRagManager:
+    def __init__(self, data_dir: Path | None = None) -> None:
+        self.sessions_dir = (data_dir or DATA_DIR) / "sessions"
+        self.model_name = settings.embedding_model_name
+        self._lock = threading.RLock()
+        self._embedding_lock = threading.RLock()
+        self._model = None
+        self._stores: dict[str, LocalVectorStore] = {}
+
+    @staticmethod
+    def normalize_session_id(session_id: UUID | str) -> str:
+        try:
+            return str(UUID(str(session_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("session_id must be a valid UUID.") from exc
+
+    @property
+    def model(self) -> SentenceTransformer:
+        if self._model is None:
+            with self._embedding_lock:
+                if self._model is None:
+                    self._model = SentenceTransformer(self.model_name)
+        return self._model
+
+    def _embed(self, texts: List[str]) -> np.ndarray:
+        with self._embedding_lock:
+            embeddings = self.model.encode(texts, normalize_embeddings=True)
+        return np.asarray(embeddings, dtype=np.float32)
+
+    def get_store(self, session_id: UUID | str) -> LocalVectorStore:
+        normalized = self.normalize_session_id(session_id)
+        with self._lock:
+            store = self._stores.get(normalized)
+            if store is None:
+                store = LocalVectorStore(
+                    data_dir=self.sessions_dir / normalized,
+                    embedder=self._embed,
+                )
+                self._stores[normalized] = store
+            return store
+
+    def warmup(self) -> Dict:
+        embedding = self._embed(["IELTS document retrieval warmup"])[0]
+        return {
+            "embedding_model": self.model_name,
+            "embedding_dimensions": int(embedding.shape[0]),
+        }
+
+    def stats(self) -> Dict:
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        documents = 0
+        chunks = 0
+        session_count = 0
+        for docs_path in self.sessions_dir.glob("*/documents.json"):
+            try:
+                docs = json.loads(docs_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(docs, list):
+                continue
+            session_count += 1
+            chunks += len(docs)
+            documents += len(
+                {
+                    doc.get("document_id") or doc.get("source_file")
+                    for doc in docs
+                    if isinstance(doc, dict)
+                }
+            )
+        return {
+            "sessions": session_count,
+            "documents": documents,
+            "chunks": chunks,
+            "embedding_model": self.model_name,
+        }
 
 
-def get_store() -> LocalVectorStore:
-    global _store
-    if _store is None:
-        with _store_lock:
-            if _store is None:
-                _store = LocalVectorStore()
-    return _store
+_manager: SessionRagManager | None = None
+_manager_lock = threading.Lock()
+
+
+def get_store_manager() -> SessionRagManager:
+    global _manager
+    if _manager is None:
+        with _manager_lock:
+            if _manager is None:
+                _manager = SessionRagManager()
+    return _manager
+
+
+def get_store(session_id: UUID | str) -> LocalVectorStore:
+    return get_store_manager().get_store(session_id)

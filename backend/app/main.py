@@ -7,10 +7,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import aiofiles
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -63,7 +63,7 @@ from .llm import (
     writing_output_penalty,
     writing_retry_prompt,
 )
-from .rag import get_store
+from .rag import get_store, get_store_manager
 from .resource_debug import resource_delta, resource_snapshot
 from .schemas import (
     ChatAffinity,
@@ -2523,7 +2523,7 @@ def gateway_clarification_response(
 
 async def prepare_chat(req: ChatRequest) -> ChatPreparation:
     message = req.message.strip()
-    store = get_store()
+    store = get_store(req.session_id)
     route = "direct"
     sources: list[dict[str, Any]] = []
     catalog: list[dict[str, Any]] = []
@@ -3298,7 +3298,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
 
 @app.get("/health")
 async def health() -> dict:
-    stats = await run_in_threadpool(get_store().stats)
+    stats = await run_in_threadpool(get_store_manager().stats)
     return {
         "status": "ok",
         "runtime_status": (LAST_WARMUP_STATUS or {}).get("status", "not_warmed"),
@@ -3377,7 +3377,7 @@ async def warmup() -> dict:
     if settings.warmup_embedding:
         embedding_started = time.perf_counter()
         try:
-            embedding_result = await run_in_threadpool(get_store().warmup)
+            embedding_result = await run_in_threadpool(get_store_manager().warmup)
             results["embedding"] = {
                 "ok": True,
                 "duration_seconds": round(time.perf_counter() - embedding_started, 2),
@@ -3459,6 +3459,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         try:
             yield stream_event("status", message="Đang phân tích câu hỏi...")
             prepared = await prepare_chat(req)
+            prepared.debug["session_id"] = str(req.session_id)
             await collect_user_fact_updates(req, prepared)
             if prepared.static_response is not None:
                 prepared.debug["delivery"] = {
@@ -3741,7 +3742,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
 
 @app.post("/documents/upload", response_model=UploadResponse)
-async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
+async def upload_document(
+    session_id: UUID = Form(...),
+    file: UploadFile = File(...),
+) -> UploadResponse:
     upload_started = time.perf_counter()
     upload_timing: dict[str, Any] = {}
     timing_debug: dict[str, Any] = {"upload": {}}
@@ -3790,7 +3794,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
                 detail=document_extraction_failure_detail(document),
             )
 
-        store = get_store()
+        store = get_store(session_id)
         upsert_started = time.perf_counter()
         inserted = await run_in_threadpool(
             store.upsert,
@@ -3811,12 +3815,13 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
             },
         )
         return UploadResponse(
+            session_id=session_id,
             message=f"Processed {inserted} chunks",
             file_name=document.filename,
             document_id=document.document_id,
             document_type=document.metadata.get("document_type") or document.mime_type,
             chunks_processed=inserted,
-            collection_stats=await run_in_threadpool(get_store().stats),
+            collection_stats=await run_in_threadpool(store.stats),
             debug={
                 "timing": timing_debug,
                 "extraction": document.metadata.get("extraction_report", {}),
@@ -3844,7 +3849,7 @@ async def search(req: SearchRequest) -> SearchResponse:
     if not query:
         raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung tìm kiếm")
     results = await run_in_threadpool(
-        get_store().search,
+        get_store(req.session_id).search,
         query,
         req.top_k,
         req.document_ids,
@@ -3853,5 +3858,6 @@ async def search(req: SearchRequest) -> SearchResponse:
 
 
 @app.get("/rag/stats", response_model=StatsResponse)
-async def stats() -> StatsResponse:
-    return StatsResponse(**(await run_in_threadpool(get_store().stats)))
+async def stats(session_id: UUID) -> StatsResponse:
+    session_stats = await run_in_threadpool(get_store(session_id).stats)
+    return StatsResponse(session_id=session_id, **session_stats)

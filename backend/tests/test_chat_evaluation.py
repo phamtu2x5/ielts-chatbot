@@ -34,6 +34,7 @@ REQUIRED_CATEGORIES = {
     "negative_document_qa",
     "writing_generation",
 }
+TEST_SESSION_ID = "00000000-0000-4000-8000-000000000001"
 
 
 class ChatEvaluationManifestTests(unittest.TestCase):
@@ -105,6 +106,7 @@ class ChatEvaluationManifestTests(unittest.TestCase):
         self.assertEqual(
             capture["request_context"],
             {
+                "session_id": None,
                 "document_ids": None,
                 "document_scope": "available",
                 "conversation_state": None,
@@ -207,7 +209,7 @@ class ChatEvaluationManifestTests(unittest.TestCase):
             ],
         )
 
-        result = ask_chat("http://backend", "Question", 30.0)
+        result = ask_chat("http://backend", "Question", 30.0, TEST_SESSION_ID)
 
         request_url, payload, timeout = request_ndjson.call_args.args
         request_body = json.loads(payload.decode("utf-8"))
@@ -216,6 +218,7 @@ class ChatEvaluationManifestTests(unittest.TestCase):
         self.assertEqual(
             request_body,
             {
+                "session_id": TEST_SESSION_ID,
                 "message": "Question",
                 "document_ids": None,
                 "document_scope": "available",
@@ -241,7 +244,7 @@ class ChatEvaluationManifestTests(unittest.TestCase):
             ],
         )
 
-        result = ask_chat("http://backend", "Question", 30.0)
+        result = ask_chat("http://backend", "Question", 30.0, TEST_SESSION_ID)
 
         self.assertEqual(result["response"]["response"], "Partial answer")
         self.assertEqual(result["error"], "stream_ended_without_done")

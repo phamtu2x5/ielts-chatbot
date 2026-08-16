@@ -10,7 +10,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -28,6 +28,10 @@ SOURCE_METADATA_FIELDS = (
     "document_type",
     "task_type",
 )
+
+
+def session_uuid(value: str) -> str:
+    return str(UUID(value))
 
 
 def load_manifest(path: Path) -> dict[str, Any]:
@@ -100,10 +104,13 @@ def request_ndjson(
         return exc.code, [{"type": "error", "detail": detail}]
 
 
-def multipart_file(path: Path) -> tuple[bytes, str]:
+def multipart_file(path: Path, session_id: str) -> tuple[bytes, str]:
     boundary = f"----ielts-chat-evaluation-{uuid4().hex}"
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     prefix = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="session_id"\r\n\r\n'
+        f"{session_id}\r\n"
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="file"; filename="{path.name}"\r\n'
         f"Content-Type: {content_type}\r\n\r\n"
@@ -112,8 +119,13 @@ def multipart_file(path: Path) -> tuple[bytes, str]:
     return body, boundary
 
 
-def upload_document(base_url: str, path: Path, timeout: float) -> dict[str, Any]:
-    body, boundary = multipart_file(path)
+def upload_document(
+    base_url: str,
+    path: Path,
+    timeout: float,
+    session_id: str,
+) -> dict[str, Any]:
+    body, boundary = multipart_file(path, session_id)
     started = time.perf_counter()
     status, response = request_json(
         "POST",
@@ -134,10 +146,12 @@ def ask_chat(
     base_url: str,
     message: str,
     timeout: float,
+    session_id: str,
     conversation_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = json.dumps(
         {
+            "session_id": session_id,
             "message": message,
             "document_ids": None,
             "document_scope": "available",
@@ -248,6 +262,7 @@ def compact_upload_result(result: dict[str, Any]) -> dict[str, Any]:
     compact_response = {
         key: response.get(key)
         for key in (
+            "session_id",
             "message",
             "detail",
             "file_name",
@@ -279,6 +294,7 @@ def capture_case(
     case: dict[str, Any],
     result: dict[str, Any],
     source_index: dict[str, dict[str, Any]] | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     response = result.get("response") or {}
     raw_sources = response.get("sources") or []
@@ -292,6 +308,7 @@ def capture_case(
         "query": case["query"],
         "expected_target_files": case.get("expected_target_files", []),
         "request_context": {
+            "session_id": session_id,
             "document_ids": None,
             "document_scope": "available",
             "conversation_state": None,
@@ -338,12 +355,15 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     manifest = load_manifest(args.manifest)
     corpus_files = verify_corpus(manifest, args.corpus_dir)
     base_url = args.base_url.rstrip("/")
+    session_id = args.session_id or str(uuid4())
     upload_results: list[dict[str, Any]] = []
 
     if not args.skip_upload:
         for path in corpus_files:
             try:
-                upload_results.append(upload_document(base_url, path, args.upload_timeout))
+                upload_results.append(
+                    upload_document(base_url, path, args.upload_timeout, session_id)
+                )
             except Exception as exc:
                 upload_results.append({"filename": path.name, "http_status": None, "error": repr(exc)})
 
@@ -356,6 +376,7 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
                 base_url,
                 case["query"],
                 args.chat_timeout,
+                session_id,
             )
         except Exception as exc:
             raw_result = {
@@ -374,6 +395,7 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
                 case,
                 raw_result,
                 source_index,
+                session_id,
             )
         )
 
@@ -383,10 +405,11 @@ def run_capture(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         for item in case_results
     )
     report = {
-        "schema_version": "1.3",
+        "schema_version": "1.4",
         "question_set_name": manifest.get("name"),
         "manifest_schema_version": manifest.get("schema_version"),
         "base_url": base_url,
+        "session_id": session_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "uploads": [compact_upload_result(result) for result in upload_results],
         "document_catalog": list(document_catalog_by_file.values()),
@@ -418,6 +441,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corpus-dir", type=Path, default=DEFAULT_CORPUS_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--skip-upload", action="store_true")
+    parser.add_argument(
+        "--session-id",
+        type=session_uuid,
+        help="Reuse one UUID session; a new session is created by default.",
+    )
     parser.add_argument("--case", action="append", default=[], help="Run one case ID; repeat as needed.")
     parser.add_argument("--upload-timeout", type=float, default=900.0)
     parser.add_argument("--chat-timeout", type=float, default=300.0)

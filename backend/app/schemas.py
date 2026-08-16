@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Literal, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,7 @@ class ChatConversationState(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    session_id: UUID
     message: str = Field(min_length=1, max_length=8_000)
     conversation_history: Optional[List[ChatMessage]] = Field(default=None, max_length=20)
     document_ids: Optional[List[str]] = Field(default=None, max_length=50)
@@ -36,6 +38,7 @@ class ChatRequest(BaseModel):
 
 
 class UploadResponse(BaseModel):
+    session_id: UUID
     message: str
     file_name: str
     document_id: str
@@ -46,6 +49,7 @@ class UploadResponse(BaseModel):
 
 
 class SearchRequest(BaseModel):
+    session_id: UUID
     query: str = Field(min_length=1, max_length=2_000)
     top_k: int = Field(default=5, ge=1, le=50)
     document_ids: Optional[List[str]] = Field(default=None, max_length=50)
@@ -57,6 +61,7 @@ class SearchResponse(BaseModel):
 
 
 class StatsResponse(BaseModel):
+    session_id: UUID
     documents: int
     chunks: int
     embedding_model: str
