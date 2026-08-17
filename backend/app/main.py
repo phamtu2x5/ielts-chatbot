@@ -72,6 +72,7 @@ from .schemas import (
     ChatUserFact,
     SearchRequest,
     SearchResponse,
+    SessionDeleteResponse,
     StatsResponse,
     UploadResponse,
 )
@@ -3861,3 +3862,9 @@ async def search(req: SearchRequest) -> SearchResponse:
 async def stats(session_id: UUID) -> StatsResponse:
     session_stats = await run_in_threadpool(get_store(session_id).stats)
     return StatsResponse(session_id=session_id, **session_stats)
+
+
+@app.delete("/sessions/{session_id}", response_model=SessionDeleteResponse)
+async def delete_session(session_id: UUID) -> SessionDeleteResponse:
+    deleted = await run_in_threadpool(get_store_manager().delete_session, session_id)
+    return SessionDeleteResponse(session_id=session_id, deleted=deleted)

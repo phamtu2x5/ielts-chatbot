@@ -6,8 +6,10 @@ import {
   Download,
   FileText,
   Paperclip,
+  Plus,
   Send,
   Sparkles,
+  Trash2,
   UserRound,
   X,
   XCircle,
@@ -19,13 +21,106 @@ import "./styles.css";
 
 const API_BASE = import.meta.env.VITE_CHATBOT_API_URL || "/api";
 const SESSION_STORAGE_KEY = "ielts-chatbot-session-id";
+const SESSION_LIST_STORAGE_KEY = "ielts-chatbot-sessions-v1";
+const SESSION_DATA_PREFIX = "ielts-chatbot-session-v1:";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const WELCOME_MESSAGE = {
+  id: "welcome",
+  role: "assistant",
+  content:
+    "Xin chào, mình là trợ lý IELTS của bạn. Bạn có thể hỏi về Reading, Listening, Writing, Speaking hoặc tải tài liệu lên để mình hỗ trợ phân tích nội dung.",
+  route_used: "welcome",
+};
 
-function getOrCreateSessionId() {
-  const existing = window.localStorage.getItem(SESSION_STORAGE_KEY);
-  if (existing) return existing;
-  const sessionId = window.crypto.randomUUID();
-  window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
-  return sessionId;
+function newSessionMetadata(id = window.crypto.randomUUID(), title = "Phiên mới") {
+  const now = new Date().toISOString();
+  return { id, title, createdAt: now, updatedAt: now };
+}
+
+function loadSessionWorkspace() {
+  const legacyId = window.localStorage.getItem(SESSION_STORAGE_KEY);
+  const currentId = UUID_PATTERN.test(legacyId || "") ? legacyId : window.crypto.randomUUID();
+  let sessions = [];
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(SESSION_LIST_STORAGE_KEY) || "[]");
+    if (Array.isArray(stored)) {
+      const seen = new Set();
+      sessions = stored.filter((session) => {
+        if (!UUID_PATTERN.test(session?.id || "") || seen.has(session.id)) return false;
+        seen.add(session.id);
+        return true;
+      });
+    }
+  } catch {
+    sessions = [];
+  }
+  if (!sessions.some((session) => session.id === currentId)) {
+    sessions.unshift(newSessionMetadata(currentId, sessions.length ? "Phiên hiện tại" : "Phiên mới"));
+  }
+  return { currentId, sessions };
+}
+
+function sessionDataKey(sessionId) {
+  return `${SESSION_DATA_PREFIX}${sessionId}`;
+}
+
+function loadSessionData(sessionId) {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(sessionDataKey(sessionId)) || "null");
+    const messages = Array.isArray(stored?.messages)
+      ? stored.messages.filter((message) => ["user", "assistant"].includes(message?.role))
+      : [];
+    return {
+      messages: messages.length ? messages : [{ ...WELCOME_MESSAGE }],
+      conversationState: stored?.conversationState || null,
+    };
+  } catch {
+    return { messages: [{ ...WELCOME_MESSAGE }], conversationState: null };
+  }
+}
+
+function compactSessionMessages(messages) {
+  const compact = messages
+    .filter(
+      (message) =>
+        !message.streaming &&
+        (message.content?.trim() || (message.attachments || []).length)
+    )
+    .slice(-60)
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content || "",
+      route_used: message.route_used,
+      attachments: (message.attachments || []).map((attachment) => ({
+        id: attachment.id,
+        name: attachment.name,
+        status: attachment.status,
+        chunks: attachment.chunks,
+        documentId: attachment.documentId,
+        error: attachment.error,
+      })),
+    }));
+  return compact.length ? compact : [{ ...WELCOME_MESSAGE }];
+}
+
+function saveSessionData(sessionId, messages, conversationState) {
+  try {
+    window.localStorage.setItem(
+      sessionDataKey(sessionId),
+      JSON.stringify({
+        messages: compactSessionMessages(messages),
+        conversationState,
+      })
+    );
+  } catch {
+    // Chat remains usable when browser storage is unavailable or full.
+  }
+}
+
+function titleFromInput(text, fallback) {
+  const normalized = (text || fallback || "Phiên mới").replace(/\s+/g, " ").trim();
+  return normalized.length > 44 ? `${normalized.slice(0, 44)}…` : normalized;
 }
 
 const routeLabels = {
@@ -306,26 +401,44 @@ function sourceScoreLabel(source) {
 }
 
 function App() {
-  const [sessionId] = useState(getOrCreateSessionId);
-  const [messages, setMessages] = useState([
-    {
-      role: "assistant",
-      content:
-        "Xin chào, mình là trợ lý IELTS của bạn. Bạn có thể hỏi về Reading, Listening, Writing, Speaking hoặc tải tài liệu lên để mình hỗ trợ phân tích nội dung.",
-      route_used: "welcome",
-    },
-  ]);
+  const [initialSession] = useState(() => {
+    const workspace = loadSessionWorkspace();
+    return { ...workspace, data: loadSessionData(workspace.currentId) };
+  });
+  const [sessions, setSessions] = useState(initialSession.sessions);
+  const [sessionId, setSessionId] = useState(initialSession.currentId);
+  const [messages, setMessages] = useState(initialSession.data.messages);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDeletingSession, setIsDeletingSession] = useState(false);
   const [pendingFiles, setPendingFiles] = useState([]);
-  const [conversationState, setConversationState] = useState(null);
+  const [conversationState, setConversationState] = useState(
+    initialSession.data.conversationState
+  );
   const fileInputRef = useRef(null);
   const messagesRef = useRef(null);
   const shouldAutoScrollRef = useRef(true);
   const hasStreamingAssistant = messages.some((message) => message.streaming);
 
   const history = useMemo(() => completedConversationHistory(messages), [messages]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+      window.localStorage.setItem(SESSION_LIST_STORAGE_KEY, JSON.stringify(sessions));
+    } catch {
+      // Session controls still work for the current page without persistent storage.
+    }
+  }, [sessionId, sessions]);
+
+  useEffect(() => {
+    const saveTimer = window.setTimeout(
+      () => saveSessionData(sessionId, messages, conversationState),
+      300
+    );
+    return () => window.clearTimeout(saveTimer);
+  }, [sessionId, messages, conversationState]);
 
   useEffect(() => {
     const container = messagesRef.current;
@@ -337,6 +450,66 @@ function App() {
     const container = event.currentTarget;
     const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     shouldAutoScrollRef.current = distanceFromBottom < 80;
+  }
+
+  function openSession(nextSessionId) {
+    if (nextSessionId === sessionId || isSending || isUploading || isDeletingSession) return;
+    saveSessionData(sessionId, messages, conversationState);
+    const nextData = loadSessionData(nextSessionId);
+    setSessionId(nextSessionId);
+    setMessages(nextData.messages);
+    setConversationState(nextData.conversationState);
+    setPendingFiles([]);
+    setInput("");
+    shouldAutoScrollRef.current = true;
+  }
+
+  function createSession() {
+    if (isSending || isUploading || isDeletingSession) return;
+    saveSessionData(sessionId, messages, conversationState);
+    const nextSession = newSessionMetadata();
+    setSessions((current) => [nextSession, ...current]);
+    setSessionId(nextSession.id);
+    setMessages([{ ...WELCOME_MESSAGE }]);
+    setConversationState(null);
+    setPendingFiles([]);
+    setInput("");
+    shouldAutoScrollRef.current = true;
+  }
+
+  async function deleteActiveSession() {
+    if (isSending || isUploading || isDeletingSession) return;
+    if (!window.confirm("Xóa phiên này cùng toàn bộ bộ nhớ tài liệu RAG của phiên?")) return;
+
+    setIsDeletingSession(true);
+    try {
+      const response = await fetch(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        throw new Error(error.detail || "Không thể xóa phiên");
+      }
+
+      try {
+        window.localStorage.removeItem(sessionDataKey(sessionId));
+      } catch {
+        // Backend deletion remains authoritative when browser storage is unavailable.
+      }
+      const remaining = sessions.filter((session) => session.id !== sessionId);
+      const nextSession = remaining[0] || newSessionMetadata();
+      const nextSessions = remaining.length ? remaining : [nextSession];
+      const nextData = loadSessionData(nextSession.id);
+      setSessions(nextSessions);
+      setSessionId(nextSession.id);
+      setMessages(nextData.messages);
+      setConversationState(nextData.conversationState);
+      setPendingFiles([]);
+      setInput("");
+      shouldAutoScrollRef.current = true;
+    } catch (error) {
+      window.alert(error.message);
+    } finally {
+      setIsDeletingSession(false);
+    }
   }
 
   function exportDebug(message, index) {
@@ -459,11 +632,25 @@ function App() {
     event?.preventDefault();
     const text = input.trim();
     const queuedFiles = pendingFiles;
-    if ((!text && !queuedFiles.length) || isSending || isUploading) return;
+    if ((!text && !queuedFiles.length) || isSending || isUploading || isDeletingSession) return;
 
     const submissionId = Date.now();
     const userId = `user-${submissionId}`;
     const assistantId = `assistant-${submissionId}`;
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === sessionId
+          ? {
+              ...session,
+              title:
+                ["Phiên mới", "Phiên hiện tại"].includes(session.title)
+                  ? titleFromInput(text, queuedFiles[0]?.name)
+                  : session.title,
+              updatedAt: new Date().toISOString(),
+            }
+          : session
+      )
+    );
     setInput("");
     setPendingFiles([]);
     setIsSending(true);
@@ -739,6 +926,40 @@ function App() {
               <p>Trợ lý luyện IELTS chạy bằng Ollama, có hỗ trợ hỏi đáp theo tài liệu</p>
             </div>
           </div>
+          <div className="sessionControls">
+            <select
+              aria-label="Chọn phiên trò chuyện"
+              value={sessionId}
+              onChange={(event) => openSession(event.target.value)}
+              disabled={isSending || isUploading || isDeletingSession}
+            >
+              {sessions.map((session) => (
+                <option key={session.id} value={session.id}>
+                  {session.title}
+                </option>
+              ))}
+            </select>
+            <button
+              className="sessionButton"
+              type="button"
+              onClick={createSession}
+              disabled={isSending || isUploading || isDeletingSession}
+              title="Tạo phiên mới"
+              aria-label="Tạo phiên mới"
+            >
+              <Plus size={17} />
+            </button>
+            <button
+              className="sessionButton danger"
+              type="button"
+              onClick={deleteActiveSession}
+              disabled={isSending || isUploading || isDeletingSession}
+              title="Xóa phiên hiện tại"
+              aria-label="Xóa phiên hiện tại"
+            >
+              <Trash2 size={16} />
+            </button>
+          </div>
         </header>
 
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
@@ -804,7 +1025,7 @@ function App() {
               className="composerIconButton"
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={isUploading || isSending}
+              disabled={isUploading || isSending || isDeletingSession}
               title="Đính kèm tệp"
               aria-label="Đính kèm tệp"
             >
@@ -820,6 +1041,7 @@ function App() {
             />
             <textarea
               value={input}
+              disabled={isDeletingSession}
               onChange={(event) => setInput(event.target.value)}
               onPaste={pasteImages}
               onKeyDown={(event) => {
@@ -834,9 +1056,14 @@ function App() {
             <button
               className="sendButton"
               type="submit"
-              disabled={isSending || isUploading || (!input.trim() && !pendingFiles.length)}
-              title={isSending || isUploading ? "Đang xử lý" : "Gửi"}
-              aria-label={isSending || isUploading ? "Đang xử lý" : "Gửi"}
+              disabled={
+                isSending ||
+                isUploading ||
+                isDeletingSession ||
+                (!input.trim() && !pendingFiles.length)
+              }
+              title={isSending || isUploading || isDeletingSession ? "Đang xử lý" : "Gửi"}
+              aria-label={isSending || isUploading || isDeletingSession ? "Đang xử lý" : "Gửi"}
             >
               <Send size={18} />
             </button>

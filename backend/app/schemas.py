@@ -65,3 +65,8 @@ class StatsResponse(BaseModel):
     documents: int
     chunks: int
     embedding_model: str
+
+
+class SessionDeleteResponse(BaseModel):
+    session_id: UUID
+    deleted: bool

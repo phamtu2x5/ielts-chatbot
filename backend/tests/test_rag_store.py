@@ -119,6 +119,27 @@ class SessionRagManagerTests(unittest.TestCase):
             manager.warmup()
             self.assertEqual(model_factory.call_count, 1)
 
+            second.upsert(
+                [
+                    {
+                        "chunk_id": "second-1",
+                        "document_id": "doc-second",
+                        "source_file": "second.pdf",
+                        "text": "second session content",
+                        "chunk_index": 0,
+                        "pages": [1],
+                        "metadata": {},
+                    }
+                ],
+                "second.pdf",
+            )
+
+            self.assertTrue(manager.delete_session(first_session))
+            self.assertFalse(first.data_dir.exists())
+            self.assertEqual(second.stats()["documents"], 1)
+            self.assertEqual(manager.get_store(first_session).stats()["documents"], 0)
+            self.assertFalse(manager.delete_session(str(uuid4())))
+
 
 class LocalVectorStoreTests(unittest.TestCase):
     def setUp(self) -> None:

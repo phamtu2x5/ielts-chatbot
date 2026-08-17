@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import threading
 import time
 from copy import deepcopy
@@ -819,6 +820,20 @@ class SessionRagManager:
                 )
                 self._stores[normalized] = store
             return store
+
+    def delete_session(self, session_id: UUID | str) -> bool:
+        normalized = self.normalize_session_id(session_id)
+        session_dir = self.sessions_dir / normalized
+        with self._lock:
+            store = self._stores.pop(normalized, None)
+            existed = store is not None or session_dir.exists()
+            if store is not None:
+                with store._lock:
+                    if session_dir.exists():
+                        shutil.rmtree(session_dir, ignore_errors=False)
+            elif session_dir.exists():
+                shutil.rmtree(session_dir, ignore_errors=False)
+        return existed
 
     def warmup(self) -> Dict:
         embedding = self._embed(["IELTS document retrieval warmup"])[0]
