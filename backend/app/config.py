@@ -103,10 +103,10 @@ class AppSettings:
         default_factory=lambda: int(os.getenv("RAG_SOLVE_MAX_EVIDENCE", "12"))
     )
     rag_session_grace_ttl_seconds: int = field(
-        default_factory=lambda: int(os.getenv("RAG_SESSION_GRACE_TTL_SECONDS", "600"))
+        default_factory=lambda: int(os.getenv("RAG_SESSION_GRACE_TTL_SECONDS", "300"))
     )
     rag_session_hard_ttl_seconds: int = field(
-        default_factory=lambda: int(os.getenv("RAG_SESSION_HARD_TTL_SECONDS", "7200"))
+        default_factory=lambda: int(os.getenv("RAG_SESSION_HARD_TTL_SECONDS", "1800"))
     )
     rag_session_max_documents: int = field(
         default_factory=lambda: int(os.getenv("RAG_SESSION_MAX_DOCUMENTS", "30"))

@@ -23,7 +23,7 @@ const SESSION_STORAGE_KEY = "ielts-chatbot-session-id";
 const SESSION_LIST_STORAGE_KEY = "ielts-chatbot-sessions-v1";
 const SESSION_DATA_PREFIX = "ielts-chatbot-session-v1:";
 const SESSION_CLEANUP_STORAGE_KEY = "ielts-chatbot-session-cleanup-v1";
-const SESSION_HARD_TTL_MS = 2 * 60 * 60 * 1000;
+const SESSION_HARD_TTL_MS = 30 * 60 * 1000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WELCOME_MESSAGE = {
   id: "welcome",
@@ -402,7 +402,11 @@ function App() {
   useEffect(() => {
     const cleanupCurrentSession = () => {
       queueSessionCleanup(sessionId);
-      fetch(`${API_BASE}/sessions/${sessionId}/expire`, {
+      const expireUrl = `${API_BASE}/sessions/${sessionId}/expire`;
+      if (typeof navigator.sendBeacon === "function" && navigator.sendBeacon(expireUrl)) {
+        return;
+      }
+      fetch(expireUrl, {
         method: "POST",
         keepalive: true,
       })
@@ -445,7 +449,7 @@ function App() {
         setMessages([
           {
             ...WELCOME_MESSAGE,
-            content: "Phiên trước đã hết hạn sau 2 giờ không hoạt động. Mình đã bắt đầu một phiên mới cho bạn.",
+            content: "Phiên trước đã hết hạn sau 30 phút không hoạt động. Mình đã bắt đầu một phiên mới cho bạn.",
           },
         ]);
         setConversationState(null);
