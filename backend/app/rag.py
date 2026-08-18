@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import threading
@@ -781,13 +782,31 @@ class LocalVectorStore:
 
 
 class SessionRagManager:
-    def __init__(self, data_dir: Path | None = None) -> None:
+    EXPIRY_FILE = ".expires_at"
+
+    def __init__(
+        self,
+        data_dir: Path | None = None,
+        grace_ttl_seconds: int | None = None,
+        hard_ttl_seconds: int | None = None,
+    ) -> None:
         self.sessions_dir = (data_dir or DATA_DIR) / "sessions"
         self.model_name = settings.embedding_model_name
+        self.grace_ttl_seconds = (
+            grace_ttl_seconds
+            if grace_ttl_seconds is not None
+            else settings.rag_session_grace_ttl_seconds
+        )
+        self.hard_ttl_seconds = (
+            hard_ttl_seconds
+            if hard_ttl_seconds is not None
+            else settings.rag_session_hard_ttl_seconds
+        )
         self._lock = threading.RLock()
         self._embedding_lock = threading.RLock()
         self._model = None
         self._stores: dict[str, LocalVectorStore] = {}
+        self._expires_at: dict[str, float] = {}
 
     @staticmethod
     def normalize_session_id(session_id: UUID | str) -> str:
@@ -809,9 +828,59 @@ class SessionRagManager:
             embeddings = self.model.encode(texts, normalize_embeddings=True)
         return np.asarray(embeddings, dtype=np.float32)
 
+    def _expiry_path(self, normalized: str) -> Path:
+        return self.sessions_dir / normalized / self.EXPIRY_FILE
+
+    def _read_expiry_locked(self, normalized: str) -> float | None:
+        expires_at = self._expires_at.get(normalized)
+        if expires_at is not None:
+            return expires_at
+        try:
+            expires_at = float(self._expiry_path(normalized).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        self._expires_at[normalized] = expires_at
+        return expires_at
+
+    def _is_expired_locked(self, normalized: str, now: float) -> bool:
+        session_dir = self.sessions_dir / normalized
+        expires_at = self._read_expiry_locked(normalized)
+        if expires_at is not None and expires_at <= now:
+            return True
+        try:
+            last_access = session_dir.stat().st_mtime
+        except OSError:
+            return False
+        return now - last_access >= self.hard_ttl_seconds
+
+    def _delete_session_locked(self, normalized: str) -> bool:
+        session_dir = self.sessions_dir / normalized
+        store = self._stores.pop(normalized, None)
+        self._expires_at.pop(normalized, None)
+        existed = store is not None or session_dir.exists()
+        if store is not None:
+            with store._lock:
+                if session_dir.exists():
+                    shutil.rmtree(session_dir, ignore_errors=False)
+        elif session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=False)
+        return existed
+
+    def _touch_session_locked(self, normalized: str) -> None:
+        session_dir = self.sessions_dir / normalized
+        session_dir.mkdir(parents=True, exist_ok=True)
+        self._expires_at.pop(normalized, None)
+        try:
+            self._expiry_path(normalized).unlink()
+        except FileNotFoundError:
+            pass
+        os.utime(session_dir, None)
+
     def get_store(self, session_id: UUID | str) -> LocalVectorStore:
         normalized = self.normalize_session_id(session_id)
         with self._lock:
+            if self._is_expired_locked(normalized, time.time()):
+                self._delete_session_locked(normalized)
             store = self._stores.get(normalized)
             if store is None:
                 store = LocalVectorStore(
@@ -819,21 +888,43 @@ class SessionRagManager:
                     embedder=self._embed,
                 )
                 self._stores[normalized] = store
+            self._touch_session_locked(normalized)
             return store
 
-    def delete_session(self, session_id: UUID | str) -> bool:
+    def schedule_session_expiration(self, session_id: UUID | str) -> bool:
         normalized = self.normalize_session_id(session_id)
         session_dir = self.sessions_dir / normalized
         with self._lock:
-            store = self._stores.pop(normalized, None)
-            existed = store is not None or session_dir.exists()
-            if store is not None:
-                with store._lock:
-                    if session_dir.exists():
-                        shutil.rmtree(session_dir, ignore_errors=False)
-            elif session_dir.exists():
-                shutil.rmtree(session_dir, ignore_errors=False)
-        return existed
+            exists = normalized in self._stores or session_dir.exists()
+            if not exists:
+                return False
+            expires_at = time.time() + self.grace_ttl_seconds
+            self._expires_at[normalized] = expires_at
+            session_dir.mkdir(parents=True, exist_ok=True)
+            self._expiry_path(normalized).write_text(str(expires_at), encoding="utf-8")
+            return True
+
+    def cleanup_expired(self, now: float | None = None) -> int:
+        current_time = time.time() if now is None else now
+        with self._lock:
+            self.sessions_dir.mkdir(parents=True, exist_ok=True)
+            session_ids = set(self._stores)
+            for session_dir in self.sessions_dir.iterdir():
+                if session_dir.is_dir():
+                    try:
+                        session_ids.add(self.normalize_session_id(session_dir.name))
+                    except ValueError:
+                        continue
+            deleted = 0
+            for normalized in session_ids:
+                if self._is_expired_locked(normalized, current_time):
+                    deleted += int(self._delete_session_locked(normalized))
+            return deleted
+
+    def delete_session(self, session_id: UUID | str) -> bool:
+        normalized = self.normalize_session_id(session_id)
+        with self._lock:
+            return self._delete_session_locked(normalized)
 
     def warmup(self) -> Dict:
         embedding = self._embed(["IELTS document retrieval warmup"])[0]

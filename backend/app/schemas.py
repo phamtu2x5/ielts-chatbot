@@ -70,3 +70,9 @@ class StatsResponse(BaseModel):
 class SessionDeleteResponse(BaseModel):
     session_id: UUID
     deleted: bool
+
+
+class SessionExpireResponse(BaseModel):
+    session_id: UUID
+    scheduled: bool
+    expires_in_seconds: int

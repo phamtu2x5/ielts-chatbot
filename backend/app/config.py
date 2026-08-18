@@ -102,6 +102,12 @@ class AppSettings:
     rag_solve_max_evidence: int = field(
         default_factory=lambda: int(os.getenv("RAG_SOLVE_MAX_EVIDENCE", "12"))
     )
+    rag_session_grace_ttl_seconds: int = field(
+        default_factory=lambda: int(os.getenv("RAG_SESSION_GRACE_TTL_SECONDS", "600"))
+    )
+    rag_session_hard_ttl_seconds: int = field(
+        default_factory=lambda: int(os.getenv("RAG_SESSION_HARD_TTL_SECONDS", "7200"))
+    )
 
     warmup_llm: bool = field(default_factory=lambda: _env_bool("WARMUP_LLM", True))
     warmup_embedding: bool = field(default_factory=lambda: _env_bool("WARMUP_EMBEDDING", True))
@@ -133,6 +139,13 @@ class AppSettings:
             raise ValueError("RAG top-k settings must be positive.")
         if self.rag_overview_source_chars <= 0:
             raise ValueError("RAG_OVERVIEW_SOURCE_CHARS must be positive.")
+        if (
+            self.rag_session_grace_ttl_seconds <= 0
+            or self.rag_session_hard_ttl_seconds <= self.rag_session_grace_ttl_seconds
+        ):
+            raise ValueError(
+                "RAG session TTLs must be positive and hard TTL must exceed grace TTL."
+            )
         if not 0 <= self.rag_min_score <= 1 or not 0 <= self.rag_probe_min_dense_score <= 1:
             raise ValueError("RAG score thresholds must be between 0 and 1.")
 

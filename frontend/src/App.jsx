@@ -389,7 +389,7 @@ function App() {
 
   useEffect(() => {
     for (const staleSessionId of initialSession.staleIds) {
-      fetch(`${API_BASE}/sessions/${staleSessionId}`, { method: "DELETE" })
+      fetch(`${API_BASE}/sessions/${staleSessionId}/expire`, { method: "POST" })
         .then((response) => {
           if (response.ok) completeSessionCleanup(staleSessionId);
         })
@@ -400,8 +400,8 @@ function App() {
   useEffect(() => {
     const cleanupCurrentSession = () => {
       queueSessionCleanup(sessionId);
-      fetch(`${API_BASE}/sessions/${sessionId}`, {
-        method: "DELETE",
+      fetch(`${API_BASE}/sessions/${sessionId}/expire`, {
+        method: "POST",
         keepalive: true,
       })
         .then((response) => {

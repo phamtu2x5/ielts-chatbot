@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import types
@@ -139,6 +140,49 @@ class SessionRagManagerTests(unittest.TestCase):
             self.assertEqual(second.stats()["documents"], 1)
             self.assertEqual(manager.get_store(first_session).stats()["documents"], 0)
             self.assertFalse(manager.delete_session(str(uuid4())))
+
+    def test_grace_and_hard_ttl_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = rag.SessionRagManager(
+                Path(temp_dir),
+                grace_ttl_seconds=600,
+                hard_ttl_seconds=7200,
+            )
+            grace_session = str(uuid4())
+            grace_store = manager.get_store(grace_session)
+
+            self.assertTrue(manager.schedule_session_expiration(grace_session))
+            expires_at = float(
+                (grace_store.data_dir / manager.EXPIRY_FILE).read_text(encoding="utf-8")
+            )
+            self.assertEqual(manager.cleanup_expired(now=expires_at - 1), 0)
+            self.assertEqual(manager.cleanup_expired(now=expires_at + 1), 1)
+            self.assertFalse(grace_store.data_dir.exists())
+
+            hard_session = str(uuid4())
+            hard_store = manager.get_store(hard_session)
+            os.utime(hard_store.data_dir, (100.0, 100.0))
+            self.assertEqual(manager.cleanup_expired(now=7299.0), 0)
+            self.assertEqual(manager.cleanup_expired(now=7301.0), 1)
+            self.assertFalse(hard_store.data_dir.exists())
+
+    def test_access_cancels_scheduled_expiration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = rag.SessionRagManager(
+                Path(temp_dir),
+                grace_ttl_seconds=600,
+                hard_ttl_seconds=7200,
+            )
+            session_id = str(uuid4())
+            store = manager.get_store(session_id)
+            self.assertTrue(manager.schedule_session_expiration(session_id))
+            expires_at = float(
+                (store.data_dir / manager.EXPIRY_FILE).read_text(encoding="utf-8")
+            )
+
+            self.assertIs(manager.get_store(session_id), store)
+            self.assertFalse((store.data_dir / manager.EXPIRY_FILE).exists())
+            self.assertEqual(manager.cleanup_expired(now=expires_at + 1), 0)
 
 
 class LocalVectorStoreTests(unittest.TestCase):

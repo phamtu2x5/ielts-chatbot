@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -73,6 +74,7 @@ from .schemas import (
     SearchRequest,
     SearchResponse,
     SessionDeleteResponse,
+    SessionExpireResponse,
     StatsResponse,
     UploadResponse,
 )
@@ -89,12 +91,33 @@ from .table_operations import (
 
 logger = logging.getLogger(__name__)
 
+
+async def session_cleanup_loop() -> None:
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await run_in_threadpool(get_store_manager().cleanup_expired)
+        except Exception:
+            logger.exception("Session RAG cleanup failed")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await run_in_threadpool(get_store_manager().cleanup_expired)
+    cleanup_task = asyncio.create_task(session_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
+
 UPLOAD_DIR = settings.upload_dir
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DOCUMENT_PROCESSOR = DocumentProcessor()
 LAST_WARMUP_STATUS: dict[str, Any] | None = None
 
-app = FastAPI(title="Standalone IELTS Chatbot", version="1.1.0")
+app = FastAPI(title="Standalone IELTS Chatbot", version="1.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -3311,6 +3334,8 @@ async def health() -> dict:
         "ollama_api_url": settings.ollama_api_url,
         "ollama_model": OLLAMA_MODEL,
         "ollama_num_predict": OLLAMA_NUM_PREDICT,
+        "rag_session_grace_ttl_seconds": settings.rag_session_grace_ttl_seconds,
+        "rag_session_hard_ttl_seconds": settings.rag_session_hard_ttl_seconds,
     }
 
 
@@ -3862,6 +3887,17 @@ async def search(req: SearchRequest) -> SearchResponse:
 async def stats(session_id: UUID) -> StatsResponse:
     session_stats = await run_in_threadpool(get_store(session_id).stats)
     return StatsResponse(session_id=session_id, **session_stats)
+
+
+@app.post("/sessions/{session_id}/expire", response_model=SessionExpireResponse)
+async def expire_session(session_id: UUID) -> SessionExpireResponse:
+    manager = get_store_manager()
+    scheduled = await run_in_threadpool(manager.schedule_session_expiration, session_id)
+    return SessionExpireResponse(
+        session_id=session_id,
+        scheduled=scheduled,
+        expires_in_seconds=manager.grace_ttl_seconds,
+    )
 
 
 @app.delete("/sessions/{session_id}", response_model=SessionDeleteResponse)
