@@ -109,19 +109,19 @@ class AppSettings:
         default_factory=lambda: int(os.getenv("RAG_SESSION_HARD_TTL_SECONDS", "7200"))
     )
     rag_session_max_documents: int = field(
-        default_factory=lambda: int(os.getenv("RAG_SESSION_MAX_DOCUMENTS", "12"))
+        default_factory=lambda: int(os.getenv("RAG_SESSION_MAX_DOCUMENTS", "30"))
     )
     rag_session_max_chunks: int = field(
-        default_factory=lambda: int(os.getenv("RAG_SESSION_MAX_CHUNKS", "6000"))
+        default_factory=lambda: int(os.getenv("RAG_SESSION_MAX_CHUNKS", "15000"))
     )
     chat_rate_limit: int = field(
-        default_factory=lambda: int(os.getenv("CHAT_RATE_LIMIT", "12"))
+        default_factory=lambda: int(os.getenv("CHAT_RATE_LIMIT", "30"))
     )
     chat_rate_window_seconds: int = field(
         default_factory=lambda: int(os.getenv("CHAT_RATE_WINDOW_SECONDS", "60"))
     )
     upload_rate_limit: int = field(
-        default_factory=lambda: int(os.getenv("UPLOAD_RATE_LIMIT", "10"))
+        default_factory=lambda: int(os.getenv("UPLOAD_RATE_LIMIT", "30"))
     )
     upload_rate_window_seconds: int = field(
         default_factory=lambda: int(os.getenv("UPLOAD_RATE_WINDOW_SECONDS", "600"))

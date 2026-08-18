@@ -10,3 +10,8 @@ backend/data/
 *.log
 .DS_Store
 PROJECT_HANDOFF.md
+Handoff.md
+/report/
+/Screenshot *.png
+chat-review-capture-*.json
+ielts-chatbot-debug-*.json

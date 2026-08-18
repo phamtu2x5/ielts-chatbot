@@ -91,17 +91,22 @@ from .table_operations import (
 
 
 logger = logging.getLogger(__name__)
+SESSION_CLEANUP_ERRORS = 0
 
 
 async def session_cleanup_loop() -> None:
+    global SESSION_CLEANUP_ERRORS
     while True:
         await asyncio.sleep(60)
         try:
-            await run_in_threadpool(get_store_manager().cleanup_expired)
+            deleted = await run_in_threadpool(get_store_manager().cleanup_expired)
             REQUEST_RATE_LIMITER.prune(
                 max(settings.chat_rate_window_seconds, settings.upload_rate_window_seconds)
             )
+            if deleted:
+                logger.info("Expired RAG sessions removed: %s", deleted)
         except Exception:
+            SESSION_CLEANUP_ERRORS += 1
             logger.exception("Session RAG cleanup failed")
 
 
@@ -155,6 +160,12 @@ class SlidingWindowRateLimiter:
         normalized = str(session_id)
         for key in [key for key in self._events if key[0] == normalized]:
             self._events.pop(key, None)
+
+    def stats(self) -> dict[str, int]:
+        return {
+            "buckets": len(self._events),
+            "events": sum(len(events) for events in self._events.values()),
+        }
 
 
 REQUEST_RATE_LIMITER = SlidingWindowRateLimiter()
@@ -3383,6 +3394,7 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
 @app.get("/health")
 async def health() -> dict:
     stats = await run_in_threadpool(get_store_manager().stats)
+    rate_stats = REQUEST_RATE_LIMITER.stats()
     return {
         "status": "ok",
         "runtime_status": (LAST_WARMUP_STATUS or {}).get("status", "not_warmed"),
@@ -3391,6 +3403,27 @@ async def health() -> dict:
         "document_rag_chunks": stats["chunks"],
         "pdf_rag_documents": stats["documents"],
         "pdf_rag_chunks": stats["chunks"],
+        "rag_sessions_total": stats["sessions"],
+        "rag_sessions_active": max(0, stats["sessions"] - stats["pending_expiry"]),
+        "rag_sessions_cached": stats["cached_sessions"],
+        "rag_sessions_pending_expiry": stats["pending_expiry"],
+        "rag_sessions_cleaned_total": stats["cleaned_sessions"],
+        "rag_session_cleanup_runs": stats["cleanup_runs"],
+        "rag_session_cleanup_errors": SESSION_CLEANUP_ERRORS,
+        "rag_session_last_cleanup_at": stats["last_cleanup_at"],
+        "rag_storage_bytes": stats["storage_bytes"],
+        "rag_storage_mb": round(stats["storage_bytes"] / (1024 * 1024), 2),
+        "rate_limit_buckets": rate_stats["buckets"],
+        "rate_limit_events": rate_stats["events"],
+        "chat_rate_limit": settings.chat_rate_limit,
+        "chat_rate_window_seconds": settings.chat_rate_window_seconds,
+        "upload_rate_limit": settings.upload_rate_limit,
+        "upload_rate_window_seconds": settings.upload_rate_window_seconds,
+        "rag_session_max_documents": settings.rag_session_max_documents,
+        "rag_session_max_chunks": settings.rag_session_max_chunks,
+        "chat_max_concurrency": settings.chat_max_concurrency,
+        "upload_max_concurrency": settings.upload_max_concurrency,
+        "backend_worker_mode": "single_process_required",
         "ollama_api_url": settings.ollama_api_url,
         "ollama_model": OLLAMA_MODEL,
         "ollama_num_predict": OLLAMA_NUM_PREDICT,

@@ -165,6 +165,11 @@ class SessionRagManagerTests(unittest.TestCase):
             self.assertEqual(manager.cleanup_expired(now=7299.0), 0)
             self.assertEqual(manager.cleanup_expired(now=7301.0), 1)
             self.assertFalse(hard_store.data_dir.exists())
+            manager_stats = manager.stats()
+            self.assertEqual(manager_stats["sessions"], 0)
+            self.assertEqual(manager_stats["cleaned_sessions"], 2)
+            self.assertGreaterEqual(manager_stats["cleanup_runs"], 4)
+            self.assertEqual(manager_stats["storage_bytes"], 0)
 
     def test_access_cancels_scheduled_expiration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

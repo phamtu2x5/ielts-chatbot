@@ -91,7 +91,7 @@ cp .env.example .env
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 8765
+uvicorn app.main:app --host 0.0.0.0 --port 8765 --workers 1
 ```
 
 Start frontend:
@@ -158,15 +158,18 @@ RAG_OVERVIEW_TOP_K=8
 RAG_OVERVIEW_SOURCE_CHARS=900
 RAG_SESSION_GRACE_TTL_SECONDS=600
 RAG_SESSION_HARD_TTL_SECONDS=7200
-RAG_SESSION_MAX_DOCUMENTS=12
-RAG_SESSION_MAX_CHUNKS=6000
-CHAT_RATE_LIMIT=12
+RAG_SESSION_MAX_DOCUMENTS=30
+RAG_SESSION_MAX_CHUNKS=15000
+CHAT_RATE_LIMIT=30
 CHAT_RATE_WINDOW_SECONDS=60
-UPLOAD_RATE_LIMIT=10
+UPLOAD_RATE_LIMIT=30
 UPLOAD_RATE_WINDOW_SECONDS=600
 CHAT_MAX_CONCURRENCY=2
 UPLOAD_MAX_CONCURRENCY=1
 ```
+
+Run the local JSON/NumPy RAG backend with exactly one Uvicorn worker. Its
+in-process locks do not coordinate writes across multiple worker processes.
 
 Document ingestion settings:
 

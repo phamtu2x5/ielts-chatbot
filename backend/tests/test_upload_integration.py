@@ -230,6 +230,9 @@ class RuntimeLimitTests(unittest.TestCase):
                 limiter.check(session_id, "chat", 2, 60)
             self.assertEqual(raised.exception.status_code, 429)
             limiter.check(session_id, "chat", 2, 60)
+            self.assertEqual(limiter.stats(), {"buckets": 1, "events": 1})
+            limiter.clear_session(session_id)
+            self.assertEqual(limiter.stats(), {"buckets": 0, "events": 0})
 
 
 class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):

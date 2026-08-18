@@ -834,6 +834,9 @@ class SessionRagManager:
         self._model = None
         self._stores: dict[str, LocalVectorStore] = {}
         self._expires_at: dict[str, float] = {}
+        self._cleanup_runs = 0
+        self._cleaned_sessions = 0
+        self._last_cleanup_at: str | None = None
 
     @staticmethod
     def normalize_session_id(session_id: UUID | str) -> str:
@@ -946,6 +949,9 @@ class SessionRagManager:
             for normalized in session_ids:
                 if self._is_expired_locked(normalized, current_time):
                     deleted += int(self._delete_session_locked(normalized))
+            self._cleanup_runs += 1
+            self._cleaned_sessions += deleted
+            self._last_cleanup_at = datetime.now(timezone.utc).isoformat()
             return deleted
 
     def delete_session(self, session_id: UUID | str) -> bool:
@@ -961,32 +967,56 @@ class SessionRagManager:
         }
 
     def stats(self) -> Dict:
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        documents = 0
-        chunks = 0
-        session_count = 0
-        for docs_path in self.sessions_dir.glob("*/documents.json"):
-            try:
-                docs = json.loads(docs_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if not isinstance(docs, list):
-                continue
-            session_count += 1
-            chunks += len(docs)
-            documents += len(
-                {
-                    doc.get("document_id") or doc.get("source_file")
-                    for doc in docs
-                    if isinstance(doc, dict)
-                }
-            )
-        return {
-            "sessions": session_count,
-            "documents": documents,
-            "chunks": chunks,
-            "embedding_model": self.model_name,
-        }
+        with self._lock:
+            self.sessions_dir.mkdir(parents=True, exist_ok=True)
+            documents = 0
+            chunks = 0
+            session_count = 0
+            pending_expiry = 0
+            storage_bytes = 0
+            for session_dir in self.sessions_dir.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                try:
+                    self.normalize_session_id(session_dir.name)
+                except ValueError:
+                    continue
+                session_count += 1
+                if (session_dir / self.EXPIRY_FILE).exists():
+                    pending_expiry += 1
+                for path in session_dir.rglob("*"):
+                    if path.is_file():
+                        try:
+                            storage_bytes += path.stat().st_size
+                        except OSError:
+                            continue
+                docs_path = session_dir / "documents.json"
+                try:
+                    docs = json.loads(docs_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(docs, list):
+                    continue
+                chunks += len(docs)
+                documents += len(
+                    {
+                        doc.get("document_id") or doc.get("source_file")
+                        for doc in docs
+                        if isinstance(doc, dict)
+                    }
+                )
+            return {
+                "sessions": session_count,
+                "cached_sessions": len(self._stores),
+                "pending_expiry": pending_expiry,
+                "documents": documents,
+                "chunks": chunks,
+                "storage_bytes": storage_bytes,
+                "cleanup_runs": self._cleanup_runs,
+                "cleaned_sessions": self._cleaned_sessions,
+                "last_cleanup_at": self._last_cleanup_at,
+                "embedding_model": self.model_name,
+            }
 
 
 _manager: SessionRagManager | None = None
