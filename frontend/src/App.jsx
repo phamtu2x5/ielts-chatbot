@@ -6,10 +6,9 @@ import {
   Download,
   FileText,
   Paperclip,
-  Plus,
+  RotateCcw,
   Send,
   Sparkles,
-  Trash2,
   UserRound,
   X,
   XCircle,
@@ -23,6 +22,7 @@ const API_BASE = import.meta.env.VITE_CHATBOT_API_URL || "/api";
 const SESSION_STORAGE_KEY = "ielts-chatbot-session-id";
 const SESSION_LIST_STORAGE_KEY = "ielts-chatbot-sessions-v1";
 const SESSION_DATA_PREFIX = "ielts-chatbot-session-v1:";
+const SESSION_CLEANUP_STORAGE_KEY = "ielts-chatbot-session-cleanup-v1";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WELCOME_MESSAGE = {
   id: "welcome",
@@ -32,95 +32,65 @@ const WELCOME_MESSAGE = {
   route_used: "welcome",
 };
 
-function newSessionMetadata(id = window.crypto.randomUUID(), title = "Phiên mới") {
-  const now = new Date().toISOString();
-  return { id, title, createdAt: now, updatedAt: now };
-}
-
-function loadSessionWorkspace() {
-  const legacyId = window.localStorage.getItem(SESSION_STORAGE_KEY);
-  const currentId = UUID_PATTERN.test(legacyId || "") ? legacyId : window.crypto.randomUUID();
-  let sessions = [];
+function storedCleanupIds() {
   try {
-    const stored = JSON.parse(window.localStorage.getItem(SESSION_LIST_STORAGE_KEY) || "[]");
-    if (Array.isArray(stored)) {
-      const seen = new Set();
-      sessions = stored.filter((session) => {
-        if (!UUID_PATTERN.test(session?.id || "") || seen.has(session.id)) return false;
-        seen.add(session.id);
-        return true;
-      });
-    }
+    const stored = JSON.parse(window.localStorage.getItem(SESSION_CLEANUP_STORAGE_KEY) || "[]");
+    return Array.isArray(stored) ? stored.filter((id) => UUID_PATTERN.test(id)) : [];
   } catch {
-    sessions = [];
-  }
-  if (!sessions.some((session) => session.id === currentId)) {
-    sessions.unshift(newSessionMetadata(currentId, sessions.length ? "Phiên hiện tại" : "Phiên mới"));
-  }
-  return { currentId, sessions };
-}
-
-function sessionDataKey(sessionId) {
-  return `${SESSION_DATA_PREFIX}${sessionId}`;
-}
-
-function loadSessionData(sessionId) {
-  try {
-    const stored = JSON.parse(window.localStorage.getItem(sessionDataKey(sessionId)) || "null");
-    const messages = Array.isArray(stored?.messages)
-      ? stored.messages.filter((message) => ["user", "assistant"].includes(message?.role))
-      : [];
-    return {
-      messages: messages.length ? messages : [{ ...WELCOME_MESSAGE }],
-      conversationState: stored?.conversationState || null,
-    };
-  } catch {
-    return { messages: [{ ...WELCOME_MESSAGE }], conversationState: null };
+    return [];
   }
 }
 
-function compactSessionMessages(messages) {
-  const compact = messages
-    .filter(
-      (message) =>
-        !message.streaming &&
-        (message.content?.trim() || (message.attachments || []).length)
-    )
-    .slice(-60)
-    .map((message) => ({
-      id: message.id,
-      role: message.role,
-      content: message.content || "",
-      route_used: message.route_used,
-      attachments: (message.attachments || []).map((attachment) => ({
-        id: attachment.id,
-        name: attachment.name,
-        status: attachment.status,
-        chunks: attachment.chunks,
-        documentId: attachment.documentId,
-        error: attachment.error,
-      })),
-    }));
-  return compact.length ? compact : [{ ...WELCOME_MESSAGE }];
-}
-
-function saveSessionData(sessionId, messages, conversationState) {
+function saveCleanupIds(ids) {
   try {
     window.localStorage.setItem(
-      sessionDataKey(sessionId),
-      JSON.stringify({
-        messages: compactSessionMessages(messages),
-        conversationState,
-      })
+      SESSION_CLEANUP_STORAGE_KEY,
+      JSON.stringify([...new Set(ids.filter((id) => UUID_PATTERN.test(id)))])
     );
   } catch {
-    // Chat remains usable when browser storage is unavailable or full.
+    // Cleanup still proceeds for the current page when storage is unavailable.
   }
 }
 
-function titleFromInput(text, fallback) {
-  const normalized = (text || fallback || "Phiên mới").replace(/\s+/g, " ").trim();
-  return normalized.length > 44 ? `${normalized.slice(0, 44)}…` : normalized;
+function queueSessionCleanup(sessionId) {
+  if (UUID_PATTERN.test(sessionId || "")) {
+    saveCleanupIds([...storedCleanupIds(), sessionId]);
+  }
+}
+
+function completeSessionCleanup(sessionId) {
+  saveCleanupIds(storedCleanupIds().filter((id) => id !== sessionId));
+}
+
+function startEphemeralSession() {
+  const staleIds = new Set(storedCleanupIds());
+  try {
+    const tabSessionId = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+    const legacySessionId = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (UUID_PATTERN.test(tabSessionId || "")) staleIds.add(tabSessionId);
+    if (UUID_PATTERN.test(legacySessionId || "")) staleIds.add(legacySessionId);
+    const legacySessions = JSON.parse(
+      window.localStorage.getItem(SESSION_LIST_STORAGE_KEY) || "[]"
+    );
+    for (const session of Array.isArray(legacySessions) ? legacySessions : []) {
+      if (UUID_PATTERN.test(session?.id || "")) staleIds.add(session.id);
+    }
+    for (const sessionId of staleIds) {
+      window.localStorage.removeItem(`${SESSION_DATA_PREFIX}${sessionId}`);
+    }
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    window.localStorage.removeItem(SESSION_LIST_STORAGE_KEY);
+  } catch {
+    // A fresh in-memory session still works when browser storage is unavailable.
+  }
+  const currentId = window.crypto.randomUUID();
+  try {
+    window.sessionStorage.setItem(SESSION_STORAGE_KEY, currentId);
+  } catch {
+    // The UUID remains valid for the current page lifecycle.
+  }
+  saveCleanupIds([...staleIds]);
+  return { currentId, staleIds: [...staleIds] };
 }
 
 const routeLabels = {
@@ -401,21 +371,15 @@ function sourceScoreLabel(source) {
 }
 
 function App() {
-  const [initialSession] = useState(() => {
-    const workspace = loadSessionWorkspace();
-    return { ...workspace, data: loadSessionData(workspace.currentId) };
-  });
-  const [sessions, setSessions] = useState(initialSession.sessions);
+  const [initialSession] = useState(startEphemeralSession);
   const [sessionId, setSessionId] = useState(initialSession.currentId);
-  const [messages, setMessages] = useState(initialSession.data.messages);
+  const [messages, setMessages] = useState([{ ...WELCOME_MESSAGE }]);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
-  const [isDeletingSession, setIsDeletingSession] = useState(false);
+  const [isResettingSession, setIsResettingSession] = useState(false);
   const [pendingFiles, setPendingFiles] = useState([]);
-  const [conversationState, setConversationState] = useState(
-    initialSession.data.conversationState
-  );
+  const [conversationState, setConversationState] = useState(null);
   const fileInputRef = useRef(null);
   const messagesRef = useRef(null);
   const shouldAutoScrollRef = useRef(true);
@@ -424,21 +388,30 @@ function App() {
   const history = useMemo(() => completedConversationHistory(messages), [messages]);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
-      window.localStorage.setItem(SESSION_LIST_STORAGE_KEY, JSON.stringify(sessions));
-    } catch {
-      // Session controls still work for the current page without persistent storage.
+    for (const staleSessionId of initialSession.staleIds) {
+      fetch(`${API_BASE}/sessions/${staleSessionId}`, { method: "DELETE" })
+        .then((response) => {
+          if (response.ok) completeSessionCleanup(staleSessionId);
+        })
+        .catch(() => {});
     }
-  }, [sessionId, sessions]);
+  }, [initialSession.staleIds]);
 
   useEffect(() => {
-    const saveTimer = window.setTimeout(
-      () => saveSessionData(sessionId, messages, conversationState),
-      300
-    );
-    return () => window.clearTimeout(saveTimer);
-  }, [sessionId, messages, conversationState]);
+    const cleanupCurrentSession = () => {
+      queueSessionCleanup(sessionId);
+      fetch(`${API_BASE}/sessions/${sessionId}`, {
+        method: "DELETE",
+        keepalive: true,
+      })
+        .then((response) => {
+          if (response.ok) completeSessionCleanup(sessionId);
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("pagehide", cleanupCurrentSession);
+    return () => window.removeEventListener("pagehide", cleanupCurrentSession);
+  }, [sessionId]);
 
   useEffect(() => {
     const container = messagesRef.current;
@@ -452,63 +425,35 @@ function App() {
     shouldAutoScrollRef.current = distanceFromBottom < 80;
   }
 
-  function openSession(nextSessionId) {
-    if (nextSessionId === sessionId || isSending || isUploading || isDeletingSession) return;
-    saveSessionData(sessionId, messages, conversationState);
-    const nextData = loadSessionData(nextSessionId);
-    setSessionId(nextSessionId);
-    setMessages(nextData.messages);
-    setConversationState(nextData.conversationState);
-    setPendingFiles([]);
-    setInput("");
-    shouldAutoScrollRef.current = true;
-  }
+  async function resetSession() {
+    if (isSending || isUploading || isResettingSession) return;
+    if (!window.confirm("Làm mới phiên và xóa toàn bộ hội thoại, tài liệu RAG hiện tại?")) return;
 
-  function createSession() {
-    if (isSending || isUploading || isDeletingSession) return;
-    saveSessionData(sessionId, messages, conversationState);
-    const nextSession = newSessionMetadata();
-    setSessions((current) => [nextSession, ...current]);
-    setSessionId(nextSession.id);
-    setMessages([{ ...WELCOME_MESSAGE }]);
-    setConversationState(null);
-    setPendingFiles([]);
-    setInput("");
-    shouldAutoScrollRef.current = true;
-  }
-
-  async function deleteActiveSession() {
-    if (isSending || isUploading || isDeletingSession) return;
-    if (!window.confirm("Xóa phiên này cùng toàn bộ bộ nhớ tài liệu RAG của phiên?")) return;
-
-    setIsDeletingSession(true);
+    setIsResettingSession(true);
+    queueSessionCleanup(sessionId);
     try {
       const response = await fetch(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
-        throw new Error(error.detail || "Không thể xóa phiên");
+        throw new Error(error.detail || "Không thể làm mới phiên");
       }
-
+      completeSessionCleanup(sessionId);
+      const nextSessionId = window.crypto.randomUUID();
       try {
-        window.localStorage.removeItem(sessionDataKey(sessionId));
+        window.sessionStorage.setItem(SESSION_STORAGE_KEY, nextSessionId);
       } catch {
-        // Backend deletion remains authoritative when browser storage is unavailable.
+        // The new UUID remains valid for the current page lifecycle.
       }
-      const remaining = sessions.filter((session) => session.id !== sessionId);
-      const nextSession = remaining[0] || newSessionMetadata();
-      const nextSessions = remaining.length ? remaining : [nextSession];
-      const nextData = loadSessionData(nextSession.id);
-      setSessions(nextSessions);
-      setSessionId(nextSession.id);
-      setMessages(nextData.messages);
-      setConversationState(nextData.conversationState);
+      setSessionId(nextSessionId);
+      setMessages([{ ...WELCOME_MESSAGE }]);
+      setConversationState(null);
       setPendingFiles([]);
       setInput("");
       shouldAutoScrollRef.current = true;
     } catch (error) {
       window.alert(error.message);
     } finally {
-      setIsDeletingSession(false);
+      setIsResettingSession(false);
     }
   }
 
@@ -632,25 +577,11 @@ function App() {
     event?.preventDefault();
     const text = input.trim();
     const queuedFiles = pendingFiles;
-    if ((!text && !queuedFiles.length) || isSending || isUploading || isDeletingSession) return;
+    if ((!text && !queuedFiles.length) || isSending || isUploading || isResettingSession) return;
 
     const submissionId = Date.now();
     const userId = `user-${submissionId}`;
     const assistantId = `assistant-${submissionId}`;
-    setSessions((current) =>
-      current.map((session) =>
-        session.id === sessionId
-          ? {
-              ...session,
-              title:
-                ["Phiên mới", "Phiên hiện tại"].includes(session.title)
-                  ? titleFromInput(text, queuedFiles[0]?.name)
-                  : session.title,
-              updatedAt: new Date().toISOString(),
-            }
-          : session
-      )
-    );
     setInput("");
     setPendingFiles([]);
     setIsSending(true);
@@ -926,40 +857,16 @@ function App() {
               <p>Trợ lý luyện IELTS chạy bằng Ollama, có hỗ trợ hỏi đáp theo tài liệu</p>
             </div>
           </div>
-          <div className="sessionControls">
-            <select
-              aria-label="Chọn phiên trò chuyện"
-              value={sessionId}
-              onChange={(event) => openSession(event.target.value)}
-              disabled={isSending || isUploading || isDeletingSession}
-            >
-              {sessions.map((session) => (
-                <option key={session.id} value={session.id}>
-                  {session.title}
-                </option>
-              ))}
-            </select>
-            <button
-              className="sessionButton"
-              type="button"
-              onClick={createSession}
-              disabled={isSending || isUploading || isDeletingSession}
-              title="Tạo phiên mới"
-              aria-label="Tạo phiên mới"
-            >
-              <Plus size={17} />
-            </button>
-            <button
-              className="sessionButton danger"
-              type="button"
-              onClick={deleteActiveSession}
-              disabled={isSending || isUploading || isDeletingSession}
-              title="Xóa phiên hiện tại"
-              aria-label="Xóa phiên hiện tại"
-            >
-              <Trash2 size={16} />
-            </button>
-          </div>
+          <button
+            className="resetSessionButton"
+            type="button"
+            onClick={resetSession}
+            disabled={isSending || isUploading || isResettingSession}
+            title="Làm mới phiên"
+          >
+            <RotateCcw size={16} />
+            Làm mới phiên
+          </button>
         </header>
 
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
@@ -1025,7 +932,7 @@ function App() {
               className="composerIconButton"
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={isUploading || isSending || isDeletingSession}
+              disabled={isUploading || isSending || isResettingSession}
               title="Đính kèm tệp"
               aria-label="Đính kèm tệp"
             >
@@ -1041,7 +948,7 @@ function App() {
             />
             <textarea
               value={input}
-              disabled={isDeletingSession}
+              disabled={isResettingSession}
               onChange={(event) => setInput(event.target.value)}
               onPaste={pasteImages}
               onKeyDown={(event) => {
@@ -1059,11 +966,11 @@ function App() {
               disabled={
                 isSending ||
                 isUploading ||
-                isDeletingSession ||
+                isResettingSession ||
                 (!input.trim() && !pendingFiles.length)
               }
-              title={isSending || isUploading || isDeletingSession ? "Đang xử lý" : "Gửi"}
-              aria-label={isSending || isUploading || isDeletingSession ? "Đang xử lý" : "Gửi"}
+              title={isSending || isUploading || isResettingSession ? "Đang xử lý" : "Gửi"}
+              aria-label={isSending || isUploading || isResettingSession ? "Đang xử lý" : "Gửi"}
             >
               <Send size={18} />
             </button>
