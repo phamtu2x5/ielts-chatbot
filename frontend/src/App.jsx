@@ -6,7 +6,6 @@ import {
   Download,
   FileText,
   Paperclip,
-  RotateCcw,
   Send,
   Sparkles,
   UserRound,
@@ -475,39 +474,6 @@ function App() {
     shouldAutoScrollRef.current = distanceFromBottom < 80;
   }
 
-  async function resetSession() {
-    if (isSending || isUploading || isResettingSession) return;
-    if (!window.confirm("Làm mới phiên và xóa toàn bộ hội thoại, tài liệu RAG hiện tại?")) return;
-
-    setIsResettingSession(true);
-    queueSessionCleanup(sessionId);
-    try {
-      const response = await fetch(`${API_BASE}/sessions/${sessionId}`, { method: "DELETE" });
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(error.detail || "Không thể làm mới phiên");
-      }
-      completeSessionCleanup(sessionId);
-      const nextSessionId = window.crypto.randomUUID();
-      try {
-        window.sessionStorage.setItem(SESSION_STORAGE_KEY, nextSessionId);
-      } catch {
-        // The new UUID remains valid for the current page lifecycle.
-      }
-      setSessionId(nextSessionId);
-      setMessages([{ ...WELCOME_MESSAGE }]);
-      setConversationState(null);
-      setPendingFiles([]);
-      setInput("");
-      setLastSessionActivity(Date.now());
-      shouldAutoScrollRef.current = true;
-    } catch (error) {
-      window.alert(error.message);
-    } finally {
-      setIsResettingSession(false);
-    }
-  }
-
   function exportDebug(message, index) {
     const previousQuestion = [...messages.slice(0, index)]
       .reverse()
@@ -909,16 +875,6 @@ function App() {
               <p>Trợ lý luyện IELTS chạy bằng Ollama, có hỗ trợ hỏi đáp theo tài liệu</p>
             </div>
           </div>
-          <button
-            className="resetSessionButton"
-            type="button"
-            onClick={resetSession}
-            disabled={isSending || isUploading || isResettingSession}
-            title="Làm mới phiên"
-          >
-            <RotateCcw size={16} />
-            Làm mới phiên
-          </button>
         </header>
 
         <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
