@@ -140,6 +140,9 @@ class _FakeStore:
     def stats(self) -> dict:
         return {"documents": 1, "chunks": 1, "embedding_model": "test"}
 
+    def projected_stats(self, chunks: list[dict], source_file: str) -> dict:
+        return {"documents": 1, "chunks": len(chunks)}
+
 
 class _FakeChatStore:
     def __init__(
@@ -214,6 +217,19 @@ class _FakeChatStore:
 
     def search(self, query, top_k, document_ids=None):
         return []
+
+
+class RuntimeLimitTests(unittest.TestCase):
+    def test_sliding_window_rate_limit_recovers_after_window(self) -> None:
+        limiter = main.SlidingWindowRateLimiter()
+        session_id = main.UUID(TEST_SESSION_ID)
+        with patch.object(main.time, "monotonic", side_effect=[0.0, 1.0, 2.0, 61.0]):
+            limiter.check(session_id, "chat", 2, 60)
+            limiter.check(session_id, "chat", 2, 60)
+            with self.assertRaises(main.HTTPException) as raised:
+                limiter.check(session_id, "chat", 2, 60)
+            self.assertEqual(raised.exception.status_code, 429)
+            limiter.check(session_id, "chat", 2, 60)
 
 
 class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):

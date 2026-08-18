@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
@@ -11,7 +12,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import aiofiles
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -97,6 +98,9 @@ async def session_cleanup_loop() -> None:
         await asyncio.sleep(60)
         try:
             await run_in_threadpool(get_store_manager().cleanup_expired)
+            REQUEST_RATE_LIMITER.prune(
+                max(settings.chat_rate_window_seconds, settings.upload_rate_window_seconds)
+            )
         except Exception:
             logger.exception("Session RAG cleanup failed")
 
@@ -116,6 +120,62 @@ UPLOAD_DIR = settings.upload_dir
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DOCUMENT_PROCESSOR = DocumentProcessor()
 LAST_WARMUP_STATUS: dict[str, Any] | None = None
+CHAT_CONCURRENCY = asyncio.Semaphore(settings.chat_max_concurrency)
+UPLOAD_CONCURRENCY = asyncio.Semaphore(settings.upload_max_concurrency)
+
+
+class SlidingWindowRateLimiter:
+    def __init__(self) -> None:
+        self._events: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+
+    def check(self, session_id: UUID, action: str, limit: int, window_seconds: int) -> None:
+        now = time.monotonic()
+        events = self._events[(str(session_id), action)]
+        cutoff = now - window_seconds
+        while events and events[0] <= cutoff:
+            events.popleft()
+        if len(events) >= limit:
+            retry_after = max(1, int(window_seconds - (now - events[0])) + 1)
+            raise HTTPException(
+                status_code=429,
+                detail="Bạn thao tác quá nhanh. Vui lòng chờ một chút rồi thử lại.",
+                headers={"Retry-After": str(retry_after)},
+            )
+        events.append(now)
+
+    def prune(self, max_age_seconds: int) -> None:
+        cutoff = time.monotonic() - max_age_seconds
+        for key, events in list(self._events.items()):
+            while events and events[0] <= cutoff:
+                events.popleft()
+            if not events:
+                self._events.pop(key, None)
+
+    def clear_session(self, session_id: UUID) -> None:
+        normalized = str(session_id)
+        for key in [key for key in self._events if key[0] == normalized]:
+            self._events.pop(key, None)
+
+
+REQUEST_RATE_LIMITER = SlidingWindowRateLimiter()
+
+
+def enforce_chat_rate(req: ChatRequest) -> None:
+    REQUEST_RATE_LIMITER.check(
+        req.session_id,
+        "chat",
+        settings.chat_rate_limit,
+        settings.chat_rate_window_seconds,
+    )
+
+
+def enforce_upload_rate(session_id: UUID = Form(...)) -> None:
+    REQUEST_RATE_LIMITER.check(
+        session_id,
+        "upload",
+        settings.upload_rate_limit,
+        settings.upload_rate_window_seconds,
+    )
 
 app = FastAPI(title="Standalone IELTS Chatbot", version="1.1.0", lifespan=lifespan)
 
@@ -3452,10 +3512,11 @@ async def warmup() -> dict:
     }
 
 
-@app.post("/chat/stream")
+@app.post("/chat/stream", dependencies=[Depends(enforce_chat_rate)])
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung câu hỏi")
+    await CHAT_CONCURRENCY.acquire()
 
     async def generate():
         resource_debug = {"start": resource_snapshot()}
@@ -3756,6 +3817,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 message="Không thể tạo câu trả lời lúc này. Vui lòng thử lại.",
                 detail=failure_detail,
             )
+        finally:
+            CHAT_CONCURRENCY.release()
 
     return StreamingResponse(
         generate(),
@@ -3767,7 +3830,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     )
 
 
-@app.post("/documents/upload", response_model=UploadResponse)
+@app.post(
+    "/documents/upload",
+    response_model=UploadResponse,
+    dependencies=[Depends(enforce_upload_rate)],
+)
 async def upload_document(
     session_id: UUID = Form(...),
     file: UploadFile = File(...),
@@ -3778,6 +3845,7 @@ async def upload_document(
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="Tên tệp không hợp lệ")
+    await UPLOAD_CONCURRENCY.acquire()
 
     safe_name = Path(file.filename).name
     request_id = uuid4().hex
@@ -3821,6 +3889,28 @@ async def upload_document(
             )
 
         store = get_store(session_id)
+        projected_stats = await run_in_threadpool(
+            store.projected_stats,
+            [chunk.to_dict() for chunk in chunks],
+            safe_name,
+        )
+        if projected_stats["documents"] > settings.rag_session_max_documents:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "Phiên đã đạt giới hạn "
+                    f"{settings.rag_session_max_documents} tài liệu. "
+                    "Hãy làm mới phiên trước khi tải thêm."
+                ),
+            )
+        if projected_stats["chunks"] > settings.rag_session_max_chunks:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    "Tổng nội dung tài liệu trong phiên vượt giới hạn xử lý. "
+                    "Hãy làm mới phiên hoặc tải ít tài liệu hơn."
+                ),
+            )
         upsert_started = time.perf_counter()
         inserted = await run_in_threadpool(
             store.upsert,
@@ -3866,6 +3956,7 @@ async def upload_document(
         logger.exception("Unexpected document processing failure for %s", safe_name)
         raise HTTPException(status_code=500, detail="Không thể xử lý tài liệu này.") from exc
     finally:
+        UPLOAD_CONCURRENCY.release()
         file_path.unlink(missing_ok=True)
 
 
@@ -3903,4 +3994,5 @@ async def expire_session(session_id: UUID) -> SessionExpireResponse:
 @app.delete("/sessions/{session_id}", response_model=SessionDeleteResponse)
 async def delete_session(session_id: UUID) -> SessionDeleteResponse:
     deleted = await run_in_threadpool(get_store_manager().delete_session, session_id)
+    REQUEST_RATE_LIMITER.clear_session(session_id)
     return SessionDeleteResponse(session_id=session_id, deleted=deleted)

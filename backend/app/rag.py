@@ -780,6 +780,33 @@ class LocalVectorStore:
             "embedding_model": self.model_name,
         }
 
+    @synchronized
+    def projected_stats(self, chunks: List[Dict], source_file: str) -> Dict:
+        incoming_document_ids = {
+            str(chunk.get("document_id"))
+            for chunk in chunks
+            if chunk.get("document_id")
+        }
+        kept_docs = [
+            doc
+            for doc in self._docs
+            if (
+                doc.get("document_id") not in incoming_document_ids
+                if incoming_document_ids
+                else doc.get("source_file") != source_file
+            )
+        ]
+        projected_docs = kept_docs + chunks
+        return {
+            "documents": len(
+                {
+                    doc.get("document_id") or doc.get("source_file")
+                    for doc in projected_docs
+                }
+            ),
+            "chunks": len(projected_docs),
+        }
+
 
 class SessionRagManager:
     EXPIRY_FILE = ".expires_at"

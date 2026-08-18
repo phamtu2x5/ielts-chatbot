@@ -108,6 +108,30 @@ class AppSettings:
     rag_session_hard_ttl_seconds: int = field(
         default_factory=lambda: int(os.getenv("RAG_SESSION_HARD_TTL_SECONDS", "7200"))
     )
+    rag_session_max_documents: int = field(
+        default_factory=lambda: int(os.getenv("RAG_SESSION_MAX_DOCUMENTS", "12"))
+    )
+    rag_session_max_chunks: int = field(
+        default_factory=lambda: int(os.getenv("RAG_SESSION_MAX_CHUNKS", "6000"))
+    )
+    chat_rate_limit: int = field(
+        default_factory=lambda: int(os.getenv("CHAT_RATE_LIMIT", "12"))
+    )
+    chat_rate_window_seconds: int = field(
+        default_factory=lambda: int(os.getenv("CHAT_RATE_WINDOW_SECONDS", "60"))
+    )
+    upload_rate_limit: int = field(
+        default_factory=lambda: int(os.getenv("UPLOAD_RATE_LIMIT", "10"))
+    )
+    upload_rate_window_seconds: int = field(
+        default_factory=lambda: int(os.getenv("UPLOAD_RATE_WINDOW_SECONDS", "600"))
+    )
+    chat_max_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("CHAT_MAX_CONCURRENCY", "2"))
+    )
+    upload_max_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("UPLOAD_MAX_CONCURRENCY", "1"))
+    )
 
     warmup_llm: bool = field(default_factory=lambda: _env_bool("WARMUP_LLM", True))
     warmup_embedding: bool = field(default_factory=lambda: _env_bool("WARMUP_EMBEDDING", True))
@@ -146,6 +170,20 @@ class AppSettings:
             raise ValueError(
                 "RAG session TTLs must be positive and hard TTL must exceed grace TTL."
             )
+        if any(
+            value <= 0
+            for value in (
+                self.rag_session_max_documents,
+                self.rag_session_max_chunks,
+                self.chat_rate_limit,
+                self.chat_rate_window_seconds,
+                self.upload_rate_limit,
+                self.upload_rate_window_seconds,
+                self.chat_max_concurrency,
+                self.upload_max_concurrency,
+            )
+        ):
+            raise ValueError("Session quotas and request limits must be positive.")
         if not 0 <= self.rag_min_score <= 1 or not 0 <= self.rag_probe_min_dense_score <= 1:
             raise ValueError("RAG score thresholds must be between 0 and 1.")
 

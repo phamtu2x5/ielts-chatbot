@@ -23,6 +23,7 @@ const SESSION_STORAGE_KEY = "ielts-chatbot-session-id";
 const SESSION_LIST_STORAGE_KEY = "ielts-chatbot-sessions-v1";
 const SESSION_DATA_PREFIX = "ielts-chatbot-session-v1:";
 const SESSION_CLEANUP_STORAGE_KEY = "ielts-chatbot-session-cleanup-v1";
+const SESSION_HARD_TTL_MS = 2 * 60 * 60 * 1000;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WELCOME_MESSAGE = {
   id: "welcome",
@@ -380,6 +381,7 @@ function App() {
   const [isResettingSession, setIsResettingSession] = useState(false);
   const [pendingFiles, setPendingFiles] = useState([]);
   const [conversationState, setConversationState] = useState(null);
+  const [lastSessionActivity, setLastSessionActivity] = useState(Date.now());
   const fileInputRef = useRef(null);
   const messagesRef = useRef(null);
   const shouldAutoScrollRef = useRef(true);
@@ -412,6 +414,50 @@ function App() {
     window.addEventListener("pagehide", cleanupCurrentSession);
     return () => window.removeEventListener("pagehide", cleanupCurrentSession);
   }, [sessionId]);
+
+  useEffect(() => {
+    const remaining = Math.max(
+      1000,
+      SESSION_HARD_TTL_MS - (Date.now() - lastSessionActivity)
+    );
+    const timeoutId = window.setTimeout(async () => {
+      if (isSending || isUploading || isResettingSession) {
+        setLastSessionActivity(Date.now());
+        return;
+      }
+      setIsResettingSession(true);
+      queueSessionCleanup(sessionId);
+      try {
+        const response = await fetch(`${API_BASE}/sessions/${sessionId}`, {
+          method: "DELETE",
+        });
+        if (response.ok) completeSessionCleanup(sessionId);
+      } catch {
+        // The backend hard TTL remains authoritative when the request fails.
+      } finally {
+        const nextSessionId = window.crypto.randomUUID();
+        try {
+          window.sessionStorage.setItem(SESSION_STORAGE_KEY, nextSessionId);
+        } catch {
+          // The UUID remains valid for the current page lifecycle.
+        }
+        setSessionId(nextSessionId);
+        setMessages([
+          {
+            ...WELCOME_MESSAGE,
+            content: "Phiên trước đã hết hạn sau 2 giờ không hoạt động. Mình đã bắt đầu một phiên mới cho bạn.",
+          },
+        ]);
+        setConversationState(null);
+        setPendingFiles([]);
+        setInput("");
+        setLastSessionActivity(Date.now());
+        setIsResettingSession(false);
+        shouldAutoScrollRef.current = true;
+      }
+    }, remaining);
+    return () => window.clearTimeout(timeoutId);
+  }, [sessionId, lastSessionActivity, isSending, isUploading, isResettingSession]);
 
   useEffect(() => {
     const container = messagesRef.current;
@@ -449,6 +495,7 @@ function App() {
       setConversationState(null);
       setPendingFiles([]);
       setInput("");
+      setLastSessionActivity(Date.now());
       shouldAutoScrollRef.current = true;
     } catch (error) {
       window.alert(error.message);
@@ -580,6 +627,7 @@ function App() {
     if ((!text && !queuedFiles.length) || isSending || isUploading || isResettingSession) return;
 
     const submissionId = Date.now();
+    setLastSessionActivity(submissionId);
     const userId = `user-${submissionId}`;
     const assistantId = `assistant-${submissionId}`;
     setInput("");

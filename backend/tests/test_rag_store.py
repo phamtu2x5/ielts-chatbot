@@ -204,7 +204,13 @@ class LocalVectorStoreTests(unittest.TestCase):
     def test_upsert_replaces_source_without_desynchronizing_index(self) -> None:
         store = FakeVectorStore()
         store.upsert([self._chunk("a-1", "a.pdf", "first")], "a.pdf")
-        store.upsert([self._chunk("a-2", "a.pdf", "replacement")], "a.pdf")
+        replacement = self._chunk("a-2", "a.pdf", "replacement")
+
+        self.assertEqual(
+            store.projected_stats([replacement], "a.pdf"),
+            {"documents": 1, "chunks": 1},
+        )
+        store.upsert([replacement], "a.pdf")
 
         self.assertEqual(store.stats()["chunks"], 1)
         self.assertEqual(store._docs[0]["chunk_id"], "a-2")
