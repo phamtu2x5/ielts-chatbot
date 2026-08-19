@@ -4024,9 +4024,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 detail=ollama_failure_detail(exc),
             )
         finally:
-            if operation_started:
-                await run_in_threadpool(manager.end_session_operation, req.session_id)
-            CHAT_CONCURRENCY.release()
+            try:
+                if operation_started:
+                    manager.end_session_operation(req.session_id)
+            except Exception:
+                logger.exception("Failed to finish session chat operation")
+            finally:
+                CHAT_CONCURRENCY.release()
 
     return StreamingResponse(
         generate(),
@@ -4172,10 +4176,14 @@ async def upload_document(
         logger.exception("Unexpected document processing failure for %s", safe_name)
         raise HTTPException(status_code=500, detail="Không thể xử lý tài liệu này.") from exc
     finally:
-        if operation_started:
-            await run_in_threadpool(manager.end_session_operation, session_id)
-        UPLOAD_CONCURRENCY.release()
-        file_path.unlink(missing_ok=True)
+        try:
+            if operation_started:
+                manager.end_session_operation(session_id)
+        except Exception:
+            logger.exception("Failed to finish session upload operation")
+        finally:
+            UPLOAD_CONCURRENCY.release()
+            file_path.unlink(missing_ok=True)
 
 
 @app.post(
