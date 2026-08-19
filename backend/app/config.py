@@ -41,7 +41,7 @@ class AppSettings:
     api_auth_token: str = field(
         default_factory=lambda: os.getenv("API_AUTH_TOKEN", "").strip()
     )
-    debug_payloads: bool = field(default_factory=lambda: _env_bool("DEBUG_PAYLOADS", True))
+    debug_payloads: bool = field(default_factory=lambda: _env_bool("DEBUG_PAYLOADS", False))
 
     ollama_api_url: str = field(
         default_factory=lambda: os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/generate")

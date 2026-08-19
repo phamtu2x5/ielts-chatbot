@@ -1442,6 +1442,8 @@ def select_best_solve_output(
 
 def generation_candidate_debug(text: str, max_chars: int = 4_000) -> dict[str, Any]:
     """Keep generation diagnostics useful without copying unbounded model output."""
+    if not settings.debug_payloads:
+        return {"char_count": len(text)}
     return {
         "text": text[:max_chars],
         "char_count": len(text),
@@ -1956,15 +1958,17 @@ async def collect_user_fact_updates(
         "vector_rag_static",
     }
     if not trusted_result:
-        prepared.debug["user_fact_extraction"] = {
-            "attempted": False,
-            "reason": "untrusted_result",
-            "facts": [],
-        }
+        if settings.debug_payloads:
+            prepared.debug["user_fact_extraction"] = {
+                "attempted": False,
+                "reason": "untrusted_result",
+                "facts": [],
+            }
         return
     decision = await extract_user_facts(req.message)
     prepared.user_fact_updates = list(decision.facts)
-    prepared.debug["user_fact_extraction"] = decision.to_debug()
+    if settings.debug_payloads:
+        prepared.debug["user_fact_extraction"] = decision.to_debug()
 
 
 def conversation_state_for_result(
@@ -2022,15 +2026,16 @@ def conversation_state_for_result(
         ),
         rag_affinity=affinity,
     )
-    prepared.debug["conversation_state"] = {
-        "input": req.conversation_state.model_dump() if req.conversation_state else None,
-        "result": {
-            "route_used": prepared.route_used,
-            "query_intent": prepared.query_intent,
-            "trusted": trusted_result,
-        },
-        "output": state.model_dump(),
-    }
+    if settings.debug_payloads:
+        prepared.debug["conversation_state"] = {
+            "input": req.conversation_state.model_dump() if req.conversation_state else None,
+            "result": {
+                "route_used": prepared.route_used,
+                "query_intent": prepared.query_intent,
+                "trusted": trusted_result,
+            },
+            "output": state.model_dump(),
+        }
     return state
 
 
@@ -2074,12 +2079,13 @@ def persist_session_turn(
         [message.model_dump() for message in history],
         state.model_dump(),
     )
-    prepared.debug["session_memory"] = {
-        "source": "backend",
-        "messages": len(history),
-        "user_facts": len(state.user_facts),
-        "rag_document_affinity": len(state.rag_affinity.document_ids),
-    }
+    if settings.debug_payloads:
+        prepared.debug["session_memory"] = {
+            "source": "backend",
+            "messages": len(history),
+            "user_facts": len(state.user_facts),
+            "rag_document_affinity": len(state.rag_affinity.document_ids),
+        }
 
 
 def _markdown_table(table: dict[str, Any]) -> str:
@@ -2793,17 +2799,9 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
 
     if route == "direct":
         previous_answer_source = direct_conversation_source(req)
-        return ChatPreparation(
-            prompt=direct_answer_prompt(
-                message,
-                req.conversation_history,
-                user_profile_context(req),
-                previous_answer_source=previous_answer_source,
-            ),
-            static_response=None,
-            route_used="base_model",
-            sources=[],
-            debug={
+        debug = {}
+        if settings.debug_payloads:
+            debug = {
                 "route_decision": "direct",
                 "query_intent": "direct",
                 "route_gateway": gateway_debug,
@@ -2821,7 +2819,18 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
                 "retrieval": {"skipped": True, "final_context": []},
                 "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
                 "source_count": 0,
-            },
+            }
+        return ChatPreparation(
+            prompt=direct_answer_prompt(
+                message,
+                req.conversation_history,
+                user_profile_context(req),
+                previous_answer_source=previous_answer_source,
+            ),
+            static_response=None,
+            route_used="base_model",
+            sources=[],
+            debug=debug,
             query_intent="direct",
         )
 
@@ -2835,16 +2844,20 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             static_response=ROUTE_UNDETERMINED_RESPONSE,
             route_used="route_undetermined",
             sources=[],
-            debug={
-                "route_decision": "undetermined",
-                "query_intent": "route_undetermined",
-                "route_gateway": gateway_debug,
-                "document_resolution": {"skipped": True, "reason": "route_undetermined"},
-                "intent_classifier": {"skipped": True, "reason": "route_undetermined"},
-                "retrieval": {"skipped": True, "final_context": []},
-                "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
-                "source_count": 0,
-            },
+            debug=(
+                {
+                    "route_decision": "undetermined",
+                    "query_intent": "route_undetermined",
+                    "route_gateway": gateway_debug,
+                    "document_resolution": {"skipped": True, "reason": "route_undetermined"},
+                    "intent_classifier": {"skipped": True, "reason": "route_undetermined"},
+                    "retrieval": {"skipped": True, "final_context": []},
+                    "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
+                    "source_count": 0,
+                }
+                if settings.debug_payloads
+                else {}
+            ),
             query_intent="route_undetermined",
         )
     if route == "undetermined":
@@ -2961,22 +2974,23 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "candidate_document_ids": clarification_document_ids,
             "invalid_candidate_refs": invalid_candidate_refs,
         }
-    document_resolution_debug["catalog_context"] = {
-        "order": "query_relevance_then_recent_ingestion_tie_break",
-        "available_document_ids": list(allowed_scope_ids),
-        "included_document_ids": list(gateway_context.included_document_ids),
-        "omitted_document_ids": [
-            document_id
-            for document_id in allowed_scope_ids
-            if document_id not in gateway_context.included_document_ids
-        ],
-        "ranked_candidates": [
-            candidate.to_debug() for candidate in ranked_candidates
-        ],
-        "resolver_candidates": [
-            candidate.to_debug() for candidate in resolver_candidates
-        ],
-    }
+    if settings.debug_payloads:
+        document_resolution_debug["catalog_context"] = {
+            "order": "query_relevance_then_recent_ingestion_tie_break",
+            "available_document_ids": list(allowed_scope_ids),
+            "included_document_ids": list(gateway_context.included_document_ids),
+            "omitted_document_ids": [
+                document_id
+                for document_id in allowed_scope_ids
+                if document_id not in gateway_context.included_document_ids
+            ],
+            "ranked_candidates": [
+                candidate.to_debug() for candidate in ranked_candidates
+            ],
+            "resolver_candidates": [
+                candidate.to_debug() for candidate in resolver_candidates
+            ],
+        }
 
     if not scope_ids:
         debug = {
@@ -2997,6 +3011,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             },
             "source_count": 0,
         }
+        if not settings.debug_payloads:
+            debug = {}
         return ChatPreparation(
             prompt=None,
             static_response=(
@@ -3052,6 +3068,8 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
             "retrieval": {"skipped": True, "final_context": []},
             "source_count": 0,
         }
+        if not settings.debug_payloads:
+            debug = {}
         return ChatPreparation(
             prompt=None,
             static_response=INTENT_UNDETERMINED_RESPONSE,
@@ -3330,37 +3348,44 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
         solve_report = solve_context_report(message, sources)
 
     debug = {
-        "route_decision": route,
-        "query_intent": query_intent,
-        "intent_decision": intent_debug,
-        "route_gateway": gateway_debug,
-        "document_resolution": {
-            **document_resolution_debug,
-            "resolved_document_ids": scope_ids,
-            "requested_scope": scope.to_debug(),
+        "intent_decision": {
+            "allow_solution": bool(intent_debug.get("allow_solution")),
         },
-        "intent_classifier": intent_classifier.to_debug(),
-        "target_resolution": scope.to_debug(),
-        "catalog": catalog,
-        "probe": compact_probe_debug(probe),
-        "retrieval": {
-            "method": retrieval_method,
-            "structured_hits": len(structured_sources),
-            "before_filter_count": before_filter_count,
-            "after_filter_count": len(sources),
-            "evidence_candidate_count": evidence_candidate_count,
-            "evidence_context_count": evidence_context_count,
-            "evidence_query": evidence_query,
-            "evidence_per_question": evidence_per_question,
-            "evidence_by_question": evidence_by_question,
-            "solve_context_report": solve_report,
-            "retrieval_query": retrieval_query,
-            "writing_parent_id": writing_parent_id,
-            "final_context": compact_final_context_debug(sources),
-        },
-        "source_count": len(sources),
-        "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
+        "retrieval": {"solve_context_report": solve_report},
     }
+    if settings.debug_payloads:
+        debug = {
+            "route_decision": route,
+            "query_intent": query_intent,
+            "intent_decision": intent_debug,
+            "route_gateway": gateway_debug,
+            "document_resolution": {
+                **document_resolution_debug,
+                "resolved_document_ids": scope_ids,
+                "requested_scope": scope.to_debug(),
+            },
+            "intent_classifier": intent_classifier.to_debug(),
+            "target_resolution": scope.to_debug(),
+            "catalog": catalog,
+            "probe": compact_probe_debug(probe),
+            "retrieval": {
+                "method": retrieval_method,
+                "structured_hits": len(structured_sources),
+                "before_filter_count": before_filter_count,
+                "after_filter_count": len(sources),
+                "evidence_candidate_count": evidence_candidate_count,
+                "evidence_context_count": evidence_context_count,
+                "evidence_query": evidence_query,
+                "evidence_per_question": evidence_per_question,
+                "evidence_by_question": evidence_by_question,
+                "solve_context_report": solve_report,
+                "retrieval_query": retrieval_query,
+                "writing_parent_id": writing_parent_id,
+                "final_context": compact_final_context_debug(sources),
+            },
+            "source_count": len(sources),
+            "conversation_state": req.conversation_state.model_dump() if req.conversation_state else None,
+        }
 
     if sources:
         if query_intent == "solve_questions":
@@ -3687,7 +3712,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         def metadata_event() -> str:
             if prepared is None:
                 raise RuntimeError("Chat preparation is not available.")
-            prepared.debug["resources"] = resource_debug
+            if settings.debug_payloads:
+                prepared.debug["resources"] = resource_debug
             return stream_event(
                 "metadata",
                 route_used=prepared.route_used,
@@ -3703,28 +3729,30 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         try:
             yield stream_event("status", message="Đang phân tích câu hỏi...")
             prepared = await prepare_chat(active_req)
-            prepared.debug["session_id"] = str(active_req.session_id)
+            if settings.debug_payloads:
+                prepared.debug["session_id"] = str(active_req.session_id)
             await collect_user_fact_updates(active_req, prepared)
-            if prepared.static_response is not None:
-                prepared.debug["delivery"] = {
-                    "endpoint": "static",
-                    "mode": "buffered_then_streamed",
-                    "buffer_reason": "static_response",
-                }
-            elif requires_reviewed_generation(prepared, active_req.message):
-                prepared.debug["delivery"] = {
-                    "endpoint": (
-                        "chat" if prepared.route_used == "base_model" else "generate"
-                    ),
-                    "mode": "buffered_then_streamed",
-                    "buffer_reason": response_buffer_reason(prepared, active_req.message),
-                }
-            else:
-                prepared.debug["delivery"] = {
-                    "endpoint": "generate",
-                    "mode": "live_stream",
-                    "buffer_reason": None,
-                }
+            if settings.debug_payloads:
+                if prepared.static_response is not None:
+                    prepared.debug["delivery"] = {
+                        "endpoint": "static",
+                        "mode": "buffered_then_streamed",
+                        "buffer_reason": "static_response",
+                    }
+                elif requires_reviewed_generation(prepared, active_req.message):
+                    prepared.debug["delivery"] = {
+                        "endpoint": (
+                            "chat" if prepared.route_used == "base_model" else "generate"
+                        ),
+                        "mode": "buffered_then_streamed",
+                        "buffer_reason": response_buffer_reason(prepared, active_req.message),
+                    }
+                else:
+                    prepared.debug["delivery"] = {
+                        "endpoint": "generate",
+                        "mode": "live_stream",
+                        "buffer_reason": None,
+                    }
             yield metadata_event()
             if prepared.static_response is not None:
                 async for token in buffered_response_chunks(prepared.static_response):
@@ -3954,11 +3982,12 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     }
                 )
                 yield metadata_event()
-                prepared.debug["delivery"] = {
-                    "endpoint": fallback_endpoint,
-                    "mode": "buffered_then_streamed",
-                    "buffer_reason": "stream_fallback",
-                }
+                if settings.debug_payloads:
+                    prepared.debug["delivery"] = {
+                        "endpoint": fallback_endpoint,
+                        "mode": "buffered_then_streamed",
+                        "buffer_reason": "stream_fallback",
+                    }
                 async for token in buffered_response_chunks(fallback_answer):
                     yield token_event(token)
             finish_resource_debug()

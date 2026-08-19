@@ -12,6 +12,9 @@ import httpx
 import numpy as np
 
 
+os.environ.setdefault("DEBUG_PAYLOADS", "true")
+
+
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
@@ -1148,6 +1151,26 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertFalse(embeddings.full_matmul)
         self.assertEqual(embeddings.indexed.tolist(), [1])
         self.assertEqual([item["document_id"] for item in hits], ["doc-b"])
+
+    def test_hybrid_search_embeds_its_query_once(self) -> None:
+        class CountingStore(FakeVectorStore):
+            def __init__(self) -> None:
+                self.embed_calls: list[list[str]] = []
+                super().__init__()
+
+            def _embed(self, texts: list[str]) -> np.ndarray:
+                self.embed_calls.append(list(texts))
+                return super()._embed(texts)
+
+        store = CountingStore()
+        chunk = self._chunk("doc-a", "a.pdf", "target text")
+        chunk["document_id"] = "doc-a"
+        store.upsert([chunk], "a.pdf")
+        store.embed_calls.clear()
+
+        store.hybrid_search("target", top_k=5, document_ids=["doc-a"])
+
+        self.assertEqual(store.embed_calls, [["target"]])
 
     def test_rrf_rewards_candidates_supported_by_multiple_retrievers(self) -> None:
         store = FakeVectorStore()

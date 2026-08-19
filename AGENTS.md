@@ -11,7 +11,6 @@ This repo is a standalone IELTS chatbot extracted from a larger IELTS learning
 system. It provides:
 
 - A FastAPI backend.
-- A React/Vite frontend.
 - Ollama-based LLM answering.
 - Document AI + RAG for TXT/Markdown, PDF, DOCX, and images.
 - IELTS-aware document structure parsing for Reading passages, question groups,
@@ -43,11 +42,8 @@ Backend:
 - Local JSON/NumPy vector store under `backend/data/rag/`.
 - Ollama API for LLM generation.
 
-Frontend:
-
-- React.
-- Vite.
-- CSS in `frontend/src/styles.css`.
+The React/Vite frontend is maintained separately at
+`https://github.com/phamtu2x5/ielts-chatbot-fe`.
 
 Runtime model/config defaults:
 
@@ -116,15 +112,6 @@ backend/tests/
   test_document_pipeline.py
   test_rag_store.py
 
-backend/evaluation/
-  chat_corpus_v2.json
-
-backend/tools/
-  chat_evaluation.py
-
-frontend/src/App.jsx
-frontend/src/styles.css
-
 README.md
 RAG_PIPELINE_REVIEW.md
 PROJECT_HANDOFF.md
@@ -164,12 +151,6 @@ Python:
   examples.
 - Do not use LLM calls to compensate for missing document structure.
 
-Frontend:
-
-- Keep UI changes scoped to the requested debug or rendering behavior.
-- Do not redesign the app unless requested.
-- Preserve streaming behavior and debug download support.
-
 File editing:
 
 - Use patches for manual edits.
@@ -188,14 +169,6 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 2222
 ```
 
-Frontend local setup:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
 Warmup:
 
 ```bash
@@ -209,25 +182,14 @@ python3 -m compileall -q backend/app
 python3 -m unittest discover -s backend/tests -v
 ```
 
-Frontend check when touching frontend:
-
-```bash
-cd frontend && npm run build
-```
-
 Full Colab verification:
 
 1. Pull latest repo into Colab.
 2. Install `backend/requirements.txt`.
-3. Start Ollama/backend/frontend.
+3. Start Ollama/backend.
 4. Call `/warmup`.
 5. Upload sample PDF/image.
 6. Inspect upload timing/debug metadata.
-7. Use `backend/tools/chat_evaluation.py` to collect answers and RAG debug data
-   for the questions in `backend/evaluation/chat_corpus_v2.json`.
-
-The legacy 19-question set is retired. Do not use it as the acceptance baseline;
-it predates the current seven-document corpus.
 
 ## 6. Architecture Notes
 
@@ -264,7 +226,7 @@ User query
 -> parent/context expansion when needed
 -> RAG prompt
 -> Ollama response or stream
--> frontend debug panel/download
+-> external client
 ```
 
 Core principle:
@@ -282,9 +244,7 @@ Patch boundaries:
 - Document resolution runs only after a RAG decision. Same-turn attachments are
   explicit scope; prior affinity is a weak hint, never a hard document lock.
 - Patch 1 owns only the final RAG intent enum after the document is resolved.
-- The frontend and evaluation runner use `/chat/stream`, the only chat endpoint.
-- Evaluation ground truth such as `expected_target_files` is report-only and
-  must never be sent as `document_ids` in the 78-case requests.
+- External clients and the evaluation runner use `/chat/stream`, the only chat endpoint.
 
 Intent policy:
 
@@ -301,8 +261,8 @@ Storage:
 - Persistent RAG data defaults to `backend/data/rag/documents.json` and
   `backend/data/rag/embeddings.npy`.
 - Uploading the same source replaces that source only after embeddings succeed.
-- Session/user isolation is not complete yet; treat the local store as shared by
-  one backend process.
+- Each backend session has isolated memory, documents, and embeddings. The local
+  JSON/NumPy store still requires exactly one backend worker.
 
 ## 7. Rules for AI Agents
 
@@ -376,12 +336,6 @@ python3 -m compileall -q backend/app
 python3 -m unittest discover -s backend/tests -v
 ```
 
-When touching frontend:
-
-```bash
-cd frontend && npm run build
-```
-
 When touching ingestion/RAG behavior, also verify with:
 
 - Upload a native-text PDF.
@@ -413,10 +367,8 @@ Near-term direction:
 1. Keep the current extraction baseline frozen unless a failure is reproduced
    across multiple documents or blocks production.
 2. Rebuild the structured and vector indexes from the current schema.
-3. Evaluate the semantic route/intent gateway and target resolution across the multi-document corpus.
-4. Run `backend/tools/chat_evaluation.py` against the rebuilt seven-document corpus
-   and review its raw answer/debug report manually. Do not auto-score answers.
-5. Fix retrieval, grounding and generation-policy failures before changing prompts.
+3. Validate direct, document, and follow-up behavior with focused production cases.
+4. Fix retrieval, grounding and generation-policy failures before changing prompts.
 
 Longer-term direction:
 

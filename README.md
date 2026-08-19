@@ -1,13 +1,15 @@
-# IELTS Chatbot Standalone
+# IELTS Chatbot Backend
 
 Standalone chatbot repo extracted from the IELTS learning system.
 
-It includes:
+This repository includes:
 
 - FastAPI backend
-- React/Vite frontend
 - Ollama LLM integration
 - Document RAG for text, PDF, DOCX, and images using an embedded local vector store and an LLM router
+
+The React/Vite application lives in the separate
+[`ielts-chatbot-fe`](https://github.com/phamtu2x5/ielts-chatbot-fe) repository.
 
 ## Architecture
 
@@ -49,7 +51,7 @@ documents, embeddings, and cache together.
 Only a bounded LRU set of inactive session indexes stays loaded in CPU RAM;
 eviction never deletes on-disk session data. The shared BGE-M3 model and the
 LLM/OCR/layout GPU runtimes remain resident.
-The frontend and the 78-case capture runner use this single chat endpoint.
+External clients and the evaluation runner use this single chat endpoint.
 
 ### Current chat patch boundaries
 
@@ -68,12 +70,6 @@ The current baseline intentionally separates routing responsibilities:
    `show_questions`, `translate_questions`, `solve_questions`, or `semantic_qa`.
 4. Structured lookup/retrieval and generation then operate only inside the
    resolved document scope.
-
-The 78-case runner follows this same product path through `/chat/stream`. It sends
-`document_ids=null`, `document_scope="available"`, and no conversation state for
-each independent case. `expected_target_files` remains report-only ground truth;
-it is never included in the chat request, so it cannot leak the answer document
-to the router. Follow-up behavior is covered separately by conversation tests.
 
 ## Run Locally
 
@@ -95,19 +91,8 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8765 --workers 1
 ```
 
-Start frontend:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Open:
-
-```text
-http://127.0.0.1:8000
-```
+For a local UI, run the separate `ielts-chatbot-fe` repository and point its
+`VITE_CHATBOT_API_URL` at this backend or at a trusted server-side proxy.
 
 Warm up large models before opening the UI:
 
@@ -159,7 +144,7 @@ RAG_DATA_DIR=data/rag
 CORS_ALLOW_ORIGINS=http://localhost:8000,http://127.0.0.1:8000,https://mywsite.online,https://www.mywsite.online
 API_AUTH_REQUIRED=false
 API_AUTH_TOKEN=
-DEBUG_PAYLOADS=true
+DEBUG_PAYLOADS=false
 RAG_TOP_K=5
 RAG_MIN_SCORE=0.45
 RAG_PROBE_TOP_K=3
@@ -250,27 +235,7 @@ documents or a production-blocking failure.
 
 ```bash
 python -m unittest discover -s backend/tests -v
-cd frontend && npm run build
 ```
-
-To collect end-to-end answers and RAG diagnostics for manual review, start the
-backend with all models warmed up, then run:
-
-```bash
-python backend/tools/chat_evaluation.py --base-url http://127.0.0.1:8765
-```
-
-The runner verifies and uploads all seven files in `docs/`, sends the 78 independent questions
-from `backend/evaluation/chat_corpus_v2.json`, and writes the raw answers, routes,
-resolved document IDs, conversation state, sources and debug metadata under
-`backend/data/chat_evaluation/`. It does not
-score answer quality; the report is reviewed manually. Use `--skip-upload` when
-the same corpus is already indexed, or repeat `--case CASE_ID` to collect selected
-cases. Every case runs with the whole indexed catalog available but without
-oracle document IDs. The direct-router cases therefore expose false RAG routing,
-while document cases also measure whether target resolution selects the correct
-file. The previous 19-question set is retired because it does not represent the
-expanded corpus.
 
 ## Notes
 

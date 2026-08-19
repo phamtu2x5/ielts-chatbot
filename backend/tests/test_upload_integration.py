@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import types
@@ -8,6 +9,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from starlette.datastructures import Headers, UploadFile
+
+
+os.environ.setdefault("DEBUG_PAYLOADS", "true")
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -346,6 +350,25 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["sources"], [])
         self.assertIsNone(metadata["conversation_state"])
         resource_snapshot.assert_not_called()
+
+    async def test_production_direct_preparation_does_not_build_diagnostics(self) -> None:
+        production_settings = types.SimpleNamespace(
+            **{**main.settings.__dict__, "debug_payloads": False}
+        )
+        with (
+            patch.object(main, "settings", production_settings),
+            patch.object(main, "get_store", return_value=_FakeChatStore([])),
+            patch.object(
+                main,
+                "classify_chat_route",
+                AsyncMock(return_value=_gateway_decision("direct", "direct")),
+            ),
+        ):
+            prepared = await main.prepare_chat(_chat_request(message="xin chào"))
+            candidate_debug = main.generation_candidate_debug("model output")
+
+        self.assertEqual(prepared.debug, {})
+        self.assertEqual(candidate_debug, {"char_count": 12})
 
     async def test_explicit_attachment_translation_uses_its_generic_ocr_chunk(self) -> None:
         catalog = [
