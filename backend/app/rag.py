@@ -4,6 +4,7 @@ import re
 import shutil
 import threading
 import time
+from collections import OrderedDict
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import wraps
@@ -442,14 +443,19 @@ class LocalVectorStore:
         )
         if not candidate_indices:
             return []
-        scores = self._embeddings @ query_embedding
-        order = sorted(candidate_indices, key=lambda index: scores[index], reverse=True)[:top_k]
+        candidate_array = np.asarray(candidate_indices, dtype=np.intp)
+        if len(candidate_indices) == len(self._docs):
+            scores = self._embeddings @ query_embedding
+        else:
+            scores = self._embeddings[candidate_array] @ query_embedding
+        order = np.argsort(-scores, kind="stable")[:top_k]
 
         results = []
-        for idx in order:
-            score = float(scores[idx])
+        for score_index in order:
+            score = float(scores[score_index])
             if score < min_score:
                 continue
+            idx = int(candidate_array[score_index])
             doc = dict(self._docs[int(idx)])
             doc["score"] = score
             results.append(doc)
@@ -817,6 +823,7 @@ class SessionRagManager:
         data_dir: Path | None = None,
         grace_ttl_seconds: int | None = None,
         hard_ttl_seconds: int | None = None,
+        max_cached_stores: int | None = None,
     ) -> None:
         self.sessions_dir = (data_dir or DATA_DIR) / "sessions"
         self.model_name = settings.embedding_model_name
@@ -830,15 +837,23 @@ class SessionRagManager:
             if hard_ttl_seconds is not None
             else settings.rag_session_hard_ttl_seconds
         )
+        self.max_cached_stores = (
+            max_cached_stores
+            if max_cached_stores is not None
+            else settings.rag_session_cache_max_stores
+        )
+        if self.max_cached_stores <= 0:
+            raise ValueError("max_cached_stores must be positive.")
         self._lock = threading.RLock()
         self._embedding_lock = threading.RLock()
         self._model = None
-        self._stores: dict[str, LocalVectorStore] = {}
+        self._stores: OrderedDict[str, LocalVectorStore] = OrderedDict()
         self._expires_at: dict[str, float] = {}
         self._active_operations: dict[str, int] = {}
         self._delete_pending: set[str] = set()
         self._cleanup_runs = 0
         self._cleaned_sessions = 0
+        self._evicted_stores = 0
         self._last_cleanup_at: str | None = None
 
     @staticmethod
@@ -903,6 +918,26 @@ class SessionRagManager:
             shutil.rmtree(session_dir, ignore_errors=False)
         return existed
 
+    def _evict_cached_stores_locked(self, exclude: set[str] | None = None) -> int:
+        protected = exclude or set()
+        evicted = 0
+        while len(self._stores) > self.max_cached_stores:
+            candidate = next(
+                (
+                    session_id
+                    for session_id in self._stores
+                    if session_id not in protected
+                    and not self._active_operations.get(session_id, 0)
+                ),
+                None,
+            )
+            if candidate is None:
+                break
+            self._stores.pop(candidate, None)
+            evicted += 1
+        self._evicted_stores += evicted
+        return evicted
+
     def begin_session_operation(self, session_id: UUID | str) -> str:
         normalized = self.normalize_session_id(session_id)
         with self._lock:
@@ -924,6 +959,7 @@ class SessionRagManager:
                 self._active_operations[normalized] = active - 1
                 return False
             if normalized not in self._delete_pending:
+                self._evict_cached_stores_locked()
                 return False
             self._delete_pending.discard(normalized)
             return self._delete_session_locked(normalized)
@@ -993,7 +1029,9 @@ class SessionRagManager:
                     embedder=self._embed,
                 )
                 self._stores[normalized] = store
+            self._stores.move_to_end(normalized)
             self._touch_session_locked(normalized)
+            self._evict_cached_stores_locked(exclude={normalized})
             return store
 
     def schedule_session_expiration(self, session_id: UUID | str) -> bool:
@@ -1093,6 +1131,8 @@ class SessionRagManager:
                 "pending_expiry": pending_expiry,
                 "active_operations": sum(self._active_operations.values()),
                 "pending_deletions": len(self._delete_pending),
+                "cache_max_stores": self.max_cached_stores,
+                "cache_evictions": self._evicted_stores,
                 "documents": documents,
                 "chunks": chunks,
                 "storage_bytes": storage_bytes,

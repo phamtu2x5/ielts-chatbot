@@ -47,6 +47,9 @@ the request schema for compatibility but are not trusted as session memory.
 Successful document affinity remains weak follow-up context and never forces a
 later question into that file. Deleting or expiring a session removes its memory,
 documents, embeddings, and cache together.
+Only a bounded LRU set of inactive session indexes stays loaded in CPU RAM;
+eviction never deletes on-disk session data. The shared BGE-M3 model and the
+LLM/OCR/layout GPU runtimes remain resident.
 The frontend and the 78-case capture runner use this single chat endpoint.
 
 ### Current chat patch boundaries
@@ -159,6 +162,7 @@ RAG_SESSION_GRACE_TTL_SECONDS=300
 RAG_SESSION_HARD_TTL_SECONDS=1800
 RAG_SESSION_MAX_DOCUMENTS=30
 RAG_SESSION_MAX_CHUNKS=15000
+RAG_SESSION_CACHE_MAX_STORES=4
 CHAT_RATE_LIMIT=30
 CHAT_RATE_WINDOW_SECONDS=60
 UPLOAD_RATE_LIMIT=30

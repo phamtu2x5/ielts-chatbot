@@ -78,6 +78,33 @@ class FakeVectorStore(rag.LocalVectorStore):
 
 
 class SessionRagManagerTests(unittest.TestCase):
+    def test_inactive_session_store_cache_is_bounded_without_deleting_data(self) -> None:
+        first_session = str(uuid4())
+        second_session = str(uuid4())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = rag.SessionRagManager(Path(temp_dir), max_cached_stores=1)
+            first = manager.get_store(first_session)
+            first_dir = first.data_dir
+            manager.get_store(second_session)
+
+            self.assertEqual(manager.stats()["cached_sessions"], 1)
+            self.assertEqual(manager.stats()["cache_evictions"], 1)
+            self.assertTrue(first_dir.exists())
+            self.assertIsNot(manager.get_store(first_session), first)
+
+    def test_active_session_store_is_not_evicted_until_operation_finishes(self) -> None:
+        first_session = str(uuid4())
+        second_session = str(uuid4())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = rag.SessionRagManager(Path(temp_dir), max_cached_stores=1)
+            manager.begin_session_operation(first_session)
+            manager.get_store(first_session)
+            manager.get_store(second_session)
+
+            self.assertEqual(manager.stats()["cached_sessions"], 2)
+            manager.end_session_operation(first_session)
+            self.assertEqual(manager.stats()["cached_sessions"], 1)
+
     def test_session_memory_is_isolated_and_deleted_with_rag_data(self) -> None:
         first_session = str(uuid4())
         second_session = str(uuid4())
@@ -1080,6 +1107,47 @@ class LocalVectorStoreTests(unittest.TestCase):
         self.assertTrue(
             all(item["document_id"] == "doc-b" for item in probe["results"])
         )
+
+    def test_dense_search_scores_only_filtered_candidate_embeddings(self) -> None:
+        class TrackingMatrix:
+            def __init__(self, values: np.ndarray) -> None:
+                self.values = values
+                self.indexed: object | None = None
+                self.full_matmul = False
+
+            @property
+            def shape(self) -> tuple[int, ...]:
+                return self.values.shape
+
+            def __getitem__(self, key: object) -> np.ndarray:
+                self.indexed = key
+                return self.values[key]
+
+            def __matmul__(self, other: np.ndarray) -> np.ndarray:
+                self.full_matmul = True
+                return self.values @ other
+
+        store = FakeVectorStore()
+        first = self._chunk("doc-a", "a.pdf", "first")
+        first["document_id"] = "doc-a"
+        second = self._chunk("doc-b", "b.pdf", "second")
+        second["document_id"] = "doc-b"
+        store._docs = [first, second]
+        embeddings = TrackingMatrix(
+            np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+        )
+        store._embeddings = embeddings
+
+        hits = store._dense_search(
+            "target",
+            top_k=5,
+            min_score=0.0,
+            document_ids=["doc-b"],
+        )
+
+        self.assertFalse(embeddings.full_matmul)
+        self.assertEqual(embeddings.indexed.tolist(), [1])
+        self.assertEqual([item["document_id"] for item in hits], ["doc-b"])
 
     def test_rrf_rewards_candidates_supported_by_multiple_retrievers(self) -> None:
         store = FakeVectorStore()

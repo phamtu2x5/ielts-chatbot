@@ -114,6 +114,9 @@ class AppSettings:
     rag_session_max_chunks: int = field(
         default_factory=lambda: int(os.getenv("RAG_SESSION_MAX_CHUNKS", "15000"))
     )
+    rag_session_cache_max_stores: int = field(
+        default_factory=lambda: int(os.getenv("RAG_SESSION_CACHE_MAX_STORES", "4"))
+    )
     chat_rate_limit: int = field(
         default_factory=lambda: int(os.getenv("CHAT_RATE_LIMIT", "30"))
     )
@@ -175,6 +178,7 @@ class AppSettings:
             for value in (
                 self.rag_session_max_documents,
                 self.rag_session_max_chunks,
+                self.rag_session_cache_max_stores,
                 self.chat_rate_limit,
                 self.chat_rate_window_seconds,
                 self.upload_rate_limit,
