@@ -1079,6 +1079,26 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.received_chunks[0]["metadata"]["parser_version"], "1.10.0")
             self.assertEqual(list(Path(temp_dir).iterdir()), [])
 
+    async def test_upload_is_rejected_when_document_uploads_are_disabled(self) -> None:
+        upload = UploadFile(
+            file=BytesIO(b"sample content"),
+            filename="sample.txt",
+            headers=Headers({"content-type": "text/plain"}),
+        )
+        disabled_settings = types.SimpleNamespace(
+            **{
+                **main.settings.__dict__,
+                "document_upload_enabled": False,
+            }
+        )
+
+        with patch.object(main, "settings", disabled_settings):
+            with self.assertRaises(main.HTTPException) as rejected:
+                await main.upload_document(TEST_SESSION_ID, upload)
+
+        self.assertEqual(rejected.exception.status_code, 503)
+        self.assertIn("tạm tắt", rejected.exception.detail)
+
     async def test_document_query_without_sources_does_not_fall_back_to_base_model(self) -> None:
         catalog = [
             {

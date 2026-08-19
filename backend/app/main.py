@@ -3529,6 +3529,7 @@ async def health() -> dict:
         "status": "ok",
         "runtime_status": (LAST_WARMUP_STATUS or {}).get("status", "not_warmed"),
         "model_readiness": (LAST_WARMUP_STATUS or {}).get("components", {}),
+        "document_upload_enabled": settings.document_upload_enabled,
         "rag_sessions_active": stats["active_sessions"],
         "rag_sessions_in_flight": stats["in_flight_sessions"],
         "rag_sessions_cached": stats["cached_sessions"],
@@ -3546,6 +3547,7 @@ async def admin_stats() -> dict:
         "rate_limits": REQUEST_RATE_LIMITER.stats(),
         "cleanup_errors": SESSION_CLEANUP_ERRORS,
         "limits": {
+            "document_upload_enabled": settings.document_upload_enabled,
             "chat_rate": settings.chat_rate_limit,
             "chat_window_seconds": settings.chat_rate_window_seconds,
             "upload_rate": settings.upload_rate_limit,
@@ -4051,6 +4053,12 @@ async def upload_document(
     session_id: UUID = Form(...),
     file: UploadFile = File(...),
 ) -> UploadResponse:
+    if not settings.document_upload_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="Tính năng tải tài liệu hiện đang tạm tắt.",
+        )
+
     upload_started = time.perf_counter()
     upload_timing: dict[str, Any] = {}
     timing_debug: dict[str, Any] = {"upload": {}}

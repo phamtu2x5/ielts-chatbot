@@ -109,7 +109,7 @@ The Colab runtime is configured for OCR with RapidOCR and PyTorch CUDA. DocLayou
 Use the companion notebook tracked at the repository root:
 
 ```text
-IELTS_Chatbot_Standalone_Colab.ipynb
+IELTS_Chatbot_BE.ipynb
 ```
 
 Set:
@@ -123,9 +123,10 @@ Add two private Colab Secrets before running the notebook:
 - `CLOUDFLARE_TUNNEL_TOKEN`: token of the named tunnel.
 - `IELTS_API_TOKEN`: a fixed random value containing at least 32 characters.
 
-Then run all cells. Colab starts only Ollama, BE + LLM + RAG/OCR/layout, and the
-named tunnel at `https://api.mywsite.online`; it does not install or start the
-frontend and does not run the 78-case regression.
+Then run all cells. The current notebook starts Ollama, the FastAPI backend and
+the named tunnel at `https://api.mywsite.online`. Document upload is disabled,
+so BGE-M3, RapidOCR and DocLayout-YOLO are not warmed into RAM/VRAM. The
+notebook does not install or start the frontend and does not run regression.
 
 ## Important Environment Variables
 
@@ -145,6 +146,7 @@ CORS_ALLOW_ORIGINS=http://localhost:8000,http://127.0.0.1:8000,https://mywsite.o
 API_AUTH_REQUIRED=false
 API_AUTH_TOKEN=
 DEBUG_PAYLOADS=false
+DOCUMENT_UPLOAD_ENABLED=true
 RAG_TOP_K=5
 RAG_MIN_SCORE=0.45
 RAG_PROBE_TOP_K=3
