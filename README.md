@@ -12,9 +12,8 @@ It includes:
 ## Architecture
 
 ```text
-Browser
--> React frontend
--> FastAPI backend
+External web frontend
+-> authenticated FastAPI backend
 -> Ollama
 -> Zkare IELTS chatbot model
 ```
@@ -134,7 +133,14 @@ Set:
 REPO_URL = "https://github.com/phamtu2x5/ielts-chatbot"
 ```
 
-Then run all cells. The last cell prints a `trycloudflare.com` URL for the frontend.
+Add two private Colab Secrets before running the notebook:
+
+- `CLOUDFLARE_TUNNEL_TOKEN`: token of the named tunnel.
+- `IELTS_API_TOKEN`: a fixed random value containing at least 32 characters.
+
+Then run all cells. Colab starts only Ollama, BE + LLM + RAG/OCR/layout, and the
+named tunnel at `https://api.mywsite.online`; it does not install or start the
+frontend and does not run the 78-case regression.
 
 ## Important Environment Variables
 
@@ -150,7 +156,10 @@ OLLAMA_THINK=false
 EMBEDDING_MODEL_NAME=BAAI/bge-m3
 UPLOAD_DIR=uploads
 RAG_DATA_DIR=data/rag
-CORS_ALLOW_ORIGINS=*
+CORS_ALLOW_ORIGINS=http://localhost:8000,http://127.0.0.1:8000,https://mywsite.online,https://www.mywsite.online
+API_AUTH_REQUIRED=false
+API_AUTH_TOKEN=
+DEBUG_PAYLOADS=true
 RAG_TOP_K=5
 RAG_MIN_SCORE=0.45
 RAG_PROBE_TOP_K=3
@@ -173,6 +182,15 @@ UPLOAD_MAX_CONCURRENCY=1
 
 Run the local JSON/NumPy RAG backend with exactly one Uvicorn worker. Its
 in-process locks do not coordinate writes across multiple worker processes.
+For the public Colab tunnel, the notebook overrides `API_AUTH_REQUIRED=true`
+and `DEBUG_PAYLOADS=false`. Protected requests use
+`Authorization: Bearer <IELTS_API_TOKEN>`. Do not embed this shared token in a
+public JavaScript bundle; the production web should inject it through a trusted
+server-side proxy or replace it with per-user authentication.
+
+`GET /health` is intentionally lightweight and public for Cloudflare health
+checks. Detailed disk/session/storage counters are available from the protected
+`GET /admin/stats` endpoint.
 
 Document ingestion settings:
 

@@ -5,7 +5,7 @@ import types
 import unittest
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from starlette.datastructures import Headers, UploadFile
 
@@ -220,6 +220,45 @@ class _FakeChatStore:
 
 
 class RuntimeLimitTests(unittest.TestCase):
+    def test_public_api_routes_require_auth_except_health(self) -> None:
+        protected_paths = {
+            "/admin/stats",
+            "/warmup",
+            "/chat/stream",
+            "/documents/upload",
+            "/rag/search",
+            "/rag/stats",
+            "/sessions/{session_id}/expire",
+            "/sessions/{session_id}",
+        }
+        routes = {route.path: route for route in main.app.routes}
+
+        for path in protected_paths:
+            dependencies = [item.call for item in routes[path].dependant.dependencies]
+            self.assertIn(main.require_api_auth, dependencies, path)
+        self.assertNotIn(
+            main.require_api_auth,
+            [item.call for item in routes["/health"].dependant.dependencies],
+        )
+
+    def test_api_auth_rejects_missing_or_invalid_bearer_token(self) -> None:
+        protected_settings = types.SimpleNamespace(
+            **{
+                **main.settings.__dict__,
+                "api_auth_required": True,
+                "api_auth_token": "a" * 32,
+            }
+        )
+        with patch.object(main, "settings", protected_settings):
+            with self.assertRaises(main.HTTPException) as missing:
+                main.require_api_auth(None)
+            with self.assertRaises(main.HTTPException) as invalid:
+                main.require_api_auth("Bearer wrong")
+            main.require_api_auth(f"Bearer {'a' * 32}")
+
+        self.assertEqual(missing.exception.status_code, 401)
+        self.assertEqual(invalid.exception.status_code, 401)
+
     def test_backend_session_memory_overrides_client_carried_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = rag.SessionRagManager(Path(temp_dir))
@@ -263,6 +302,51 @@ class RuntimeLimitTests(unittest.TestCase):
 
 
 class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_health_uses_in_memory_stats_without_disk_scan(self) -> None:
+        manager = Mock()
+        manager.runtime_stats.return_value = {
+            "active_sessions": 1,
+            "in_flight_sessions": 1,
+            "cached_sessions": 2,
+            "cache_evictions": 4,
+            "cleaned_sessions": 3,
+        }
+        manager.stats.side_effect = AssertionError("health must not scan session files")
+
+        with patch.object(main, "get_store_manager", return_value=manager):
+            payload = await main.health()
+
+        self.assertEqual(payload["rag_sessions_active"], 1)
+        self.assertEqual(payload["rag_sessions_cached"], 2)
+        manager.runtime_stats.assert_called_once_with()
+        manager.stats.assert_not_called()
+
+    async def test_production_stream_omits_debug_and_resource_probes(self) -> None:
+        prepared = main.ChatPreparation(
+            prompt=None,
+            static_response="Câu trả lời tĩnh.",
+            route_used="base_model",
+            sources=[],
+            debug={"internal": "not public"},
+            query_intent="direct",
+        )
+        production_settings = types.SimpleNamespace(
+            **{**main.settings.__dict__, "debug_payloads": False}
+        )
+        with (
+            patch.object(main, "settings", production_settings),
+            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+            patch.object(main, "resource_snapshot") as resource_snapshot,
+        ):
+            response = await main.chat_stream(_chat_request(message="xin chào"))
+            events = [json.loads(chunk) async for chunk in response.body_iterator]
+
+        metadata = [event for event in events if event["type"] == "metadata"][-1]
+        self.assertIsNone(metadata["debug"])
+        self.assertEqual(metadata["sources"], [])
+        self.assertIsNone(metadata["conversation_state"])
+        resource_snapshot.assert_not_called()
+
     async def test_explicit_attachment_translation_uses_its_generic_ocr_chunk(self) -> None:
         catalog = [
             {

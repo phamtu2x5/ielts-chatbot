@@ -849,6 +849,7 @@ class SessionRagManager:
         self._model = None
         self._stores: OrderedDict[str, LocalVectorStore] = OrderedDict()
         self._expires_at: dict[str, float] = {}
+        self._known_sessions: set[str] = set()
         self._active_operations: dict[str, int] = {}
         self._delete_pending: set[str] = set()
         self._cleanup_runs = 0
@@ -908,6 +909,7 @@ class SessionRagManager:
         session_dir = self.sessions_dir / normalized
         store = self._stores.pop(normalized, None)
         self._expires_at.pop(normalized, None)
+        self._known_sessions.discard(normalized)
         self._delete_pending.discard(normalized)
         existed = store is not None or session_dir.exists()
         if store is not None:
@@ -1010,6 +1012,7 @@ class SessionRagManager:
     def _touch_session_locked(self, normalized: str) -> None:
         session_dir = self.sessions_dir / normalized
         session_dir.mkdir(parents=True, exist_ok=True)
+        self._known_sessions.add(normalized)
         self._expires_at.pop(normalized, None)
         try:
             self._expiry_path(normalized).unlink()
@@ -1043,6 +1046,7 @@ class SessionRagManager:
                 return False
             expires_at = time.time() + self.grace_ttl_seconds
             self._expires_at[normalized] = expires_at
+            self._known_sessions.add(normalized)
             session_dir.mkdir(parents=True, exist_ok=True)
             self._expiry_path(normalized).write_text(str(expires_at), encoding="utf-8")
             return True
@@ -1058,6 +1062,7 @@ class SessionRagManager:
                         session_ids.add(self.normalize_session_id(session_dir.name))
                     except ValueError:
                         continue
+            self._known_sessions.update(session_ids)
             deleted = 0
             for normalized in session_ids:
                 if self._is_expired_locked(normalized, current_time):
@@ -1140,6 +1145,25 @@ class SessionRagManager:
                 "cleaned_sessions": self._cleaned_sessions,
                 "last_cleanup_at": self._last_cleanup_at,
                 "embedding_model": self.model_name,
+            }
+
+    def runtime_stats(self) -> Dict:
+        with self._lock:
+            pending_expiry = sum(
+                1 for session_id in self._known_sessions if session_id in self._expires_at
+            )
+            return {
+                "cached_sessions": len(self._stores),
+                "sessions": len(self._known_sessions),
+                "active_sessions": max(0, len(self._known_sessions) - pending_expiry),
+                "in_flight_sessions": len(self._active_operations),
+                "active_operations": sum(self._active_operations.values()),
+                "pending_deletions": len(self._delete_pending),
+                "cache_max_stores": self.max_cached_stores,
+                "cache_evictions": self._evicted_stores,
+                "cleanup_runs": self._cleanup_runs,
+                "cleaned_sessions": self._cleaned_sessions,
+                "last_cleanup_at": self._last_cleanup_at,
             }
 
 

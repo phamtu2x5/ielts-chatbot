@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import time
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -12,7 +13,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import aiofiles
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -217,18 +218,46 @@ def enforce_upload_rate(session_id: UUID = Form(...)) -> None:
         settings.upload_rate_window_seconds,
     )
 
-app = FastAPI(title="Standalone IELTS Chatbot", version="1.1.0", lifespan=lifespan)
+
+def require_api_auth(authorization: str | None = Header(default=None)) -> None:
+    if not settings.api_auth_required:
+        return
+    scheme, _, token = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(
+        token,
+        settings.api_auth_token,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="API authentication required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+app = FastAPI(
+    title="Standalone IELTS Chatbot",
+    version="1.1.0",
+    lifespan=lifespan,
+    docs_url=None if settings.api_auth_required else "/docs",
+    redoc_url=None if settings.api_auth_required else "/redoc",
+    openapi_url=None if settings.api_auth_required else "/openapi.json",
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.cors_allow_origins),
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
 def ollama_failure_detail(exc: Exception) -> dict[str, Any]:
+    if not settings.debug_payloads:
+        return {
+            "message": "Không thể kết nối hoặc nhận câu trả lời từ Ollama.",
+            "kind": exc.kind if isinstance(exc, OllamaRequestError) else type(exc).__name__,
+        }
     diagnostic = (
         exc.debug_detail()
         if isinstance(exc, OllamaRequestError)
@@ -3470,46 +3499,42 @@ async def prepare_chat(req: ChatRequest) -> ChatPreparation:
 
 @app.get("/health")
 async def health() -> dict:
-    stats = await run_in_threadpool(get_store_manager().stats)
-    rate_stats = REQUEST_RATE_LIMITER.stats()
+    stats = get_store_manager().runtime_stats()
     return {
         "status": "ok",
         "runtime_status": (LAST_WARMUP_STATUS or {}).get("status", "not_warmed"),
         "model_readiness": (LAST_WARMUP_STATUS or {}).get("components", {}),
-        "document_rag_documents": stats["documents"],
-        "document_rag_chunks": stats["chunks"],
-        "pdf_rag_documents": stats["documents"],
-        "pdf_rag_chunks": stats["chunks"],
-        "rag_sessions_total": stats["sessions"],
-        "rag_sessions_active": max(0, stats["sessions"] - stats["pending_expiry"]),
+        "rag_sessions_active": stats["active_sessions"],
+        "rag_sessions_in_flight": stats["in_flight_sessions"],
         "rag_sessions_cached": stats["cached_sessions"],
-        "rag_sessions_pending_expiry": stats["pending_expiry"],
+        "rag_cache_evictions_total": stats["cache_evictions"],
         "rag_sessions_cleaned_total": stats["cleaned_sessions"],
-        "rag_session_cleanup_runs": stats["cleanup_runs"],
         "rag_session_cleanup_errors": SESSION_CLEANUP_ERRORS,
-        "rag_session_last_cleanup_at": stats["last_cleanup_at"],
-        "rag_storage_bytes": stats["storage_bytes"],
-        "rag_storage_mb": round(stats["storage_bytes"] / (1024 * 1024), 2),
-        "rate_limit_buckets": rate_stats["buckets"],
-        "rate_limit_events": rate_stats["events"],
-        "chat_rate_limit": settings.chat_rate_limit,
-        "chat_rate_window_seconds": settings.chat_rate_window_seconds,
-        "upload_rate_limit": settings.upload_rate_limit,
-        "upload_rate_window_seconds": settings.upload_rate_window_seconds,
-        "rag_session_max_documents": settings.rag_session_max_documents,
-        "rag_session_max_chunks": settings.rag_session_max_chunks,
-        "chat_max_concurrency": settings.chat_max_concurrency,
-        "upload_max_concurrency": settings.upload_max_concurrency,
-        "backend_worker_mode": "single_process_required",
-        "ollama_api_url": settings.ollama_api_url,
-        "ollama_model": OLLAMA_MODEL,
-        "ollama_num_predict": OLLAMA_NUM_PREDICT,
-        "rag_session_grace_ttl_seconds": settings.rag_session_grace_ttl_seconds,
-        "rag_session_hard_ttl_seconds": settings.rag_session_hard_ttl_seconds,
     }
 
 
-@app.post("/warmup")
+@app.get("/admin/stats", dependencies=[Depends(require_api_auth)])
+async def admin_stats() -> dict:
+    stats = await run_in_threadpool(get_store_manager().stats)
+    return {
+        "rag": stats,
+        "rate_limits": REQUEST_RATE_LIMITER.stats(),
+        "cleanup_errors": SESSION_CLEANUP_ERRORS,
+        "limits": {
+            "chat_rate": settings.chat_rate_limit,
+            "chat_window_seconds": settings.chat_rate_window_seconds,
+            "upload_rate": settings.upload_rate_limit,
+            "upload_window_seconds": settings.upload_rate_window_seconds,
+            "session_max_documents": settings.rag_session_max_documents,
+            "session_max_chunks": settings.rag_session_max_chunks,
+            "chat_concurrency": settings.chat_max_concurrency,
+            "upload_concurrency": settings.upload_max_concurrency,
+        },
+        "backend_worker_mode": "single_process_required",
+    }
+
+
+@app.post("/warmup", dependencies=[Depends(require_api_auth)])
 async def warmup() -> dict:
     global LAST_WARMUP_STATUS
     started = time.perf_counter()
@@ -3622,14 +3647,17 @@ async def warmup() -> dict:
     }
 
 
-@app.post("/chat/stream", dependencies=[Depends(enforce_chat_rate)])
+@app.post(
+    "/chat/stream",
+    dependencies=[Depends(require_api_auth), Depends(enforce_chat_rate)],
+)
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
     if not req.message.strip():
         raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung câu hỏi")
     await CHAT_CONCURRENCY.acquire()
 
     async def generate_for_request(active_req: ChatRequest):
-        resource_debug = {"start": resource_snapshot()}
+        resource_debug = {"start": resource_snapshot()} if settings.debug_payloads else {}
         prepared: ChatPreparation | None = None
         delivered_parts: list[str] = []
 
@@ -3648,7 +3676,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             )
 
         def finish_resource_debug() -> None:
-            if "end" in resource_debug:
+            if not settings.debug_payloads or "end" in resource_debug:
                 return
             resource_debug["end"] = resource_snapshot()
             resource_debug["delta_mb"] = resource_delta(
@@ -3663,9 +3691,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             return stream_event(
                 "metadata",
                 route_used=prepared.route_used,
-                sources=prepared.sources,
-                debug=prepared.debug,
-                conversation_state=conversation_state_for_result(active_req, prepared).model_dump(),
+                sources=prepared.sources if settings.debug_payloads else [],
+                debug=prepared.debug if settings.debug_payloads else None,
+                conversation_state=(
+                    conversation_state_for_result(active_req, prepared).model_dump()
+                    if settings.debug_payloads
+                    else None
+                ),
             )
 
         try:
@@ -3980,7 +4012,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 @app.post(
     "/documents/upload",
     response_model=UploadResponse,
-    dependencies=[Depends(enforce_upload_rate)],
+    dependencies=[Depends(require_api_auth), Depends(enforce_upload_rate)],
 )
 async def upload_document(
     session_id: UUID = Form(...),
@@ -4089,12 +4121,16 @@ async def upload_document(
             document_type=document.metadata.get("document_type") or document.mime_type,
             chunks_processed=inserted,
             collection_stats=await run_in_threadpool(store.stats),
-            debug={
-                "timing": timing_debug,
-                "extraction": document.metadata.get("extraction_report", {}),
-                "structure": document.metadata.get("ielts_structure", {}).get("diagnostics", {}),
-                "outline": document.metadata.get("ielts_structure", {}).get("outline", {}),
-            },
+            debug=(
+                {
+                    "timing": timing_debug,
+                    "extraction": document.metadata.get("extraction_report", {}),
+                    "structure": document.metadata.get("ielts_structure", {}).get("diagnostics", {}),
+                    "outline": document.metadata.get("ielts_structure", {}).get("outline", {}),
+                }
+                if settings.debug_payloads
+                else None
+            ),
         )
     except HTTPException:
         raise
@@ -4113,7 +4149,11 @@ async def upload_document(
         file_path.unlink(missing_ok=True)
 
 
-@app.post("/rag/search", response_model=SearchResponse)
+@app.post(
+    "/rag/search",
+    response_model=SearchResponse,
+    dependencies=[Depends(require_api_auth)],
+)
 async def search(req: SearchRequest) -> SearchResponse:
     query = req.query.strip()
     if not query:
@@ -4132,7 +4172,11 @@ async def search(req: SearchRequest) -> SearchResponse:
     return SearchResponse(query=query, results=results)
 
 
-@app.get("/rag/stats", response_model=StatsResponse)
+@app.get(
+    "/rag/stats",
+    response_model=StatsResponse,
+    dependencies=[Depends(require_api_auth)],
+)
 async def stats(session_id: UUID) -> StatsResponse:
     manager = get_store_manager()
     await run_in_threadpool(manager.begin_session_operation, session_id)
@@ -4143,7 +4187,11 @@ async def stats(session_id: UUID) -> StatsResponse:
     return StatsResponse(session_id=session_id, **session_stats)
 
 
-@app.post("/sessions/{session_id}/expire", response_model=SessionExpireResponse)
+@app.post(
+    "/sessions/{session_id}/expire",
+    response_model=SessionExpireResponse,
+    dependencies=[Depends(require_api_auth)],
+)
 async def expire_session(session_id: UUID) -> SessionExpireResponse:
     manager = get_store_manager()
     scheduled = await run_in_threadpool(manager.schedule_session_expiration, session_id)
@@ -4154,7 +4202,11 @@ async def expire_session(session_id: UUID) -> SessionExpireResponse:
     )
 
 
-@app.delete("/sessions/{session_id}", response_model=SessionDeleteResponse)
+@app.delete(
+    "/sessions/{session_id}",
+    response_model=SessionDeleteResponse,
+    dependencies=[Depends(require_api_auth)],
+)
 async def delete_session(session_id: UUID) -> SessionDeleteResponse:
     deleted = await run_in_threadpool(get_store_manager().delete_session, session_id)
     REQUEST_RATE_LIMITER.clear_session(session_id)

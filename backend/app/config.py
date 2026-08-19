@@ -30,8 +30,18 @@ class AppSettings:
     upload_dir: Path = field(default_factory=lambda: _env_path("UPLOAD_DIR", "uploads"))
     rag_data_dir: Path = field(default_factory=lambda: _env_path("RAG_DATA_DIR", "data/rag"))
     cors_allow_origins: tuple[str, ...] = field(
-        default_factory=lambda: _env_csv("CORS_ALLOW_ORIGINS", "*")
+        default_factory=lambda: _env_csv(
+            "CORS_ALLOW_ORIGINS",
+            "http://localhost:8000,http://127.0.0.1:8000",
+        )
     )
+    api_auth_required: bool = field(
+        default_factory=lambda: _env_bool("API_AUTH_REQUIRED", False)
+    )
+    api_auth_token: str = field(
+        default_factory=lambda: os.getenv("API_AUTH_TOKEN", "").strip()
+    )
+    debug_payloads: bool = field(default_factory=lambda: _env_bool("DEBUG_PAYLOADS", True))
 
     ollama_api_url: str = field(
         default_factory=lambda: os.getenv("OLLAMA_API_URL", "http://127.0.0.1:11434/api/generate")
@@ -140,6 +150,12 @@ class AppSettings:
     warmup_embedding: bool = field(default_factory=lambda: _env_bool("WARMUP_EMBEDDING", True))
 
     def __post_init__(self) -> None:
+        if self.api_auth_required and len(self.api_auth_token) < 32:
+            raise ValueError(
+                "API_AUTH_TOKEN must contain at least 32 characters when auth is required."
+            )
+        if self.api_auth_required and "*" in self.cors_allow_origins:
+            raise ValueError("CORS_ALLOW_ORIGINS cannot contain '*' when API auth is required.")
         if self.ollama_num_predict <= 0 or self.ollama_num_ctx <= 0:
             raise ValueError("OLLAMA_NUM_PREDICT and OLLAMA_NUM_CTX must be positive.")
         if self.ollama_timeout_seconds <= 0:
