@@ -70,6 +70,7 @@ from .resource_debug import resource_delta, resource_snapshot
 from .schemas import (
     ChatAffinity,
     ChatConversationState,
+    ChatMessage,
     ChatRequest,
     ChatUserFact,
     SearchRequest,
@@ -169,6 +170,34 @@ class SlidingWindowRateLimiter:
 
 
 REQUEST_RATE_LIMITER = SlidingWindowRateLimiter()
+
+
+class SessionChatLockPool:
+    def __init__(self) -> None:
+        self._guard = asyncio.Lock()
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._users: dict[str, int] = {}
+
+    @asynccontextmanager
+    async def hold(self, session_id: UUID) -> AsyncIterator[None]:
+        key = str(session_id)
+        async with self._guard:
+            lock = self._locks.setdefault(key, asyncio.Lock())
+            self._users[key] = self._users.get(key, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            async with self._guard:
+                remaining = self._users.get(key, 1) - 1
+                if remaining <= 0:
+                    self._users.pop(key, None)
+                    self._locks.pop(key, None)
+                else:
+                    self._users[key] = remaining
+
+
+SESSION_CHAT_LOCKS = SessionChatLockPool()
 
 
 def enforce_chat_rate(req: ChatRequest) -> None:
@@ -1976,6 +2005,54 @@ def conversation_state_for_result(
     return state
 
 
+def backend_session_request(req: ChatRequest) -> ChatRequest:
+    payload = get_store_manager().read_session_memory(req.session_id)
+    try:
+        messages = [
+            ChatMessage.model_validate(message)
+            for message in payload.get("messages", [])
+        ]
+        raw_state = payload.get("conversation_state")
+        state = ChatConversationState.model_validate(raw_state) if raw_state else None
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Session memory is invalid.") from exc
+    return req.model_copy(
+        update={
+            "conversation_history": messages or None,
+            "conversation_state": state,
+        }
+    )
+
+
+def persist_session_turn(
+    req: ChatRequest,
+    prepared: "ChatPreparation",
+    assistant_answer: str,
+) -> None:
+    if not assistant_answer.strip():
+        return
+    history = list(req.conversation_history or [])
+    history.extend(
+        [
+            ChatMessage(role="user", content=req.message),
+            ChatMessage(role="assistant", content=assistant_answer[:20_000]),
+        ]
+    )
+    history = history[-20:]
+    state = conversation_state_for_result(req, prepared)
+    get_store_manager().write_session_memory(
+        req.session_id,
+        [message.model_dump() for message in history],
+        state.model_dump(),
+    )
+    prepared.debug["session_memory"] = {
+        "source": "backend",
+        "messages": len(history),
+        "user_facts": len(state.user_facts),
+        "rag_document_affinity": len(state.rag_affinity.document_ids),
+    }
+
+
 def _markdown_table(table: dict[str, Any]) -> str:
     columns = table.get("columns") or []
     rows = table.get("rows") or []
@@ -3551,9 +3628,24 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung câu hỏi")
     await CHAT_CONCURRENCY.acquire()
 
-    async def generate():
+    async def generate_for_request(active_req: ChatRequest):
         resource_debug = {"start": resource_snapshot()}
         prepared: ChatPreparation | None = None
+        delivered_parts: list[str] = []
+
+        def token_event(token: str) -> str:
+            delivered_parts.append(token)
+            return stream_event("token", token=token)
+
+        async def persist_successful_turn() -> None:
+            if prepared is None:
+                return
+            await run_in_threadpool(
+                persist_session_turn,
+                active_req,
+                prepared,
+                "".join(delivered_parts),
+            )
 
         def finish_resource_debug() -> None:
             if "end" in resource_debug:
@@ -3573,27 +3665,27 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 route_used=prepared.route_used,
                 sources=prepared.sources,
                 debug=prepared.debug,
-                conversation_state=conversation_state_for_result(req, prepared).model_dump(),
+                conversation_state=conversation_state_for_result(active_req, prepared).model_dump(),
             )
 
         try:
             yield stream_event("status", message="Đang phân tích câu hỏi...")
-            prepared = await prepare_chat(req)
-            prepared.debug["session_id"] = str(req.session_id)
-            await collect_user_fact_updates(req, prepared)
+            prepared = await prepare_chat(active_req)
+            prepared.debug["session_id"] = str(active_req.session_id)
+            await collect_user_fact_updates(active_req, prepared)
             if prepared.static_response is not None:
                 prepared.debug["delivery"] = {
                     "endpoint": "static",
                     "mode": "buffered_then_streamed",
                     "buffer_reason": "static_response",
                 }
-            elif requires_reviewed_generation(prepared, req.message):
+            elif requires_reviewed_generation(prepared, active_req.message):
                 prepared.debug["delivery"] = {
                     "endpoint": (
                         "chat" if prepared.route_used == "base_model" else "generate"
                     ),
                     "mode": "buffered_then_streamed",
-                    "buffer_reason": response_buffer_reason(prepared, req.message),
+                    "buffer_reason": response_buffer_reason(prepared, active_req.message),
                 }
             else:
                 prepared.debug["delivery"] = {
@@ -3604,14 +3696,15 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield metadata_event()
             if prepared.static_response is not None:
                 async for token in buffered_response_chunks(prepared.static_response):
-                    yield stream_event("token", token=token)
+                    yield token_event(token)
                 finish_resource_debug()
+                await persist_successful_turn()
                 yield metadata_event()
                 yield stream_event("done")
                 return
 
             yield stream_event("status", message="Đang soạn câu trả lời...")
-            if requires_reviewed_generation(prepared, req.message):
+            if requires_reviewed_generation(prepared, active_req.message):
                 direct_reviewed = (
                     prepared.query_intent == "direct"
                     and prepared.route_used == "base_model"
@@ -3620,24 +3713,24 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     direct_reviewed and settings.ollama_chat_fallback
                 )
                 if direct_reviewed:
-                    previous_answer_source = direct_conversation_source(req)
+                    previous_answer_source = direct_conversation_source(active_req)
                     generation_debug = prepared.debug.setdefault("direct_generation", {})
-                    direct_writing = is_direct_writing_request(req.message)
+                    direct_writing = is_direct_writing_request(active_req.message)
                     direct_source_available = True
                     if direct_writing:
                         source_decision = await classify_direct_source(
-                            req.message,
-                            req.conversation_history,
+                            active_req.message,
+                            active_req.conversation_history,
                         )
                         source_debug = source_decision.to_debug()
                         source_debug["method"] = "semantic_current_and_history"
-                        source_debug["history_included"] = bool(req.conversation_history)
+                        source_debug["history_included"] = bool(active_req.conversation_history)
                         source_debug["blocking"] = False
                         generation_debug["source_sufficiency"] = source_debug
                         direct_source_available = source_decision.source == "available"
-                        if direct_source_available and req.conversation_history and any(
+                        if direct_source_available and active_req.conversation_history and any(
                             message.role == "assistant"
-                            for message in req.conversation_history
+                            for message in active_req.conversation_history
                         ):
                             previous_answer_source = "conversation"
                         elif not direct_source_available:
@@ -3649,13 +3742,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     if direct_writing and direct_source_available:
                         primary_output_contract = [
                             "- The requested task source is available. Apply the Writing constraints below."
-                        ] + writing_output_contract(req.message).prompt_lines()
+                        ] + writing_output_contract(active_req.message).prompt_lines()
                     try:
                         initial_answer = await query_ollama_chat(
                             direct_chat_messages(
-                                req.message,
-                                req.conversation_history,
-                                user_profile_context(req),
+                                active_req.message,
+                                active_req.conversation_history,
+                                user_profile_context(active_req),
                                 previous_answer_source=previous_answer_source,
                                 output_contract=primary_output_contract,
                             ),
@@ -3671,7 +3764,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             raise
                         initial_answer = await direct_reviewed_generation_fallback(
                             prepared,
-                            req,
+                            active_req,
                             exc.kind,
                             previous_answer_source,
                             direct_source_available,
@@ -3693,9 +3786,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         try:
                             retry_answer = await query_ollama_chat(
                                 direct_chat_messages(
-                                    req.message,
-                                    req.conversation_history,
-                                    user_profile_context(req),
+                                    active_req.message,
+                                    active_req.conversation_history,
+                                    user_profile_context(active_req),
                                     previous_answer_source=previous_answer_source,
                                     output_contract=output_contract,
                                 ),
@@ -3716,7 +3809,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     answer = (
                         await generate_answer(
                             prepared,
-                            req.message,
+                            active_req.message,
                             initial_answer=initial_answer,
                             initial_done_reason=active_response_debug.get("done_reason"),
                             direct_source_available=direct_source_available,
@@ -3726,12 +3819,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         else ""
                     )
                 else:
-                    answer = await generate_answer(prepared, req.message)
+                    answer = await generate_answer(prepared, active_req.message)
                 if not answer.strip():
-                    answer = generation_fallback(prepared, req.message)
+                    answer = generation_fallback(prepared, active_req.message)
                 async for token in buffered_response_chunks(answer):
-                    yield stream_event("token", token=token)
+                    yield token_event(token)
                 finish_resource_debug()
+                await persist_successful_turn()
                 yield metadata_event()
                 yield stream_event("done")
                 return
@@ -3757,7 +3851,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     if visible:
                         has_token = True
                         streamed_substantive = streamed_substantive or bool(visible.strip())
-                        yield stream_event("token", token=visible)
+                        yield token_event(visible)
             except OllamaRequestError as exc:
                 if exc.kind != "prompt_echo" or has_token:
                     raise
@@ -3771,7 +3865,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         break
             if pending_suffix:
                 has_token = True
-                yield stream_event("token", token=pending_suffix)
+                yield token_event(pending_suffix)
             if stream_cleanup:
                 prepared.debug.setdefault("generation", {})[
                     "stream_cleanup"
@@ -3792,10 +3886,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     if direct_fallback:
                         fallback_answer = await query_ollama_chat(
                             direct_chat_messages(
-                                req.message,
-                                req.conversation_history,
-                                user_profile_context(req),
-                                previous_answer_source=direct_conversation_source(req),
+                                active_req.message,
+                                active_req.conversation_history,
+                                user_profile_context(active_req),
+                                previous_answer_source=direct_conversation_source(active_req),
                             ),
                             temperature=temperature,
                         )
@@ -3818,7 +3912,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     )
                     raise
                 if not fallback_answer.strip():
-                    fallback_answer = generation_fallback(prepared, req.message)
+                    fallback_answer = generation_fallback(prepared, active_req.message)
                 generation_debug.update(
                     {
                         "fallback_used": True,
@@ -3834,8 +3928,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     "buffer_reason": "stream_fallback",
                 }
                 async for token in buffered_response_chunks(fallback_answer):
-                    yield stream_event("token", token=token)
+                    yield token_event(token)
             finish_resource_debug()
+            await persist_successful_turn()
             yield metadata_event()
             yield stream_event("done")
         except Exception as exc:
@@ -3850,7 +3945,26 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 message="Không thể tạo câu trả lời lúc này. Vui lòng thử lại.",
                 detail=failure_detail,
             )
+    async def generate():
+        manager = get_store_manager()
+        operation_started = False
+        try:
+            async with SESSION_CHAT_LOCKS.hold(req.session_id):
+                await run_in_threadpool(manager.begin_session_operation, req.session_id)
+                operation_started = True
+                active_req = await run_in_threadpool(backend_session_request, req)
+                async for event in generate_for_request(active_req):
+                    yield event
+        except Exception as exc:
+            logger.exception("Session chat lifecycle failed")
+            yield stream_event(
+                "error",
+                message="Không thể sử dụng phiên này lúc này. Vui lòng thử lại.",
+                detail=ollama_failure_detail(exc),
+            )
         finally:
+            if operation_started:
+                await run_in_threadpool(manager.end_session_operation, req.session_id)
             CHAT_CONCURRENCY.release()
 
     return StreamingResponse(
@@ -3884,8 +3998,12 @@ async def upload_document(
     request_id = uuid4().hex
     file_path = UPLOAD_DIR / f"{request_id}-{safe_name}"
     max_bytes = DOCUMENT_PROCESSOR.config.max_upload_mb * 1024 * 1024
+    manager = get_store_manager()
+    operation_started = False
 
     try:
+        await run_in_threadpool(manager.begin_session_operation, session_id)
+        operation_started = True
         save_started = time.perf_counter()
         total_bytes = 0
         async with aiofiles.open(file_path, "wb") as out:
@@ -3989,6 +4107,8 @@ async def upload_document(
         logger.exception("Unexpected document processing failure for %s", safe_name)
         raise HTTPException(status_code=500, detail="Không thể xử lý tài liệu này.") from exc
     finally:
+        if operation_started:
+            await run_in_threadpool(manager.end_session_operation, session_id)
         UPLOAD_CONCURRENCY.release()
         file_path.unlink(missing_ok=True)
 
@@ -3998,18 +4118,28 @@ async def search(req: SearchRequest) -> SearchResponse:
     query = req.query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Vui lòng nhập nội dung tìm kiếm")
-    results = await run_in_threadpool(
-        get_store(req.session_id).search,
-        query,
-        req.top_k,
-        req.document_ids,
-    )
+    manager = get_store_manager()
+    await run_in_threadpool(manager.begin_session_operation, req.session_id)
+    try:
+        results = await run_in_threadpool(
+            get_store(req.session_id).search,
+            query,
+            req.top_k,
+            req.document_ids,
+        )
+    finally:
+        await run_in_threadpool(manager.end_session_operation, req.session_id)
     return SearchResponse(query=query, results=results)
 
 
 @app.get("/rag/stats", response_model=StatsResponse)
 async def stats(session_id: UUID) -> StatsResponse:
-    session_stats = await run_in_threadpool(get_store(session_id).stats)
+    manager = get_store_manager()
+    await run_in_threadpool(manager.begin_session_operation, session_id)
+    try:
+        session_stats = await run_in_threadpool(get_store(session_id).stats)
+    finally:
+        await run_in_threadpool(manager.end_session_operation, session_id)
     return StatsResponse(session_id=session_id, **session_stats)
 
 

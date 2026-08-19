@@ -40,14 +40,13 @@ Upload text/PDF/DOCX/image
 -> deterministic renderer or Ollama answer with grounded context
 ```
 
-`/chat/stream` accepts an optional client-carried `conversation_state`. The
-backend returns the updated state after each turn so successful document
-affinity can be offered to target resolution as weak follow-up context without
-mixing it into the direct/RAG gateway or forcing later questions into that file.
-User-provided profile facts are stored separately from document affinity. Only
-successful direct or grounded RAG results may update the trusted route, intent,
-and affinity; clarification, no-match, and classifier failures preserve the
-previous trusted state.
+Conversation history, user facts, and document affinity are owned by the backend
+and stored under the same session directory as that session's RAG index. The
+client-carried `conversation_history` and `conversation_state` fields remain in
+the request schema for compatibility but are not trusted as session memory.
+Successful document affinity remains weak follow-up context and never forces a
+later question into that file. Deleting or expiring a session removes its memory,
+documents, embeddings, and cache together.
 The frontend and the 78-case capture runner use this single chat endpoint.
 
 ### Current chat patch boundaries

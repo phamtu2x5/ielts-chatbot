@@ -78,6 +78,45 @@ class FakeVectorStore(rag.LocalVectorStore):
 
 
 class SessionRagManagerTests(unittest.TestCase):
+    def test_session_memory_is_isolated_and_deleted_with_rag_data(self) -> None:
+        first_session = str(uuid4())
+        second_session = str(uuid4())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = rag.SessionRagManager(Path(temp_dir))
+            manager.begin_session_operation(first_session)
+            manager.write_session_memory(
+                first_session,
+                [{"role": "user", "content": "first session memory"}],
+                {"last_route": "direct"},
+            )
+            manager.end_session_operation(first_session)
+
+            self.assertEqual(
+                manager.read_session_memory(first_session)["messages"][0]["content"],
+                "first session memory",
+            )
+            self.assertEqual(
+                manager.read_session_memory(second_session),
+                {"messages": [], "conversation_state": None},
+            )
+            self.assertTrue(manager.delete_session(first_session))
+            self.assertFalse((Path(temp_dir) / "sessions" / first_session).exists())
+
+    def test_delete_waits_for_active_session_operation_and_prevents_resurrection(self) -> None:
+        session_id = str(uuid4())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = rag.SessionRagManager(Path(temp_dir))
+            manager.begin_session_operation(session_id)
+            session_dir = Path(temp_dir) / "sessions" / session_id
+
+            self.assertTrue(manager.delete_session(session_id))
+            with self.assertRaisesRegex(RuntimeError, "deletion"):
+                manager.begin_session_operation(session_id)
+
+            (session_dir / "documents.json").write_text("[]", encoding="utf-8")
+            self.assertTrue(manager.end_session_operation(session_id))
+            self.assertFalse(session_dir.exists())
+
     def test_sessions_have_separate_indexes_and_share_one_embedding_model(self) -> None:
         model = Mock()
         model.encode.side_effect = lambda texts, normalize_embeddings: np.asarray(

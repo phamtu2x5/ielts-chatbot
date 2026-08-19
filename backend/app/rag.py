@@ -810,6 +810,7 @@ class LocalVectorStore:
 
 class SessionRagManager:
     EXPIRY_FILE = ".expires_at"
+    MEMORY_FILE = "memory.json"
 
     def __init__(
         self,
@@ -834,6 +835,8 @@ class SessionRagManager:
         self._model = None
         self._stores: dict[str, LocalVectorStore] = {}
         self._expires_at: dict[str, float] = {}
+        self._active_operations: dict[str, int] = {}
+        self._delete_pending: set[str] = set()
         self._cleanup_runs = 0
         self._cleaned_sessions = 0
         self._last_cleanup_at: str | None = None
@@ -861,6 +864,9 @@ class SessionRagManager:
     def _expiry_path(self, normalized: str) -> Path:
         return self.sessions_dir / normalized / self.EXPIRY_FILE
 
+    def _memory_path(self, normalized: str) -> Path:
+        return self.sessions_dir / normalized / self.MEMORY_FILE
+
     def _read_expiry_locked(self, normalized: str) -> float | None:
         expires_at = self._expires_at.get(normalized)
         if expires_at is not None:
@@ -887,6 +893,7 @@ class SessionRagManager:
         session_dir = self.sessions_dir / normalized
         store = self._stores.pop(normalized, None)
         self._expires_at.pop(normalized, None)
+        self._delete_pending.discard(normalized)
         existed = store is not None or session_dir.exists()
         if store is not None:
             with store._lock:
@@ -895,6 +902,74 @@ class SessionRagManager:
         elif session_dir.exists():
             shutil.rmtree(session_dir, ignore_errors=False)
         return existed
+
+    def begin_session_operation(self, session_id: UUID | str) -> str:
+        normalized = self.normalize_session_id(session_id)
+        with self._lock:
+            if normalized in self._delete_pending:
+                raise RuntimeError("Session deletion is already in progress.")
+            if self._is_expired_locked(normalized, time.time()):
+                self._delete_session_locked(normalized)
+            self._touch_session_locked(normalized)
+            self._active_operations[normalized] = self._active_operations.get(normalized, 0) + 1
+            return normalized
+
+    def end_session_operation(self, session_id: UUID | str) -> bool:
+        normalized = self.normalize_session_id(session_id)
+        with self._lock:
+            active = self._active_operations.get(normalized, 0)
+            if active <= 1:
+                self._active_operations.pop(normalized, None)
+            else:
+                self._active_operations[normalized] = active - 1
+                return False
+            if normalized not in self._delete_pending:
+                return False
+            self._delete_pending.discard(normalized)
+            return self._delete_session_locked(normalized)
+
+    def read_session_memory(self, session_id: UUID | str) -> Dict:
+        normalized = self.normalize_session_id(session_id)
+        with self._lock:
+            path = self._memory_path(normalized)
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                return {"messages": [], "conversation_state": None}
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError("Session memory cannot be loaded.") from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError("Session memory is invalid.")
+            return payload
+
+    def write_session_memory(
+        self,
+        session_id: UUID | str,
+        messages: List[Dict],
+        conversation_state: Dict,
+    ) -> None:
+        normalized = self.normalize_session_id(session_id)
+        with self._lock:
+            if normalized in self._delete_pending:
+                return
+            session_dir = self.sessions_dir / normalized
+            session_dir.mkdir(parents=True, exist_ok=True)
+            path = self._memory_path(normalized)
+            temp_path = path.with_suffix(".json.tmp")
+            payload = {
+                "messages": messages,
+                "conversation_state": conversation_state,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            try:
+                temp_path.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                temp_path.replace(path)
+            finally:
+                temp_path.unlink(missing_ok=True)
+            os.utime(session_dir, None)
 
     def _touch_session_locked(self, normalized: str) -> None:
         session_dir = self.sessions_dir / normalized
@@ -948,7 +1023,10 @@ class SessionRagManager:
             deleted = 0
             for normalized in session_ids:
                 if self._is_expired_locked(normalized, current_time):
-                    deleted += int(self._delete_session_locked(normalized))
+                    if self._active_operations.get(normalized, 0):
+                        self._delete_pending.add(normalized)
+                    else:
+                        deleted += int(self._delete_session_locked(normalized))
             self._cleanup_runs += 1
             self._cleaned_sessions += deleted
             self._last_cleanup_at = datetime.now(timezone.utc).isoformat()
@@ -957,6 +1035,10 @@ class SessionRagManager:
     def delete_session(self, session_id: UUID | str) -> bool:
         normalized = self.normalize_session_id(session_id)
         with self._lock:
+            if self._active_operations.get(normalized, 0):
+                existed = normalized in self._stores or (self.sessions_dir / normalized).exists()
+                self._delete_pending.add(normalized)
+                return existed
             return self._delete_session_locked(normalized)
 
     def warmup(self) -> Dict:
@@ -1009,6 +1091,8 @@ class SessionRagManager:
                 "sessions": session_count,
                 "cached_sessions": len(self._stores),
                 "pending_expiry": pending_expiry,
+                "active_operations": sum(self._active_operations.values()),
+                "pending_deletions": len(self._delete_pending),
                 "documents": documents,
                 "chunks": chunks,
                 "storage_bytes": storage_bytes,

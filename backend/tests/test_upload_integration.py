@@ -51,7 +51,7 @@ except ImportError:
     sentence_transformers_stub.SentenceTransformer = object
     sys.modules["sentence_transformers"] = sentence_transformers_stub
 
-from app import main
+from app import main, rag
 from app.document_pipeline.models import DocumentChunk, ProcessedDocument, ProcessedPage
 from app.llm import IntentClassifierDecision, RouteGatewayDecision, TargetResolverDecision
 
@@ -220,6 +220,33 @@ class _FakeChatStore:
 
 
 class RuntimeLimitTests(unittest.TestCase):
+    def test_backend_session_memory_overrides_client_carried_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = rag.SessionRagManager(Path(temp_dir))
+            manager.begin_session_operation(TEST_SESSION_ID)
+            manager.write_session_memory(
+                TEST_SESSION_ID,
+                [{"role": "assistant", "content": "trusted backend memory"}],
+                {"last_route": "direct", "last_intent": "direct"},
+            )
+            request = _chat_request(
+                message="Tiếp tục",
+                conversation_history=[
+                    {"role": "assistant", "content": "stale client memory"}
+                ],
+                conversation_state={"last_route": "rag", "last_intent": "semantic_qa"},
+            )
+
+            with patch.object(main, "get_store_manager", return_value=manager):
+                active_request = main.backend_session_request(request)
+
+            self.assertEqual(
+                active_request.conversation_history[0].content,
+                "trusted backend memory",
+            )
+            self.assertEqual(active_request.conversation_state.last_route, "direct")
+            manager.end_session_operation(TEST_SESSION_ID)
+
     def test_sliding_window_rate_limit_recovers_after_window(self) -> None:
         limiter = main.SlidingWindowRateLimiter()
         session_id = main.UUID(TEST_SESSION_ID)
@@ -407,6 +434,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("show_table", without_table)
 
     async def asyncSetUp(self) -> None:
+        main.get_store_manager().delete_session(TEST_SESSION_ID)
         self.intent_patcher = patch.object(
             main,
             "classify_rag_intent",
@@ -438,6 +466,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         self.intent_patcher.stop()
         self.target_patcher.stop()
+        main.get_store_manager().delete_session(TEST_SESSION_ID)
 
     def test_chat_stream_is_the_only_chat_endpoint(self) -> None:
         paths = {route.path for route in main.app.routes}
@@ -3022,23 +3051,28 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         generate_model = AsyncMock(return_value="Không được gọi.")
         request = _chat_request(
             message="Viết lại câu trả lời vừa rồi.",
-            conversation_history=[
-                {"role": "user", "content": "Viết một câu giới thiệu."},
-                {"role": "assistant", "content": "I enjoy learning English."},
-            ],
-            conversation_state={
-                "last_route": "direct",
-                "last_intent": "direct",
-            },
         )
-
-        with (
-            patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
-            patch.object(main, "query_ollama", generate_model),
-            patch.object(main, "query_ollama_chat", chat_model),
-        ):
-            response = await main.chat_stream(request)
-            events = [json.loads(chunk) async for chunk in response.body_iterator]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = rag.SessionRagManager(Path(temp_dir))
+            manager.begin_session_operation(TEST_SESSION_ID)
+            manager.write_session_memory(
+                TEST_SESSION_ID,
+                [
+                    {"role": "user", "content": "Viết một câu giới thiệu."},
+                    {"role": "assistant", "content": "I enjoy learning English."},
+                ],
+                {"last_route": "direct", "last_intent": "direct"},
+            )
+            manager.end_session_operation(TEST_SESSION_ID)
+            with (
+                patch.object(main, "get_store_manager", return_value=manager),
+                patch.object(main, "prepare_chat", AsyncMock(return_value=prepared)),
+                patch.object(main, "query_ollama", generate_model),
+                patch.object(main, "query_ollama_chat", chat_model),
+            ):
+                response = await main.chat_stream(request)
+                events = [json.loads(chunk) async for chunk in response.body_iterator]
+            persisted_memory = manager.read_session_memory(TEST_SESSION_ID)
 
         self.assertEqual(
             "".join(event["token"] for event in events if event["type"] == "token"),
@@ -3062,6 +3096,16 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(generation_debug["fallback_used"])
         self.assertIn("response_debug", chat_model.await_args.kwargs)
         self.assertIn("primary_response", generation_debug)
+        self.assertEqual(
+            persisted_memory["messages"][-2:],
+            [
+                {"role": "user", "content": "Viết lại câu trả lời vừa rồi."},
+                {
+                    "role": "assistant",
+                    "content": "I enjoy learning English every day.",
+                },
+            ],
+        )
         self.assertEqual(
             metadata["debug"]["delivery"],
             {
@@ -3145,16 +3189,23 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         request = _chat_request(
             message="Hãy viết một đoạn văn khoảng 150 từ bằng tiếng Anh trả lời đề bài vừa gửi.",
-            conversation_history=[
-                {"role": "user", "content": "Dịch đề bài về government spending."},
-                {"role": "assistant", "content": "Bản dịch đề bài."},
-            ],
-            conversation_state={
+        )
+        expected_history = [
+            main.ChatMessage(role="user", content="Dịch đề bài về government spending."),
+            main.ChatMessage(role="assistant", content="Bản dịch đề bài."),
+        ]
+        manager = main.get_store_manager()
+        manager.begin_session_operation(TEST_SESSION_ID)
+        manager.write_session_memory(
+            TEST_SESSION_ID,
+            [message.model_dump() for message in expected_history],
+            {
                 "last_route": "rag",
                 "last_intent": "translate_content",
                 "rag_affinity": {"document_ids": ["image-topic"]},
             },
         )
+        manager.end_session_operation(TEST_SESSION_ID)
         source_decision = types.SimpleNamespace(
             source="available",
             to_debug=lambda: {"source": "available", "attempts": 1},
@@ -3176,7 +3227,7 @@ class UploadIntegrationTests(unittest.IsolatedAsyncioTestCase):
         generate_model.assert_not_awaited()
         source_classifier.assert_awaited_once_with(
             request.message,
-            request.conversation_history,
+            expected_history,
         )
         metadata = [event for event in events if event["type"] == "metadata"][-1]
         writing_debug = metadata["debug"]["generation"]["writing_contract"]
