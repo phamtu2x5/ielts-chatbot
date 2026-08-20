@@ -77,9 +77,13 @@ class DirectApiTests(unittest.TestCase):
                 ),
                 TestClient(main.app) as client,
             ):
+                headers = {}
+                if main.settings.api_auth_required:
+                    headers["Authorization"] = f"Bearer {main.settings.api_auth_token}"
                 response = client.post(
                     "/chat/stream",
                     json={"session_id": str(session_id), "message": "xin chào"},
+                    headers=headers,
                 )
 
             self.assertEqual(response.status_code, 200)
