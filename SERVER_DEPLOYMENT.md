@@ -5,6 +5,28 @@ FastAPI and Ollama listen on localhost only. The existing named Cloudflare
 Tunnel publishes `https://api.mywsite.online` without opening either local API
 port to the Internet.
 
+## Persistent server lifecycle
+
+Do not run `IELTS_Chatbot_BE.ipynb` on this machine. That notebook is only for
+ephemeral Colab runtimes. A dedicated server installs each component once:
+
+- Ollama and the IELTS model stay under persistent system storage.
+- The Git repository stays at `/opt/ielts-chatbot`.
+- Python packages stay inside `/opt/ielts-chatbot/backend/.venv`.
+- The API token stays in the protected `backend/.env` file.
+- The Cloudflare connector and token stay in the operating-system service.
+
+After the one-time setup, a normal reboot downloads nothing. `systemd` starts
+Ollama, FastAPI and Cloudflare automatically. Ollama reads the existing model
+from disk and loads it into VRAM on warmup or the first chat request.
+
+Only run download/update commands deliberately:
+
+- `git pull` when deploying a new backend commit.
+- `pip install` when Python requirements change.
+- `ollama pull` when installing or changing the LLM model.
+- Cloudflared/Ollama installers when intentionally upgrading those programs.
+
 ## 1. Recommended host setup
 
 - Install Ubuntu 24.04 LTS directly on the machine. Avoid WSL or a desktop
@@ -93,7 +115,7 @@ Create the Python environment with only direct-chat dependencies:
 ```bash
 sudo -u ielts-chatbot python3 -m venv /opt/ielts-chatbot/backend/.venv
 sudo -u ielts-chatbot /opt/ielts-chatbot/backend/.venv/bin/pip install --upgrade pip
-sudo -u ielts-chatbot /opt/ielts-chatbot/backend/.venv/bin/pip install \
+sudo -u ielts-chatbot /opt/ielts-chatbot/backend/.venv/bin/pip install --no-cache-dir \
   -r /opt/ielts-chatbot/backend/requirements-direct.txt
 sudo -u ielts-chatbot cp /opt/ielts-chatbot/backend/.env.server.example \
   /opt/ielts-chatbot/backend/.env
@@ -179,10 +201,12 @@ To update the backend later:
 
 ```bash
 sudo -u ielts-chatbot git -C /opt/ielts-chatbot pull --ff-only
-sudo -u ielts-chatbot /opt/ielts-chatbot/backend/.venv/bin/pip install \
-  -r /opt/ielts-chatbot/backend/requirements-direct.txt
 sudo systemctl restart ielts-chatbot
 ```
+
+Run `pip install --no-cache-dir -r requirements-direct.txt` during an update
+only when a pulled commit changes a requirements file. A routine restart or
+server reboot must not reinstall packages or pull the model again.
 
 ## 6. Optional document stack
 

@@ -96,6 +96,10 @@ current direct-chat deployment with uploads disabled, install
 `requirements-direct.txt` instead. Dedicated Ubuntu/RTX 3060 deployment is
 documented in [`SERVER_DEPLOYMENT.md`](SERVER_DEPLOYMENT.md).
 
+The dedicated server is persistent and does not run the Colab notebook: clone,
+package installation, model pull and tunnel installation are one-time setup
+steps. Normal boots only start the installed operating-system services.
+
 For a local UI, run the separate `ielts-chatbot-fe` repository and point its
 `VITE_CHATBOT_API_URL` at this backend or at a trusted server-side proxy.
 
