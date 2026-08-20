@@ -1,0 +1,10 @@
+.env
+.env.local
+__pycache__/
+*.py[cod]
+.venv/
+backend/data/
+*.log
+.DS_Store
+PROJECT_HANDOFF.md
+Handoff.md

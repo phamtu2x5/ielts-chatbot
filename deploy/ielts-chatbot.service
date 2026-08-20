@@ -1,0 +1,20 @@
+[Unit]
+Description=IELTS Chatbot FastAPI backend
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+
+[Service]
+Type=simple
+User=ielts-chatbot
+Group=ielts-chatbot
+WorkingDirectory=/opt/ielts-chatbot/backend
+EnvironmentFile=/opt/ielts-chatbot/backend/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/ielts-chatbot/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8765 --workers 1 --no-server-header --no-access-log
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
