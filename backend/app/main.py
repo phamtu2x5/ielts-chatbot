@@ -25,7 +25,6 @@ from .document_scope import (
     rank_document_candidates,
     resolve_document_scope,
 )
-from .document_pipeline import DocumentProcessor
 from .intent import (
     dedupe_sources,
     filter_sources_for_intent,
@@ -124,8 +123,13 @@ async def lifespan(_: FastAPI):
             await cleanup_task
 
 UPLOAD_DIR = settings.upload_dir
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-DOCUMENT_PROCESSOR = DocumentProcessor()
+if settings.document_upload_enabled:
+    from .document_pipeline import DocumentProcessor
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    DOCUMENT_PROCESSOR = DocumentProcessor()
+else:
+    DOCUMENT_PROCESSOR = None
 LAST_WARMUP_STATUS: dict[str, Any] | None = None
 CHAT_CONCURRENCY = asyncio.Semaphore(settings.chat_max_concurrency)
 UPLOAD_CONCURRENCY = asyncio.Semaphore(settings.upload_max_concurrency)
@@ -3636,27 +3640,31 @@ async def warmup() -> dict:
     else:
         results["embedding"] = {"skipped": True}
 
-    layout_started = time.perf_counter()
-    try:
-        layout_result = await run_in_threadpool(DOCUMENT_PROCESSOR.warmup_layout)
-        results["layout"] = {
-            "ok": bool(layout_result.get("skipped") or layout_result.get("ok", False)),
-            "duration_seconds": round(time.perf_counter() - layout_started, 2),
-            **layout_result,
-        }
-    except Exception as exc:
-        results["layout"] = {"ok": False, "error": str(exc)}
+    if DOCUMENT_PROCESSOR is None:
+        results["layout"] = {"skipped": True, "reason": "document_upload_disabled"}
+        results["ocr"] = {"skipped": True, "reason": "document_upload_disabled"}
+    else:
+        layout_started = time.perf_counter()
+        try:
+            layout_result = await run_in_threadpool(DOCUMENT_PROCESSOR.warmup_layout)
+            results["layout"] = {
+                "ok": bool(layout_result.get("skipped") or layout_result.get("ok", False)),
+                "duration_seconds": round(time.perf_counter() - layout_started, 2),
+                **layout_result,
+            }
+        except Exception as exc:
+            results["layout"] = {"ok": False, "error": str(exc)}
 
-    ocr_started = time.perf_counter()
-    try:
-        ocr_result = await run_in_threadpool(DOCUMENT_PROCESSOR.warmup_ocr)
-        results["ocr"] = {
-            "ok": bool(ocr_result.get("skipped") or ocr_result.get("models_ready", False)),
-            "duration_seconds": round(time.perf_counter() - ocr_started, 2),
-            **ocr_result,
-        }
-    except Exception as exc:
-        results["ocr"] = {"ok": False, "error": str(exc)}
+        ocr_started = time.perf_counter()
+        try:
+            ocr_result = await run_in_threadpool(DOCUMENT_PROCESSOR.warmup_ocr)
+            results["ocr"] = {
+                "ok": bool(ocr_result.get("skipped") or ocr_result.get("models_ready", False)),
+                "duration_seconds": round(time.perf_counter() - ocr_started, 2),
+                **ocr_result,
+            }
+        except Exception as exc:
+            results["ocr"] = {"ok": False, "error": str(exc)}
 
     ok = all(component.get("ok", True) for component in results.values())
     status = "ok" if ok else "partial"
@@ -4058,6 +4066,8 @@ async def upload_document(
             status_code=503,
             detail="Tính năng tải tài liệu hiện đang tạm tắt.",
         )
+    if DOCUMENT_PROCESSOR is None:
+        raise HTTPException(status_code=503, detail="Bộ xử lý tài liệu chưa được cấu hình.")
 
     upload_started = time.perf_counter()
     upload_timing: dict[str, Any] = {}

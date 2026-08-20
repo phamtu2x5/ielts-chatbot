@@ -91,6 +91,11 @@ pip install -r requirements.txt
 uvicorn app.main:app --host 0.0.0.0 --port 8765 --workers 1
 ```
 
+`requirements.txt` installs the complete optional document stack. For the
+current direct-chat deployment with uploads disabled, install
+`requirements-direct.txt` instead. Dedicated Ubuntu/RTX 3060 deployment is
+documented in [`SERVER_DEPLOYMENT.md`](SERVER_DEPLOYMENT.md).
+
 For a local UI, run the separate `ielts-chatbot-fe` repository and point its
 `VITE_CHATBOT_API_URL` at this backend or at a trusted server-side proxy.
 
@@ -127,6 +132,8 @@ Then run all cells. The current notebook starts Ollama, the FastAPI backend and
 the named tunnel at `https://api.mywsite.online`. Document upload is disabled,
 so BGE-M3, RapidOCR and DocLayout-YOLO are not warmed into RAM/VRAM. The
 notebook does not install or start the frontend and does not run regression.
+With uploads disabled it installs `requirements-direct.txt`, so BGE-M3,
+RapidOCR, DocLayout-YOLO and PyTorch are not downloaded by the notebook.
 
 ## Important Environment Variables
 

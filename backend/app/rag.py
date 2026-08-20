@@ -9,11 +9,10 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Callable, Dict, List, TypeVar
+from typing import Any, Callable, Dict, List, TypeVar
 from uuid import UUID
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 from .config import settings
 from .structured_store import StructuredDocumentStore
@@ -23,6 +22,17 @@ INDEX_PATH = DATA_DIR / "embeddings.npy"
 DOCS_PATH = DATA_DIR / "documents.json"
 
 T = TypeVar("T")
+
+
+def SentenceTransformer(model_name: str) -> Any:
+    try:
+        from sentence_transformers import SentenceTransformer as model_factory
+    except ImportError as exc:
+        raise RuntimeError(
+            "sentence-transformers is required when document retrieval is enabled. "
+            "Install backend/requirements-documents.txt."
+        ) from exc
+    return model_factory(model_name)
 
 
 def synchronized(method: Callable[..., T]) -> Callable[..., T]:
@@ -57,7 +67,7 @@ class LocalVectorStore:
         self._load()
 
     @property
-    def model(self) -> SentenceTransformer:
+    def model(self) -> Any:
         if self._model is None:
             self._model = SentenceTransformer(self.model_name)
         return self._model
@@ -865,7 +875,7 @@ class SessionRagManager:
             raise ValueError("session_id must be a valid UUID.") from exc
 
     @property
-    def model(self) -> SentenceTransformer:
+    def model(self) -> Any:
         if self._model is None:
             with self._embedding_lock:
                 if self._model is None:
